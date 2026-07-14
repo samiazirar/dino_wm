@@ -142,6 +142,8 @@ def test_released_pth_float32_rgb_quantization_is_explicit(tmp_path: Path) -> No
     _make_wall_dataset(tmp_path, episodes=1, frames=2)
     source = tmp_path / "wall_single" / "obses" / "episode_000.pth"
     released = torch.load(source).to(torch.float32)
+    terminal = torch.full_like(released[:1], 200)
+    released = torch.cat((released, terminal), dim=0)
     torch.save(released, source)
     trajectory = enumerate_environment(tmp_path, "wall")[0]
     decoded = decode_trajectory(trajectory)

@@ -345,6 +345,14 @@ def _as_uint8_rgb(frames: Any, trajectory: Trajectory) -> np.ndarray:
                     f"{trajectory.source_relpath}: RGB values outside [0,255]"
                 )
             frames = frames.astype(np.uint8)
+    if (
+        trajectory.source_kind == "wall_pth"
+        and len(frames) == trajectory.frame_count + 1
+    ):
+        # WallDataset defines episode length from actions.shape[1] and indexes
+        # exactly those frames. The released PTH additionally stores the final
+        # post-action observation, which is outside the official model sample.
+        frames = frames[: trajectory.frame_count]
     frames = np.ascontiguousarray(frames)
     if len(frames) != trajectory.frame_count:
         raise ContractError(
@@ -1027,6 +1035,7 @@ class OfficialDA3StreamingProducer:
                 "overlap": OVERLAP,
                 "overlap_policy": "discard_duplicated_tail_no_blend",
                 "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
+                "wall_terminal_observation_policy": "drop_post_action_frame_not_selected_by_WallDataset",
             },
             "official_non_strict_load_audit": {
                 "missing_keys": list(incompatible.missing_keys),
