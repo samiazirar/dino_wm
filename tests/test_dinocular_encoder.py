@@ -19,6 +19,7 @@ from models.dinocular import (
 )
 from models.dinocular_backbone import BackendSpec, build_backbone
 from models.dino import DinoV2Encoder
+from models.vit import ViTPredictor
 
 
 class TinyExactBackbone(nn.Module):
@@ -386,3 +387,52 @@ def test_pinned_dinov2_artifact_shape_and_frozen_eval() -> None:
     with torch.inference_mode():
         output = encoder(torch.zeros(2, 3, 196, 196))
     assert output.shape == (2, 196, 384)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not os.environ.get("DFORMERV2_SUNRGBD_WEIGHTS"),
+    reason="requires CUDA and the pinned public DFormerv2 artifact",
+)
+def test_gpu_minibatch_predictor_step_is_finite() -> None:
+    encoder = DinocularEncoder(
+        backend="dformerv2_stock",
+        factory="DFormerv2_S",
+        checkpoint_path=os.environ["DFORMERV2_SUNRGBD_WEIGHTS"],
+        checkpoint_sha256="ba7b95735a3ee032041da44f1ad1290649df5a204a3561e6592f3357cb9cf1ba",
+        checkpoint_key="state_dict",
+        state_prefix="backbone.",
+        feature_key="x_norm_patchtokens",
+        input_size=224,
+        num_patches=49,
+        emb_dim=512,
+        frozen=True,
+    ).cuda()
+    rgb = torch.zeros(2, 3, 224, 224, device="cuda")
+    depth = torch.full((2, 1, 224, 224), 0.48, device="cuda")
+    with torch.inference_mode():
+        tokens = encoder(rgb, depth=depth)
+    assert tokens.shape == (2, 49, 512)
+    assert encoder.training is False
+
+    predictor = ViTPredictor(
+        num_patches=49,
+        num_frames=1,
+        dim=512,
+        depth=6,
+        heads=16,
+        mlp_dim=2048,
+        dropout=0.1,
+        emb_dropout=0.0,
+        pool="mean",
+    ).cuda()
+    optimizer = torch.optim.AdamW(predictor.parameters(), lr=5e-5)
+    prediction = predictor(tokens.detach())
+    loss = torch.nn.functional.mse_loss(prediction, tokens.detach())
+    assert torch.isfinite(loss)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in predictor.parameters()
+    )
+    optimizer.step()
