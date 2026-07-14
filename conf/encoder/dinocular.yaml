@@ -1,0 +1,33 @@
+_target_: models.dinocular.DinocularEncoder
+name: dformerv2_s_sunrgbd
+backend: dformerv2_stock
+factory: DFormerv2_S
+checkpoint_path: ${oc.env:DFORMERV2_SUNRGBD_WEIGHTS}
+checkpoint_sha256: ba7b95735a3ee032041da44f1ad1290649df5a204a3561e6592f3357cb9cf1ba
+checkpoint_key: state_dict
+state_prefix: backbone.
+feature_key: x_norm_patchtokens
+input_size: 224
+num_patches: 49
+emb_dim: 512
+frozen: true
+depth_mean: 0.48
+depth_std: 0.28
+depth_contract:
+  producer: depth-anything/DA3NESTED-GIANT-LARGE-1.1
+  producer_code_commit: e74fd796e96b7e781a5506fd8503b6bd7232513c
+  producer_weight_sha256: 8ebe871a022ed58d2fc8fdfb2ebdb31d57b60fe39611c849095851a7b7c6020c
+  temporal_mode: complete_trajectory_da3_streaming
+  process_res: 504
+  resize_mode: upper_bound_resize
+  ref_view_strategy: saddle_balanced
+  loop_closure: true
+  chunk_size: 120
+  overlap: 60
+  alignment: dense_confidence_weighted_sim3
+  overlap_output: discard_duplicate_tail
+  raw_units: meters
+  calibration: global_selected_envs_percentile_2_98
+  calibration_scope: fixed_across_all_environments
+  cache_value: clipped_gray_0_1_float16
+  encoder_normalization: (gray-0.48)/0.28
