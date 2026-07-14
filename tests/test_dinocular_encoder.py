@@ -470,7 +470,9 @@ def test_gpu_minibatch_predictor_step_is_finite() -> None:
     depth = torch.full((2, 1, 224, 224), 0.48, device="cuda")
     with torch.inference_mode():
         tokens = encoder(rgb, depth=depth)
+    tokens = tokens.clone()
     assert tokens.shape == (2, 49, 512)
+    assert not torch.is_inference(tokens)
     assert encoder.training is False
 
     predictor = ViTPredictor(
