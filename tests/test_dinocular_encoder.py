@@ -18,6 +18,7 @@ from models.dinocular import (
     sha256_file,
 )
 from models.dinocular_backbone import BackendSpec, build_backbone
+from models.dino import DinoV2Encoder
 
 
 class TinyExactBackbone(nn.Module):
@@ -363,3 +364,25 @@ def test_pinned_public_artifact_strict_load() -> None:
         "pred.decoder.0.bias",
         "pred.decoder.0.weight",
     )
+
+
+@pytest.mark.skipif(
+    not (
+        os.environ.get("DINOV2_REPO")
+        and os.environ.get("DINOV2_VITS14_WEIGHTS")
+    ),
+    reason="set DINOV2_REPO and DINOV2_VITS14_WEIGHTS for the pinned baseline audit",
+)
+def test_pinned_dinov2_artifact_shape_and_frozen_eval() -> None:
+    encoder = DinoV2Encoder(
+        name="dinov2_vits14",
+        feature_key="x_norm_patchtokens",
+        repo_dir=os.environ["DINOV2_REPO"],
+        weights_path=os.environ["DINOV2_VITS14_WEIGHTS"],
+    )
+    encoder.train(True)
+    assert encoder.training is False
+    assert all(not parameter.requires_grad for parameter in encoder.parameters())
+    with torch.inference_mode():
+        output = encoder(torch.zeros(2, 3, 196, 196))
+    assert output.shape == (2, 196, 384)
