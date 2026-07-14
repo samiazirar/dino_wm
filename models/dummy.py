@@ -7,6 +7,8 @@ class DummyModel(nn.Module):
         self.name = "dummy"
         self.latent_ndim = 1
         self.emb_dim = emb_dim
+        self.input_size = 224
+        self.num_patches = 1
         self.fc = nn.Linear(emb_dim, 1)  # not used
 
     def forward(self, x):

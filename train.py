@@ -26,6 +26,16 @@ from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+
+def target_epoch_range(completed_epoch: int, target_total_epochs: int):
+    """Return the remaining 1-indexed epochs for target-total resume semantics."""
+    if completed_epoch < 0:
+        raise ValueError("completed_epoch must be non-negative")
+    if target_total_epochs < 0:
+        raise ValueError("target_total_epochs must be non-negative")
+    return range(completed_epoch + 1, target_total_epochs + 1)
+
+
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -240,13 +250,16 @@ class Trainer:
             self.wandb_run.watch(self.action_encoder)
             self.wandb_run.watch(self.proprio_encoder)
 
-        # initialize predictor
-        if self.encoder.latent_ndim == 1:  # if feature is 1D
-            num_patches = 1
-        else:
-            decoder_scale = 16  # from vqvae
-            num_side_patches = self.cfg.img_size // decoder_scale
-            num_patches = num_side_patches**2
+        # Token geometry is an encoder contract. It must not be inferred from
+        # the world-model image size (DINOv2 has 196 tokens; DFormerv2 has 49).
+        encoder_metadata = self.accelerator.unwrap_model(self.encoder)
+        if not hasattr(encoder_metadata, "num_patches"):
+            raise AttributeError(
+                f"{type(encoder_metadata).__name__} must declare num_patches"
+            )
+        num_patches = int(encoder_metadata.num_patches)
+        if num_patches <= 0:
+            raise ValueError(f"Invalid encoder num_patches: {num_patches}")
 
         if self.cfg.concat_dim == 0:
             num_patches += 2
@@ -368,8 +381,9 @@ class Trainer:
             )
             self.monitor_thread.start()
 
-        init_epoch = self.epoch + 1  # epoch starts from 1
-        for epoch in range(init_epoch, init_epoch + self.total_epochs):
+        # training.epochs is a target-total epoch, including completed epochs.
+        # A checkpoint at epoch 2 resumed with epochs=3 therefore runs only 3.
+        for epoch in target_epoch_range(self.epoch, self.total_epochs):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
             self.train()

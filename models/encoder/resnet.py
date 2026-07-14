@@ -22,6 +22,8 @@ class resnet18(nn.Module):
         self.latent_ndim = 1
         self.emb_dim = 512
         self.name = "resnet"
+        self.input_size = 224
+        self.num_patches = 1
 
     def forward(self, x):
         dims = len(x.shape)

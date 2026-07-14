@@ -1,3 +1,7 @@
 _target_: models.dino.DinoV2Encoder
-name: "dinov2_vits14"
-feature_key: "x_norm_clstoken"
+name: dinov2_vits14
+feature_key: x_norm_clstoken
+repo_dir: ${oc.env:DINOV2_REPO}
+weights_path: ${oc.env:DINOV2_VITS14_WEIGHTS}
+weights_sha256: b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9
+frozen: true

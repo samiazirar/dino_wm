@@ -52,16 +52,16 @@ class VWorldModel(nn.Module):
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 
-        if "dino" in self.encoder.name:
-            decoder_scale = 16  # from vqvae
-            num_side_patches = image_size // decoder_scale
-            self.encoder_image_size = num_side_patches * encoder.patch_size
-            self.encoder_transform = transforms.Compose(
-                [transforms.Resize(self.encoder_image_size)]
+        if not hasattr(self.encoder, "input_size"):
+            raise AttributeError(
+                f"{type(self.encoder).__name__} must declare integer input_size"
             )
-        else:
-            # set self.encoder_transform to identity transform
-            self.encoder_transform = lambda x: x
+        self.encoder_image_size = int(self.encoder.input_size)
+        if self.encoder_image_size <= 0:
+            raise ValueError(f"Invalid encoder input_size: {self.encoder_image_size}")
+        self.encoder_transform = transforms.Resize(
+            (self.encoder_image_size, self.encoder_image_size), antialias=True
+        )
 
         self.decoder_criterion = nn.MSELoss()
         self.decoder_latent_loss_weight = 0.25
@@ -71,12 +71,17 @@ class VWorldModel(nn.Module):
         super().train(mode)
         if self.train_encoder:
             self.encoder.train(mode)
+        else:
+            # nn.Module.train() above recurses into children. Reassert the frozen
+            # encoder invariant after every world-model mode transition.
+            self.encoder.eval()
         if self.predictor is not None and self.train_predictor:
             self.predictor.train(mode)
         self.proprio_encoder.train(mode)
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
+        return self
 
     def eval(self):
         super().eval()
@@ -87,6 +92,7 @@ class VWorldModel(nn.Module):
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
+        return self
 
     def encode(self, obs, act): 
         """
@@ -126,7 +132,20 @@ class VWorldModel(nn.Module):
         b = visual.shape[0]
         visual = rearrange(visual, "b t ... -> (b t) ...")
         visual = self.encoder_transform(visual)
-        visual_embs = self.encoder.forward(visual)
+        depth = obs.get("depth")
+        if depth is None:
+            visual_embs = self.encoder.forward(visual)
+        else:
+            if depth.ndim == 4:
+                depth = depth.unsqueeze(2)
+            if depth.ndim != 5 or depth.shape[2] != 1:
+                raise ValueError(
+                    "obs['depth'] must have shape [B,T,H,W] or [B,T,1,H,W], "
+                    f"got {tuple(depth.shape)}"
+                )
+            depth = rearrange(depth, "b t c h w -> (b t) c h w")
+            depth = self.encoder_transform(depth)
+            visual_embs = self.encoder.forward(visual, depth=depth)
         visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
 
         proprio = obs['proprio']

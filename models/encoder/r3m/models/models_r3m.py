@@ -51,6 +51,8 @@ class R3M(nn.Module):
         self.latent_ndim = 1
         self.emb_dim = 512
         self.name = "r3m"
+        self.input_size = 224
+        self.num_patches = 1
 
         ## Distances and Metrics
         self.cs = torch.nn.CosineSimilarity(1)
