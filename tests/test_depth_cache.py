@@ -138,7 +138,7 @@ def _trajectory(environment: str, split: str, episode: int, frames: int) -> Traj
     )
 
 
-def test_released_pth_float32_rgb_is_exact_integer_encoding(tmp_path: Path) -> None:
+def test_released_pth_float32_rgb_quantization_is_explicit(tmp_path: Path) -> None:
     _make_wall_dataset(tmp_path, episodes=1, frames=2)
     source = tmp_path / "wall_single" / "obses" / "episode_000.pth"
     released = torch.load(source).to(torch.float32)
@@ -150,8 +150,15 @@ def test_released_pth_float32_rgb_is_exact_integer_encoding(tmp_path: Path) -> N
     assert np.all(decoded == 64)
 
     released[0, 0, 0, 0] = 64.5
+    released[0, 1, 0, 0] = 64.49
     torch.save(released, source)
-    with pytest.raises(ContractError, match="must be integer-valued"):
+    decoded = decode_trajectory(trajectory)
+    assert decoded[0, 0, 0, 0] == 65
+    assert decoded[0, 0, 0, 1] == 64
+
+    released[0, 0, 0, 0] = torch.nan
+    torch.save(released, source)
+    with pytest.raises(ContractError, match="must be finite float32"):
         decode_trajectory(trajectory)
 
 

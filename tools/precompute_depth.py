@@ -329,12 +329,12 @@ def _as_uint8_rgb(frames: Any, trajectory: Trajectory) -> np.ndarray:
                 raise ContractError(
                     f"{trajectory.source_relpath}: RGB values outside [0,255]"
                 )
-            rounded = np.rint(frames)
-            if not np.array_equal(frames, rounded):
-                raise ContractError(
-                    f"{trajectory.source_relpath}: released PTH RGB floats must be integer-valued [0,255]"
-                )
-            frames = rounded.astype(np.uint8)
+            # The released Wall/Rope/Granular tensors preserve renderer
+            # antialiasing as continuous float32 values in [0,255].  Official
+            # DA3-Streaming consumes image files, so make the required PNG
+            # quantization explicit and deterministic instead of relying on a
+            # library cast.
+            frames = np.floor(frames + np.float32(0.5)).astype(np.uint8)
         elif not np.issubdtype(frames.dtype, np.integer):
             raise ContractError(
                 f"{trajectory.source_relpath}: source RGB must be integer or released float32 [0,255], got {frames.dtype}"
@@ -1026,6 +1026,7 @@ class OfficialDA3StreamingProducer:
                 "chunk_size": CHUNK_SIZE,
                 "overlap": OVERLAP,
                 "overlap_policy": "discard_duplicated_tail_no_blend",
+                "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
             },
             "official_non_strict_load_audit": {
                 "missing_keys": list(incompatible.missing_keys),
