@@ -1,0 +1,37 @@
+_target_: models.dinocular.DinocularEncoder
+name: dinocular_student_dropout_fullpr
+backend: df2_dino_rope_convs_de
+factory: DFormerv2_S
+checkpoint_path: /home/user/azirar/dinocular-wm-ckpts/dinov2_depthembed_dropout_fullpr.pth
+checkpoint_sha256: decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc
+checkpoint_key: student
+state_prefix: module.backbone.
+allowed_outside_prefixes:
+  - module.dino_head.
+  - module.ibot_head.
+allowed_missing_keys: []
+feature_key: x_norm_patchtokens
+input_size: 224
+num_patches: 49
+emb_dim: 512
+frozen: true
+# Inactive sentinels only: depth_contract_status blocks forward before either
+# value can be used. They are not a substituted depth normalization recipe.
+depth_mean: 0.0
+depth_std: 1.0
+depth_contract_status: missing_from_gate0
+depth_contract:
+  status: missing_from_gate0
+  scientific_use_allowed: false
+  gate0_selection_confidence: high
+  producer: null
+  producer_model: null
+  producer_version: null
+  producer_code_commit: null
+  raw_units: null
+  temporal_mode: null
+  scale: null
+  clipping: null
+  normalization: null
+  preprocessing: null
+  saved_args_depth_path_only: /tmp/newdepth_fp16/

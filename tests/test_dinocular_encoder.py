@@ -25,6 +25,7 @@ from models.vit import ViTPredictor
 class TinyExactBackbone(nn.Module):
     def __init__(self, **_: object) -> None:
         super().__init__()
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, 8))
         self.rgb = nn.Conv2d(3, 8, kernel_size=1)
         self.depth = nn.Conv2d(1, 8, kernel_size=1)
         self.bn = nn.BatchNorm2d(8)
@@ -205,6 +206,64 @@ def test_exact_checkpoint_rejects_undeclared_wrapper_tensors(
             num_patches=1,
             emb_dim=8,
         )
+
+
+def test_reported_target_minus_mask_is_filled_then_strict_loaded(
+    tmp_path: Path, tiny_backend: BackendSpec
+) -> None:
+    source = TinyExactBackbone()
+    state = {
+        f"module.backbone.{key}": tensor.clone()
+        for key, tensor in source.state_dict().items()
+        if key != "mask_token"
+    }
+    path = tmp_path / "target_minus_mask.pth"
+    checksum = _save_checkpoint(path, {"student": state})
+    encoder = DinocularEncoder(
+        backend="tiny_exact",
+        factory="TinyExact",
+        checkpoint_path=str(path),
+        checkpoint_sha256=checksum,
+        checkpoint_key="student",
+        state_prefix="module.backbone.",
+        input_size=32,
+        num_patches=1,
+        emb_dim=8,
+        allowed_missing_keys=["mask_token"],
+    )
+    assert encoder.load_audit.allowed_model_only == ("mask_token",)
+    with pytest.raises(CheckpointLoadError, match="unsupported target-backbone"):
+        load_backbone_checkpoint(
+            TinyExactBackbone(),
+            tiny_backend,
+            path,
+            checksum,
+            checkpoint_key="student",
+            state_prefix="module.backbone.",
+            allowed_missing_keys=["rgb.weight"],
+        )
+
+
+def test_missing_gate0_depth_contract_blocks_forward(
+    tmp_path: Path, tiny_backend: BackendSpec
+) -> None:
+    source = TinyExactBackbone()
+    path = tmp_path / "missing_depth_contract.pth"
+    checksum = _save_checkpoint(path, {"student": source.state_dict()})
+    encoder = DinocularEncoder(
+        backend="tiny_exact",
+        factory="TinyExact",
+        checkpoint_path=str(path),
+        checkpoint_sha256=checksum,
+        checkpoint_key="student",
+        state_prefix="",
+        input_size=32,
+        num_patches=1,
+        emb_dim=8,
+        depth_contract_status="missing_from_gate0",
+    )
+    with pytest.raises(RuntimeError, match="depth contract is missing"):
+        encoder(torch.zeros(1, 3, 32, 32), torch.zeros(1, 1, 32, 32))
 
 
 def test_hash_mismatch_stops_before_deserialization(

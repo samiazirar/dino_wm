@@ -154,6 +154,7 @@ def load_backbone_checkpoint(
     checkpoint_key: Optional[str],
     state_prefix: str,
     allowed_outside_prefixes: Sequence[str] = (),
+    allowed_missing_keys: Sequence[str] = (),
 ) -> LoadAudit:
     """Verify, audit, and strictly load a backbone under its registered policy."""
 
@@ -163,10 +164,10 @@ def load_backbone_checkpoint(
     selected, outside = _select_prefix(state, state_prefix)
 
     if spec.checkpoint_policy == "stock_sunrgbd":
-        if allowed_outside_prefixes:
+        if allowed_outside_prefixes or allowed_missing_keys:
             raise CheckpointLoadError(
-                "Stock SUNRGBD outside-prefix policy is fixed to decode_head.* and "
-                "cannot be widened by configuration"
+                "Stock SUNRGBD checkpoint exceptions are fixed and cannot be "
+                "widened by configuration"
             )
         effective_outside_prefixes = ("decode_head.",)
         mapped, allowed_checkpoint_only = _map_stock_sunrgbd_state(selected)
@@ -186,7 +187,18 @@ def load_backbone_checkpoint(
             )
         mapped = dict(selected)
         allowed_checkpoint_only = ()
-        allowed_model_names: set[str] = set()
+        if any(not isinstance(key, str) or not key for key in allowed_missing_keys):
+            raise CheckpointLoadError(
+                "allowed_missing_keys must contain only non-empty parameter names"
+            )
+        requested_missing = set(allowed_missing_keys)
+        disallowed_requested = sorted(requested_missing - {"mask_token"})
+        if disallowed_requested:
+            raise CheckpointLoadError(
+                "Configuration attempted to permit unsupported target-backbone missing keys: "
+                f"{disallowed_requested}"
+            )
+        allowed_model_names = requested_missing
     else:
         raise CheckpointLoadError(
             f"Unimplemented checkpoint policy {spec.checkpoint_policy!r}"
@@ -274,6 +286,8 @@ class DinocularEncoder(nn.Module):
         depth_std: float = 0.28,
         depth_contract: Optional[Mapping[str, Any]] = None,
         allowed_outside_prefixes: Sequence[str] = (),
+        allowed_missing_keys: Sequence[str] = (),
+        depth_contract_status: str = "complete",
         name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -292,6 +306,12 @@ class DinocularEncoder(nn.Module):
         self.checkpoint_key = checkpoint_key
         self.state_prefix = state_prefix
         self.allowed_outside_prefixes = tuple(allowed_outside_prefixes)
+        self.allowed_missing_keys = tuple(allowed_missing_keys)
+        self.depth_contract_status = str(depth_contract_status)
+        if self.depth_contract_status not in {"complete", "missing_from_gate0"}:
+            raise ValueError(
+                "depth_contract_status must be 'complete' or 'missing_from_gate0'"
+            )
 
         if self.input_size <= 0 or self.input_size % 32 != 0:
             raise ValueError("DFormerv2 input_size must be a positive multiple of stride 32")
@@ -348,6 +368,7 @@ class DinocularEncoder(nn.Module):
             checkpoint_key=self.checkpoint_key,
             state_prefix=self.state_prefix,
             allowed_outside_prefixes=self.allowed_outside_prefixes,
+            allowed_missing_keys=self.allowed_missing_keys,
         )
         for parameter in self.backbone.parameters():
             parameter.requires_grad_(not self.frozen)
@@ -392,6 +413,12 @@ class DinocularEncoder(nn.Module):
         return (depth - mean) / std
 
     def forward(self, rgb: torch.Tensor, depth: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.depth_contract_status != "complete":
+            raise RuntimeError(
+                "Student checkpoint depth contract is missing from Gate 0; forward and "
+                "scientific runs are blocked until producer/model/units/temporal/scale/"
+                "normalization metadata is supplied"
+            )
         if depth is None:
             raise ValueError(
                 "DinocularEncoder requires cached trajectory depth or stateful planning-prefix depth; "
