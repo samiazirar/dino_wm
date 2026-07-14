@@ -15,6 +15,7 @@ from tools.precompute_depth import (
     Trajectory,
     build_environment_cache,
     canonical_json_bytes,
+    decode_trajectory,
     decode_depth_value,
     encode_depth_value,
     enumerate_environment,
@@ -135,6 +136,23 @@ def _trajectory(environment: str, split: str, episode: int, frames: int) -> Traj
         source_kind="test",
         source_sha256=f"{episode:064x}",
     )
+
+
+def test_released_pth_float32_rgb_is_exact_integer_encoding(tmp_path: Path) -> None:
+    _make_wall_dataset(tmp_path, episodes=1, frames=2)
+    source = tmp_path / "wall_single" / "obses" / "episode_000.pth"
+    released = torch.load(source).to(torch.float32)
+    torch.save(released, source)
+    trajectory = enumerate_environment(tmp_path, "wall")[0]
+    decoded = decode_trajectory(trajectory)
+    assert decoded.dtype == np.uint8
+    assert decoded.shape == (2, 32, 48, 3)
+    assert np.all(decoded == 64)
+
+    released[0, 0, 0, 0] = 64.5
+    torch.save(released, source)
+    with pytest.raises(ContractError, match="must be integer-valued"):
+        decode_trajectory(trajectory)
 
 
 def test_streaming_120_60_discards_only_duplicate_tails() -> None:

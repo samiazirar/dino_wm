@@ -320,15 +320,31 @@ def _as_uint8_rgb(frames: Any, trajectory: Trajectory) -> np.ndarray:
         raise ContractError(f"unknown source kind {trajectory.source_kind!r}")
 
     if frames.dtype != np.uint8:
-        if not np.issubdtype(frames.dtype, np.integer):
+        if np.issubdtype(frames.dtype, np.floating):
+            if frames.dtype != np.float32 or not np.isfinite(frames).all():
+                raise ContractError(
+                    f"{trajectory.source_relpath}: released PTH RGB floats must be finite float32"
+                )
+            if frames.size and (frames.min() < 0 or frames.max() > 255):
+                raise ContractError(
+                    f"{trajectory.source_relpath}: RGB values outside [0,255]"
+                )
+            rounded = np.rint(frames)
+            if not np.array_equal(frames, rounded):
+                raise ContractError(
+                    f"{trajectory.source_relpath}: released PTH RGB floats must be integer-valued [0,255]"
+                )
+            frames = rounded.astype(np.uint8)
+        elif not np.issubdtype(frames.dtype, np.integer):
             raise ContractError(
-                f"{trajectory.source_relpath}: source RGB must be integer [0,255], got {frames.dtype}"
+                f"{trajectory.source_relpath}: source RGB must be integer or released float32 [0,255], got {frames.dtype}"
             )
-        if frames.size and (frames.min() < 0 or frames.max() > 255):
-            raise ContractError(
-                f"{trajectory.source_relpath}: RGB values outside [0,255]"
-            )
-        frames = frames.astype(np.uint8)
+        else:
+            if frames.size and (frames.min() < 0 or frames.max() > 255):
+                raise ContractError(
+                    f"{trajectory.source_relpath}: RGB values outside [0,255]"
+                )
+            frames = frames.astype(np.uint8)
     frames = np.ascontiguousarray(frames)
     if len(frames) != trajectory.frame_count:
         raise ContractError(
