@@ -27,6 +27,7 @@ class VWorldModel(nn.Module):
         self.num_hist = num_hist
         self.num_pred = num_pred
         self.encoder = encoder
+        self.encoder_metadata = getattr(self.encoder, "module", self.encoder)
         self.proprio_encoder = proprio_encoder
         self.action_encoder = action_encoder
         self.decoder = decoder  # decoder could be None
@@ -38,7 +39,7 @@ class VWorldModel(nn.Module):
         self.num_proprio_repeat = num_proprio_repeat
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.action_dim = action_dim * num_action_repeat 
-        self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
+        self.emb_dim = self.encoder_metadata.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")
@@ -52,11 +53,12 @@ class VWorldModel(nn.Module):
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 
-        if not hasattr(self.encoder, "input_size"):
+        encoder_metadata = self.encoder_metadata
+        if not hasattr(encoder_metadata, "input_size"):
             raise AttributeError(
-                f"{type(self.encoder).__name__} must declare integer input_size"
+                f"{type(encoder_metadata).__name__} must declare integer input_size"
             )
-        self.encoder_image_size = int(self.encoder.input_size)
+        self.encoder_image_size = int(encoder_metadata.input_size)
         if self.encoder_image_size <= 0:
             raise ValueError(f"Invalid encoder input_size: {self.encoder_image_size}")
         self.encoder_transform = transforms.Resize(

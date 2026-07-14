@@ -28,8 +28,18 @@ class _IdentitySequence(nn.Module):
         return x
 
 
+class _DistributedLikeWrapper(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
 def test_frozen_encoder_stays_eval_and_accepts_optional_depth():
-    encoder = _FrozenEncoder()
+    raw_encoder = _FrozenEncoder()
+    encoder = _DistributedLikeWrapper(raw_encoder)
     model = VWorldModel(
         image_size=16,
         num_hist=1,
@@ -50,7 +60,8 @@ def test_frozen_encoder_stays_eval_and_accepts_optional_depth():
     )
     model.train()
     assert encoder.training is False
-    assert encoder.bn.training is False
+    assert raw_encoder.training is False
+    assert raw_encoder.bn.training is False
 
     obs = {
         "visual": torch.rand(2, 1, 3, 16, 16),
