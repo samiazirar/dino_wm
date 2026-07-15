@@ -389,6 +389,7 @@ def _receipt(**updates):
         "state": "PASS",
         "fresh_model_process": True,
         "process_id": 123,
+        "training_process_id": 456,
         "slurm_job_id": "222",
         "source_commit": "f" * 40,
         "immutable_run_card_sha256": "a" * 64,
@@ -441,6 +442,14 @@ def test_final_fresh_load_receipt_rejects_nonfinite_and_provenance_drift(tmp_pat
     bad["validation_batch"] = dict(bad["validation_batch"], mean_loss=float("inf"))
     with pytest.raises(P3CompletionError, match="validation loss"):
         write_final_receipt(tmp_path / "bad_receipt.json", bad)
+
+
+def test_final_receipt_rejects_equal_training_and_acceptance_process_ids(tmp_path):
+    with pytest.raises(P3CompletionError, match="must differ"):
+        write_final_receipt(
+            tmp_path / "same_process.json",
+            _receipt(process_id=456, training_process_id=456),
+        )
 
 
 def _paired_fixture():
@@ -593,6 +602,7 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         "target_steps": 100,
         "source_commit": "f" * 40,
         "immutable_run_card_sha256": "a" * 64,
+        "training_process_id": 456,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": sha256_file(checkpoint),
         "parameter_sha256": "1" * 64,
@@ -617,10 +627,12 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         "progress_status": "TARGET_REACHED",
         "global_step": 100,
         "immutable_run_card_sha256": "a" * 64,
+        "training_process_id": 456,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": progress["checkpoint_sha256"],
         "final_acceptance_receipt": str(receipt_path),
         "final_acceptance_receipt_sha256": receipt_sha,
+        "final_acceptance_process_id": 123,
     }
     chain = {
         "schema": "dino-wm.p3-slurm-chain.v1",
@@ -634,6 +646,8 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         "jobs": [{"job_id": "111"}, {"job_id": "222"}],
         "events": [event],
         "final_progress": progress,
+        "training_process_id": 456,
+        "final_acceptance_process_id": 123,
         "final_acceptance_receipt": str(receipt_path),
         "final_acceptance_receipt_sha256": receipt_sha,
     }
@@ -660,6 +674,31 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         "container": {"sha256": "c" * 64},
     }
     verify_evaluation_training_dependencies([card], {"p3-pusht-dino_pinned-s1": "222"})
+
+    event["training_process_id"] = 999
+    _write_json(run_dir / "chain.json", chain)
+    with pytest.raises(HarnessError, match="final event differs"):
+        verify_evaluation_training_dependencies(
+            [card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
+    event["training_process_id"] = 456
+
+    equal_pid_receipt = _receipt(
+        checkpoint_sha256=progress["checkpoint_sha256"],
+        process_id=456,
+        training_process_id=456,
+    )
+    equal_pid_receipt_sha = _write_json(receipt_path, equal_pid_receipt)
+    event["final_acceptance_process_id"] = 456
+    event["final_acceptance_receipt_sha256"] = equal_pid_receipt_sha
+    chain["final_acceptance_process_id"] = 456
+    chain["final_acceptance_receipt_sha256"] = equal_pid_receipt_sha
+    _write_json(run_dir / "chain.json", chain)
+    with pytest.raises(HarnessError, match="must differ"):
+        verify_evaluation_training_dependencies(
+            [card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
+
     receipt_path.unlink()
     with pytest.raises(HarnessError, match="final_acceptance"):
         verify_evaluation_training_dependencies(

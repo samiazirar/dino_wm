@@ -19,7 +19,11 @@ sys_path = str(Path(__file__).resolve().parents[1])
 if sys_path not in sys.path:
     sys.path.insert(0, sys_path)
 
-from p3_completion import P3CompletionError, load_final_receipt  # noqa: E402
+from p3_completion import (  # noqa: E402
+    P3CompletionError,
+    is_process_id,
+    load_final_receipt,
+)
 
 try:
     from .harness_common import validate_run_card
@@ -60,6 +64,8 @@ def verify_progress_evidence(manifest: dict, progress: dict) -> Path:
         or progress.get("immutable_run_card_sha256") != expected_run_card_sha256
     ):
         raise RuntimeError("Progress differs from the immutable run card")
+    if not is_process_id(progress.get("training_process_id")):
+        raise RuntimeError("Progress has no valid segment training process ID")
     global_step = int(progress["global_step"])
     checkpoint = Path(str(progress.get("checkpoint"))).resolve()
     expected_directory = Path(manifest["run_dir"]).resolve() / "checkpoints" / "steps"
@@ -247,6 +253,7 @@ def continue_chain(args: argparse.Namespace) -> None:
         "last_step_loss": progress["last_step_loss"],
         "parameter_sha256": progress["parameter_sha256"],
         "immutable_run_card_sha256": progress["immutable_run_card_sha256"],
+        "training_process_id": progress["training_process_id"],
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": progress["checkpoint_sha256"],
     }
@@ -268,6 +275,7 @@ def continue_chain(args: argparse.Namespace) -> None:
                 "container_sha256": manifest["container"]["sha256"],
                 "target_steps": int(manifest["target_steps"]),
                 "global_step": int(manifest["target_steps"]),
+                "training_process_id": progress["training_process_id"],
                 "checkpoint_sha256": progress["checkpoint_sha256"],
                 "parameter_sha256": progress["parameter_sha256"],
                 "optimizer_sha256": progress["optimizer_sha256"],
@@ -319,6 +327,8 @@ def continue_chain(args: argparse.Namespace) -> None:
             event["final_acceptance_receipt"] = str(receipt_path)
             event["final_acceptance_receipt_sha256"] = receipt_sha256
             event["final_acceptance_process_id"] = receipt["process_id"]
+            manifest["training_process_id"] = progress["training_process_id"]
+            manifest["final_acceptance_process_id"] = receipt["process_id"]
             manifest["final_acceptance_receipt"] = str(receipt_path)
             manifest["final_acceptance_receipt_sha256"] = receipt_sha256
         manifest["status"] = "PASSED"

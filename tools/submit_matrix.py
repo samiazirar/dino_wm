@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from p3_completion import P3CompletionError, load_final_receipt
+from p3_completion import P3CompletionError, is_process_id, load_final_receipt
 
 if __package__:
     from .harness_common import (
@@ -272,6 +272,7 @@ def verify_evaluation_training_dependencies(
             or int(progress.get("target_steps", -1)) != target_steps
             or progress.get("source_commit") != card.get("source_commit")
             or progress.get("immutable_run_card_sha256") != expected_run_card_sha256
+            or not is_process_id(progress.get("training_process_id"))
             or checkpoint != expected_checkpoint
             or not checkpoint.is_file()
             or sha256_file(checkpoint) != progress.get("checkpoint_sha256")
@@ -298,6 +299,8 @@ def verify_evaluation_training_dependencies(
             or final_event.get("progress_status") != "TARGET_REACHED"
             or int(final_event.get("global_step", -1)) != target_steps
             or final_event.get("immutable_run_card_sha256") != expected_run_card_sha256
+            or final_event.get("training_process_id")
+            != progress["training_process_id"]
             or Path(str(final_event.get("checkpoint"))).resolve() != checkpoint
             or final_event.get("checkpoint_sha256") != progress.get("checkpoint_sha256")
         ):
@@ -320,6 +323,7 @@ def verify_evaluation_training_dependencies(
                 "container_sha256": card["container"]["sha256"],
                 "target_steps": target_steps,
                 "global_step": target_steps,
+                "training_process_id": progress["training_process_id"],
                 "checkpoint_sha256": progress["checkpoint_sha256"],
                 "parameter_sha256": progress["parameter_sha256"],
                 "optimizer_sha256": progress["optimizer_sha256"],
@@ -361,13 +365,19 @@ def verify_evaluation_training_dependencies(
                 }
             )
             try:
-                _receipt, receipt_path, receipt_sha256 = load_final_receipt(
+                receipt, receipt_path, receipt_sha256 = load_final_receipt(
                     training_run_dir, expected=expected_receipt
                 )
             except P3CompletionError as exc:
                 raise HarnessError(str(exc)) from exc
             if (
                 receipt_path != expected_receipt_path
+                or chain.get("training_process_id")
+                != progress["training_process_id"]
+                or chain.get("final_acceptance_process_id")
+                != receipt["process_id"]
+                or final_event.get("final_acceptance_process_id")
+                != receipt["process_id"]
                 or chain.get("final_acceptance_receipt") != str(receipt_path)
                 or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
                 or final_event.get("final_acceptance_receipt") != str(receipt_path)

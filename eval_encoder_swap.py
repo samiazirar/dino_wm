@@ -15,7 +15,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from p3_completion import P3CompletionError, load_final_receipt
+from p3_completion import P3CompletionError, is_process_id, load_final_receipt
 
 from tools.harness_common import (
     HarnessError,
@@ -387,6 +387,8 @@ def _verify_training_completion(
         raise EvaluationContractError("final training checkpoint hash mismatch")
     if progress.get("source_commit") != card.get("source_commit"):
         raise EvaluationContractError("training/evaluation source commit mismatch")
+    if not is_process_id(progress.get("training_process_id")):
+        raise EvaluationContractError("training progress has no valid process ID")
     if progress.get("immutable_run_card_sha256") != training_card.get(
         "run_card_sha256"
     ):
@@ -427,6 +429,7 @@ def _verify_training_completion(
             "container_sha256": card["container"]["sha256"],
             "target_steps": int(card["target_steps"]),
             "global_step": int(card["target_steps"]),
+            "training_process_id": progress["training_process_id"],
             "checkpoint_sha256": progress["checkpoint_sha256"],
             "parameter_sha256": progress["parameter_sha256"],
             "optimizer_sha256": progress["optimizer_sha256"],
@@ -460,14 +463,20 @@ def _verify_training_completion(
             }
         )
         try:
-            _receipt, receipt_path, receipt_sha256 = load_final_receipt(
+            receipt, receipt_path, receipt_sha256 = load_final_receipt(
                 training_run_dir, expected=expected
             )
         except P3CompletionError as exc:
             raise EvaluationContractError(str(exc)) from exc
         final_event = chain.get("events", [])[-1]
         if (
-            chain.get("final_acceptance_receipt") != str(receipt_path)
+            chain.get("training_process_id") != progress["training_process_id"]
+            or chain.get("final_acceptance_process_id") != receipt["process_id"]
+            or final_event.get("training_process_id")
+            != progress["training_process_id"]
+            or final_event.get("final_acceptance_process_id")
+            != receipt["process_id"]
+            or chain.get("final_acceptance_receipt") != str(receipt_path)
             or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
             or final_event.get("final_acceptance_receipt") != str(receipt_path)
             or final_event.get("final_acceptance_receipt_sha256") != receipt_sha256

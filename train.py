@@ -798,6 +798,7 @@ class Trainer:
             "source_commit": self.source_commit,
             "immutable_run_card_sha256": self.immutable_run_card_sha256,
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+            "training_process_id": os.getpid(),
             "global_step": self.global_step,
             "target_steps": int(self.cfg.training.target_steps),
             "segment_start_step": segment_start,
@@ -1117,6 +1118,7 @@ class Trainer:
         progress_path = Path(self.cfg.saved_folder) / "progress.json"
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
         checkpoint = self._loaded_checkpoint_metadata
+        training_process_id = progress.get("training_process_id")
         if (
             progress.get("status") != "TARGET_REACHED"
             or progress.get("global_step") != target_steps
@@ -1125,6 +1127,10 @@ class Trainer:
             or progress.get("optimizer_sha256") != checkpoint["optimizer_sha256"]
             or progress.get("scheduler_sha256") != checkpoint["scheduler_sha256"]
             or checkpoint.get("sampler") != self._sampler_state()
+            or not isinstance(training_process_id, int)
+            or isinstance(training_process_id, bool)
+            or training_process_id <= 0
+            or training_process_id == os.getpid()
         ):
             raise RuntimeError(
                 "final checkpoint metadata differs from progress/runtime"
@@ -1150,6 +1156,7 @@ class Trainer:
             "state": "PASS",
             "fresh_model_process": True,
             "process_id": os.getpid(),
+            "training_process_id": training_process_id,
             "slurm_job_id": require_job_id(os.environ.get("SLURM_JOB_ID")),
             "source_commit": self.source_commit,
             "immutable_run_card_sha256": self.immutable_run_card_sha256,

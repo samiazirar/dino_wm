@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from p3_completion import (  # noqa: E402
     P3CompletionError,
     comparison_verdict,
+    is_process_id,
     load_checkpoint_history,
     load_final_receipt,
     load_jsonl,
@@ -116,6 +117,7 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         or progress.get("global_step") != target
         or progress.get("target_steps") != target
         or progress.get("immutable_run_card_sha256") != card["run_card_sha256"]
+        or not is_process_id(progress.get("training_process_id"))
         or chain.get("run_card_sha256") != card["run_card_sha256"]
         or chain.get("final_progress") != progress
     ):
@@ -139,6 +141,7 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         "container_sha256": card["container"]["sha256"],
         "target_steps": target,
         "global_step": target,
+        "training_process_id": progress["training_process_id"],
         "checkpoint_sha256": progress["checkpoint_sha256"],
         "parameter_sha256": progress["parameter_sha256"],
         "optimizer_sha256": progress["optimizer_sha256"],
@@ -157,6 +160,10 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
     event = chain.get("events", [])[-1]
     if (
         event.get("job_id") != tail_job
+        or event.get("training_process_id") != progress["training_process_id"]
+        or event.get("final_acceptance_process_id") != receipt["process_id"]
+        or chain.get("training_process_id") != progress["training_process_id"]
+        or chain.get("final_acceptance_process_id") != receipt["process_id"]
         or event.get("final_acceptance_receipt") != str(receipt_path)
         or event.get("final_acceptance_receipt_sha256") != receipt_sha256
         or chain.get("final_acceptance_receipt") != str(receipt_path)
@@ -256,6 +263,8 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         "seed": int(card["seed"]),
         "target_steps": target,
         "tail_job_id": tail_job,
+        "training_process_id": progress["training_process_id"],
+        "final_acceptance_process_id": receipt["process_id"],
         "checkpoint_sha256": progress["checkpoint_sha256"],
         "receipt_sha256": receipt_sha256,
         "dataset_order_sha256": sampler["dataset_order_sha256"],

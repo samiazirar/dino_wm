@@ -62,6 +62,10 @@ def is_source_commit(value: Any) -> bool:
     )
 
 
+def is_process_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def require_job_id(value: Any, label: str = "SLURM job ID") -> str:
     if not isinstance(value, str) or not value.isdigit():
         raise P3CompletionError(f"{label} must be a numeric string")
@@ -891,8 +895,13 @@ def validate_final_receipt(
     ):
         raise P3CompletionError("final acceptance receipt is not a fresh-process PASS")
     pid = receipt.get("process_id")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        raise P3CompletionError("final acceptance process ID is invalid")
+    training_pid = receipt.get("training_process_id")
+    if not is_process_id(pid) or not is_process_id(training_pid):
+        raise P3CompletionError("final acceptance process IDs are invalid")
+    if pid == training_pid:
+        raise P3CompletionError(
+            "final acceptance process ID must differ from training process ID"
+        )
     require_job_id(receipt.get("slurm_job_id"))
     target = receipt.get("target_steps")
     if (

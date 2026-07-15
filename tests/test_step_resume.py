@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import random
 from types import SimpleNamespace
@@ -170,6 +171,7 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
     assert progress["segment_stop_step"] == expected_stop
     assert progress["completed_segment_steps"] == segment_steps
     assert progress["immutable_run_card_sha256"] == immutable_run_card_sha256
+    assert progress["training_process_id"] == os.getpid()
     final_checkpoint = torch.load(
         progress["checkpoint"], map_location="cpu", weights_only=False
     )

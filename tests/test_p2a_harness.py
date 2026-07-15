@@ -850,6 +850,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
         "checkpoint_sha256": sha256_file(checkpoint),
         "source_commit": evaluation_cards[0]["source_commit"],
         "immutable_run_card_sha256": training_card["run_card_sha256"],
+        "training_process_id": 456,
     }
     _write_json(completion_dir / "progress.json", progress)
     _verify_training_completion(evaluation_cards[0], training_card, completion_dir)
@@ -883,6 +884,7 @@ def test_evaluation_execute_requires_passed_chain_tail_dependency(tmp_path):
         "target_steps": target_steps,
         "source_commit": source_commit,
         "immutable_run_card_sha256": run_card_sha256,
+        "training_process_id": 456,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": sha256_file(checkpoint),
         "sampler": {"next_step": target_steps},
@@ -904,6 +906,7 @@ def test_evaluation_execute_requires_passed_chain_tail_dependency(tmp_path):
                 "progress_status": "TARGET_REACHED",
                 "global_step": target_steps,
                 "immutable_run_card_sha256": run_card_sha256,
+                "training_process_id": 456,
                 "checkpoint": str(checkpoint),
                 "checkpoint_sha256": sha256_file(checkpoint),
             }
