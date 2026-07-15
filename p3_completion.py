@@ -166,7 +166,13 @@ def append_jsonl(path: str | Path, value: Mapping[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = canonical_json_bytes(value) + b"\n"
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    flags = os.O_WRONLY | os.O_APPEND
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
+        created = True
+    except FileExistsError:
+        descriptor = os.open(path, flags)
+        created = False
     try:
         written = os.write(descriptor, encoded)
         if written != len(encoded):
@@ -174,7 +180,8 @@ def append_jsonl(path: str | Path, value: Mapping[str, Any]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    _fsync_directory(path.parent)
+    if created:
+        _fsync_directory(path.parent)
 
 
 def percent_step(target_steps: int, percent: int) -> int:

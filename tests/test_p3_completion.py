@@ -415,6 +415,25 @@ def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
     assert len(path.read_text(encoding="utf-8").splitlines()) == 10
 
 
+def test_append_jsonl_fsyncs_directory_only_when_ledger_is_created(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "ledger.jsonl"
+    directories = []
+    original_fsync_directory = p3_completion._fsync_directory
+
+    def tracked_fsync_directory(directory):
+        directories.append(Path(directory))
+        return original_fsync_directory(directory)
+
+    monkeypatch.setattr(p3_completion, "_fsync_directory", tracked_fsync_directory)
+    p3_completion.append_jsonl(path, {"step": 1})
+    assert directories == [tmp_path]
+    p3_completion.append_jsonl(path, {"step": 2})
+    assert directories == [tmp_path]
+    assert p3_completion.load_jsonl(path) == [{"step": 1}, {"step": 2}]
+
+
 def test_training_append_fsyncs_ledger_before_marker_advance(tmp_path, monkeypatch):
     path = tmp_path / "training_steps.jsonl"
     marker_path = p3_completion.training_tail_index_path(path)
@@ -436,7 +455,7 @@ def test_training_append_fsyncs_ledger_before_marker_advance(tmp_path, monkeypat
     append_training_record(path, _training_row(2), target_steps=100)
 
     marker_replace = events.index(("replace", marker_path.name))
-    assert events[:marker_replace] == ["fsync", "fsync", "fsync"]
+    assert events[:marker_replace] == ["fsync", "fsync"]
     assert events[marker_replace + 1 :] == ["fsync"]
 
 
