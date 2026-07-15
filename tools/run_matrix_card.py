@@ -54,6 +54,7 @@ def emit(args: argparse.Namespace) -> None:
         "container": card["container"]["path"],
         "code_root": card["code_root"],
         "run_dir": card["run_dir"],
+        "arm": card["arm"],
     }
     print(values[args.field])
 
@@ -103,7 +104,9 @@ def _prepare_run_dir(card) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, marker_path)
-    if canonical_json_bytes(json.loads(marker_path.read_text(encoding="utf-8"))) != canonical_json_bytes(marker):
+    if canonical_json_bytes(
+        json.loads(marker_path.read_text(encoding="utf-8"))
+    ) != canonical_json_bytes(marker):
         raise HarnessError("evaluation run marker content differs")
     return run_dir
 
@@ -127,7 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.set_defaults(function=verify)
     emit_parser = subparsers.add_parser("emit")
     emit_parser.add_argument("--run-card", type=Path, required=True)
-    emit_parser.add_argument("--field", choices=["container", "code_root", "run_dir"], required=True)
+    emit_parser.add_argument(
+        "--field", choices=["container", "code_root", "run_dir", "arm"], required=True
+    )
     emit_parser.set_defaults(function=emit)
     execute_parser = subparsers.add_parser("execute")
     execute_parser.add_argument("--run-card", type=Path, required=True)

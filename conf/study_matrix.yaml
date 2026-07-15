@@ -117,4 +117,5 @@ source_hash_files:
   - tools/matrix_job.sbatch
   - tools/submit_p3_chain.py
   - tools/p3_step_segment.sbatch
+  - tools/dinocular_container_env.sh
   - training_timing.py

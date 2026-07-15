@@ -20,6 +20,7 @@ PROJECT=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm
 RUNNER=$PROJECT/code/dino_wm/tools/run_matrix_card.py
 python3 "$RUNNER" verify --run-card "$RUN_CARD"
 SIF=$(python3 "$RUNNER" emit --run-card "$RUN_CARD" --field container)
+ARM=$(python3 "$RUNNER" emit --run-card "$RUN_CARD" --field arm)
 CACHE_ROOT=$PROJECT/cache/matrix/$SLURM_JOB_ID
 export TRITON_CACHE_DIR=$CACHE_ROOT/triton
 export XDG_CACHE_HOME=$CACHE_ROOT/xdg
@@ -31,6 +32,8 @@ export TRANSFORMERS_OFFLINE=1
 export WANDB_MODE=disabled
 mkdir -p "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$HF_HOME"
 test -w "$TRITON_CACHE_DIR" -a -w "$XDG_CACHE_HOME" -a -w "$HF_HOME"
+source "$PROJECT/code/dino_wm/tools/dinocular_container_env.sh"
+build_dinocular_container_env "$ARM"
 
 /usr/bin/apptainer exec --nv --writable-tmpfs \
     --bind "$PROJECT:$PROJECT" \
@@ -45,6 +48,7 @@ test -w "$TRITON_CACHE_DIR" -a -w "$XDG_CACHE_HOME" -a -w "$HF_HOME"
     --env HF_HUB_OFFLINE=1 \
     --env TRANSFORMERS_OFFLINE=1 \
     --env WANDB_MODE=disabled \
+    "${DINOCULAR_CONTAINER_ENV[@]}" \
     --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
     "$SIF" \
     python "$RUNNER" execute --run-card "$RUN_CARD"

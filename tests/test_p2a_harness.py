@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -931,6 +932,94 @@ def test_p2_cli_locks_and_actual_gate_modes(tmp_path):
         base[:-1] + ["pusht=5,wall=5,rope=5,granular=5"], capture_output=True, text=True
     )
     assert failed.returncode == 2
+
+
+def test_all_run_card_container_invocations_forward_dinocular_environment():
+    root = Path(__file__).resolve().parents[1]
+    p3_wrapper = (root / "tools/p3_step_segment.sbatch").read_text()
+    matrix_wrapper = (root / "tools/matrix_job.sbatch").read_text()
+    helper_path = "$PROJECT/code/dino_wm/tools/dinocular_container_env.sh"
+    assert f'source "{helper_path}"' in p3_wrapper
+    assert f'source "{helper_path}"' in matrix_wrapper
+    assert p3_wrapper.count('"${DINOCULAR_CONTAINER_ENV[@]}"') == 3
+    geometry_block = p3_wrapper.split("p2-geometry)", 1)[1].split(";;", 1)[0]
+    timing_block = p3_wrapper.split("p2-timing)", 1)[1].split(";;", 1)[0]
+    assert '"${DINOCULAR_CONTAINER_ENV[@]}"' in geometry_block
+    assert '"${DINOCULAR_CONTAINER_ENV[@]}"' in timing_block
+    assert matrix_wrapper.count('"${DINOCULAR_CONTAINER_ENV[@]}"') == 1
+    assert "--field arm" in matrix_wrapper
+
+
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ("DINOCULAR_STUDENT_WEIGHTS", "student weights are required"),
+        ("DINOCULAR_NATIVE_DEPTH_CONTRACT", "native contract is required"),
+        (
+            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256",
+            "native contract hash is required",
+        ),
+        ("DINOCULAR_CACHE_PRODUCER_SHA256", "producer hash is required"),
+    ],
+)
+def test_dinocular_container_environment_fails_closed_when_missing(missing, message):
+    helper = Path(__file__).resolve().parents[1] / "tools/dinocular_container_env.sh"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DINOCULAR_STUDENT_WEIGHTS": "/pinned/student.pth",
+            "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/pinned/native.json",
+            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "a" * 64,
+            "DINOCULAR_CACHE_PRODUCER_SHA256": "b" * 64,
+        }
+    )
+    environment.pop(missing)
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; build_dinocular_container_env dinocular',
+            "bash",
+            str(helper),
+        ],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+def test_dinocular_container_environment_contains_exact_required_values():
+    helper = Path(__file__).resolve().parents[1] / "tools/dinocular_container_env.sh"
+    environment = os.environ.copy()
+    expected = {
+        "DINOCULAR_STUDENT_WEIGHTS": "/pinned/student.pth",
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/pinned/native.json",
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "a" * 64,
+        "DINOCULAR_CACHE_PRODUCER_SHA256": "b" * 64,
+    }
+    environment.update(expected)
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; build_dinocular_container_env dinocular; '
+                'printf "%s\\n" "${DINOCULAR_CONTAINER_ENV[@]}"'
+            ),
+            "bash",
+            str(helper),
+        ],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout.splitlines() == [
+        value for key, path in expected.items() for value in ("--env", f"{key}={path}")
+    ]
 
 
 TIMING_WINDOWS = {

@@ -78,19 +78,8 @@ export STRICT_P2_SLURM_WRAPPER=$PROJECT/code/dino_wm/tools/p3_step_segment.sbatc
 export STRICT_P2_IMMUTABLE_RUN_CARD=$RUN_CARD
 export STRICT_P2_IMMUTABLE_RUN_CARD_SHA256=$RUN_CARD_SHA256
 
-DINOCULAR_CONTAINER_ENV=(
-    --env DINOCULAR_STUDENT_WEIGHTS="$DINOCULAR_STUDENT_WEIGHTS"
-)
-if [[ "$P2_ARM" == "dinocular" || "$P2_ARM" == "dinocular_zerodepth" ]]; then
-    : "${DINOCULAR_NATIVE_DEPTH_CONTRACT:?DINOcular native contract is required}"
-    : "${DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256:?DINOcular native contract hash is required}"
-    : "${DINOCULAR_CACHE_PRODUCER_SHA256:?DINOcular producer hash is required}"
-    DINOCULAR_CONTAINER_ENV+=(
-        --env DINOCULAR_NATIVE_DEPTH_CONTRACT="$DINOCULAR_NATIVE_DEPTH_CONTRACT"
-        --env DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256="$DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256"
-        --env DINOCULAR_CACHE_PRODUCER_SHA256="$DINOCULAR_CACHE_PRODUCER_SHA256"
-    )
-fi
+source "$PROJECT/code/dino_wm/tools/dinocular_container_env.sh"
+build_dinocular_container_env "$P2_ARM"
 
 nvidia-smi
 sha256sum "$SIF"
@@ -150,6 +139,7 @@ case "$RUN_KIND" in
             --env DATASET_DIR="$PROJECT/data/raw" \
             --env DINOV2_REPO="$PROJECT/code/dinov2" \
             --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
+            "${DINOCULAR_CONTAINER_ENV[@]}" \
             "$SIF" python "$PROJECT/code/dino_wm/tools/p2_harness_gate.py" geometry \
             --run-card "$RUN_CARD" --run-dir "$RUN_DIR"
         ;;
@@ -157,6 +147,7 @@ case "$RUN_KIND" in
         /usr/bin/apptainer exec --nv --writable-tmpfs \
             --bind "$PROJECT:$PROJECT" \
             --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+            "${DINOCULAR_CONTAINER_ENV[@]}" \
             "$SIF" python "$PROJECT/code/dino_wm/tools/p2_harness_gate.py" timing \
             --run-card "$RUN_CARD" --run-dir "$RUN_DIR"
         ;;
