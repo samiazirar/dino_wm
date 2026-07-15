@@ -640,6 +640,8 @@ class Trainer:
                 immutable_run_card_sha256=self.immutable_run_card_sha256,
                 dataset_order_sha256=self.dataset_order_sha256,
                 target_steps=int(self.cfg.training.target_steps),
+                expected_dataset_size=len(self.datasets["train"]),
+                expected_batch_size=int(self.cfg.gpu_batch_size),
             )
             validate_validation_records(
                 validation_rows,
@@ -663,6 +665,8 @@ class Trainer:
                 immutable_run_card_sha256=self.immutable_run_card_sha256,
                 dataset_order_sha256=self.dataset_order_sha256,
                 config_sha256=self.p3_run_card["config_sha256"],
+                dataset_size=len(self.datasets["train"]),
+                batch_size=int(self.cfg.gpu_batch_size),
                 target_steps=int(self.cfg.training.target_steps),
             )
         except P3CompletionError as exc:
@@ -1123,6 +1127,8 @@ class Trainer:
             immutable_run_card_sha256=self.immutable_run_card_sha256,
             dataset_order_sha256=self.dataset_order_sha256,
             target_steps=target_steps,
+            expected_dataset_size=len(self.datasets["train"]),
+            expected_batch_size=int(self.cfg.gpu_batch_size),
             require_complete=True,
         )
         validate_validation_records(

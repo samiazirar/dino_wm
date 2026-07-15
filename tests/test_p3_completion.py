@@ -196,6 +196,11 @@ def test_heldout_manifest_is_all_validation_fixed_and_rejects_leakage(tmp_path):
 
 
 def _training_row(step: int, *, source="f" * 40):
+    dataset_size = 10
+    batch_size = 4
+    steps_per_epoch = 3
+    completed_epochs = step // steps_per_epoch
+    next_batch = step % steps_per_epoch
     return {
         "schema": TRAINING_RECORD_SCHEMA,
         "source_commit": source,
@@ -203,8 +208,17 @@ def _training_row(step: int, *, source="f" * 40):
         "dataset_order_sha256": "b" * 64,
         "config_sha256": "c" * 64,
         "global_step": step,
-        "completed_epochs": 0,
-        "sampler": {"next_step": step},
+        "completed_epochs": completed_epochs,
+        "sampler": {
+            "dataset_size": dataset_size,
+            "batch_size": batch_size,
+            "steps_per_epoch": steps_per_epoch,
+            "next_step": step,
+            "completed_epochs": completed_epochs,
+            "next_batch_in_epoch": next_batch,
+            "next_sample_in_epoch": min(next_batch * batch_size, dataset_size),
+            "dataset_order_sha256": "b" * 64,
+        },
         "loss": 1.0 / step,
         "parameter_sha256": "d" * 64,
         "optimizer_sha256": "e" * 64,
@@ -217,6 +231,14 @@ def _training_row(step: int, *, source="f" * 40):
             "history_record_sha256": "3" * 64,
         },
     }
+
+
+def _rehash_evidence_rows(rows):
+    prior = None
+    for row in rows:
+        row["previous_record_sha256"] = prior
+        row["record_sha256"] = p3_completion._record_digest(row)
+        prior = row["record_sha256"]
 
 
 def test_training_ledger_is_exactly_once_and_rejects_gap_duplicate_or_drift(tmp_path):
@@ -260,6 +282,49 @@ def test_training_ledger_is_exactly_once_and_rejects_gap_duplicate_or_drift(tmp_
             dataset_order_sha256="b" * 64,
             target_steps=100,
             require_complete=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("completed_epochs",), 9, "epoch or sampler cursor differs"),
+        (("completed_epochs",), False, "epoch or sampler cursor differs"),
+        (("sampler", "completed_epochs"), 9, "epoch or sampler cursor differs"),
+        (("sampler", "steps_per_epoch"), 4, "dataset geometry differs"),
+        (("sampler", "next_batch_in_epoch"), 0, "epoch or sampler cursor differs"),
+        (("sampler", "next_sample_in_epoch"), 0, "epoch or sampler cursor differs"),
+        (
+            ("sampler", "dataset_order_sha256"),
+            "0" * 64,
+            "epoch or sampler cursor differs",
+        ),
+        (("sampler", "dataset_size"), 11, "dataset geometry differs"),
+        (("sampler", "batch_size"), 5, "dataset geometry differs"),
+    ],
+)
+def test_training_ledger_rejects_rehashed_epoch_cursor_and_geometry_drift(
+    tmp_path, path, value, message
+):
+    ledger_path = tmp_path / "training_steps.jsonl"
+    append_training_record(ledger_path, _training_row(1), target_steps=100)
+    append_training_record(ledger_path, _training_row(2), target_steps=100)
+    rows = copy.deepcopy(p3_completion.load_jsonl(ledger_path))
+    target = rows[1]
+    for field in path[:-1]:
+        target = target[field]
+    target[path[-1]] = value
+    _rehash_evidence_rows(rows)
+
+    with pytest.raises(P3CompletionError, match=message):
+        validate_training_records(
+            rows,
+            source_commit="f" * 40,
+            immutable_run_card_sha256="a" * 64,
+            dataset_order_sha256="b" * 64,
+            target_steps=100,
+            expected_dataset_size=10,
+            expected_batch_size=4,
         )
 
 
@@ -369,6 +434,8 @@ def test_training_tail_marker_recovers_only_from_full_validated_scan(
         "immutable_run_card_sha256": "a" * 64,
         "dataset_order_sha256": "b" * 64,
         "config_sha256": "c" * 64,
+        "dataset_size": 10,
+        "batch_size": 4,
         "target_steps": 100,
     }
     with pytest.raises(P3CompletionError, match="record hash differs"):
@@ -560,6 +627,36 @@ def test_validation_resume_coverage_and_inconclusive(tmp_path):
     with pytest.raises(P3CompletionError, match="finite JSON"):
         append_validation_record(bad_path, nonfinite, target_steps=100)
     assert not bad_path.exists()
+
+
+def test_validation_ledger_rejects_rehashed_state_and_percent_order_drift(tmp_path):
+    path = tmp_path / "heldout_loss.jsonl"
+    for percent in range(1, 4):
+        append_validation_record(
+            path, _validation_row(percent, 1.0), target_steps=100
+        )
+    rows = p3_completion.load_jsonl(path)
+
+    unrestored = copy.deepcopy(rows)
+    unrestored[1]["state_restored"] = False
+    _rehash_evidence_rows(unrestored)
+    with pytest.raises(P3CompletionError, match="did not restore exact state"):
+        validate_validation_records(
+            unrestored,
+            target_steps=100,
+            immutable_run_card_sha256="4" * 64,
+            manifest_sha256="1" * 64,
+        )
+
+    reordered = [copy.deepcopy(rows[1]), copy.deepcopy(rows[0]), copy.deepcopy(rows[2])]
+    _rehash_evidence_rows(reordered)
+    with pytest.raises(P3CompletionError, match="canonical percent order"):
+        validate_validation_records(
+            reordered,
+            target_steps=100,
+            immutable_run_card_sha256="4" * 64,
+            manifest_sha256="1" * 64,
+        )
 
 
 def test_plateau_exact_boundary_is_inclusive():

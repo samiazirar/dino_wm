@@ -193,6 +193,8 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         immutable_run_card_sha256=card["run_card_sha256"],
         dataset_order_sha256=sampler["dataset_order_sha256"],
         target_steps=target,
+        expected_dataset_size=int(sampler["dataset_size"]),
+        expected_batch_size=int(card["batch_size"]),
         require_complete=True,
     )
     verify_training_tail_index(
@@ -202,6 +204,8 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         immutable_run_card_sha256=card["run_card_sha256"],
         dataset_order_sha256=sampler["dataset_order_sha256"],
         config_sha256=card["config_sha256"],
+        dataset_size=int(sampler["dataset_size"]),
+        batch_size=int(card["batch_size"]),
         target_steps=target,
     )
     if any(row.get("config_sha256") != card["config_sha256"] for row in training_rows):

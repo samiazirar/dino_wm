@@ -13,7 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 CHECKPOINT_HISTORY_SCHEMA = "dino-wm.step-checkpoint-history.v1"
 TRAINING_RECORD_SCHEMA = "dino-wm.p3-training-step.v1"
-TRAINING_TAIL_INDEX_SCHEMA = "dino-wm.p3-training-tail-index.v2"
+TRAINING_TAIL_INDEX_SCHEMA = "dino-wm.p3-training-tail-index.v3"
 VALIDATION_RECORD_SCHEMA = "dino-wm.p3-heldout-loss.v1"
 HELDOUT_ENTRY_SCHEMA = "dino-wm.p3-heldout-example.v1"
 HELDOUT_METADATA_SCHEMA = "dino-wm.p3-heldout-manifest.v1"
@@ -425,6 +425,79 @@ def _stable_training_record(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return result
 
 
+_TRAINING_SAMPLER_FIELDS = frozenset(
+    {
+        "dataset_size",
+        "batch_size",
+        "steps_per_epoch",
+        "next_step",
+        "completed_epochs",
+        "next_batch_in_epoch",
+        "next_sample_in_epoch",
+        "dataset_order_sha256",
+    }
+)
+
+
+def _validate_training_cursor(
+    row: Mapping[str, Any],
+    *,
+    step: int,
+    dataset_order_sha256: str,
+    expected_dataset_size: int | None = None,
+    expected_batch_size: int | None = None,
+) -> tuple[int, int, int]:
+    sampler = row.get("sampler")
+    if not isinstance(sampler, Mapping) or set(sampler) != _TRAINING_SAMPLER_FIELDS:
+        raise P3CompletionError("training ledger sampler fields differ")
+    dataset_size = sampler.get("dataset_size")
+    batch_size = sampler.get("batch_size")
+    steps_per_epoch = sampler.get("steps_per_epoch")
+    if (
+        not isinstance(dataset_size, int)
+        or isinstance(dataset_size, bool)
+        or dataset_size <= 0
+        or not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size <= 0
+        or not isinstance(steps_per_epoch, int)
+        or isinstance(steps_per_epoch, bool)
+        or steps_per_epoch != (dataset_size + batch_size - 1) // batch_size
+        or (
+            expected_dataset_size is not None
+            and dataset_size != expected_dataset_size
+        )
+        or (
+            expected_batch_size is not None and batch_size != expected_batch_size
+        )
+    ):
+        raise P3CompletionError("training ledger dataset geometry differs")
+    completed_epochs = step // steps_per_epoch
+    next_batch = step % steps_per_epoch
+    next_sample = min(next_batch * batch_size, dataset_size)
+    cursor_values = (
+        row.get("completed_epochs"),
+        sampler.get("next_step"),
+        sampler.get("completed_epochs"),
+        sampler.get("next_batch_in_epoch"),
+        sampler.get("next_sample_in_epoch"),
+    )
+    if (
+        any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in cursor_values
+        )
+        or row.get("completed_epochs") != completed_epochs
+        or sampler.get("next_step") != step
+        or sampler.get("completed_epochs") != completed_epochs
+        or sampler.get("next_batch_in_epoch") != next_batch
+        or sampler.get("next_sample_in_epoch") != next_sample
+        or sampler.get("dataset_order_sha256") != dataset_order_sha256
+    ):
+        raise P3CompletionError("training ledger epoch or sampler cursor differs")
+    return dataset_size, batch_size, steps_per_epoch
+
+
 def validate_training_records(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -432,13 +505,28 @@ def validate_training_records(
     immutable_run_card_sha256: str,
     dataset_order_sha256: str,
     target_steps: int,
+    expected_dataset_size: int | None = None,
+    expected_batch_size: int | None = None,
     require_complete: bool = False,
 ) -> None:
+    if (expected_dataset_size is None) != (expected_batch_size is None):
+        raise P3CompletionError("training ledger expected geometry is incomplete")
+    if expected_dataset_size is not None and (
+        not isinstance(expected_dataset_size, int)
+        or isinstance(expected_dataset_size, bool)
+        or expected_dataset_size <= 0
+        or not isinstance(expected_batch_size, int)
+        or isinstance(expected_batch_size, bool)
+        or expected_batch_size <= 0
+    ):
+        raise P3CompletionError("training ledger expected geometry is invalid")
     prior = None
     seen = set()
     expected_next = 1
     percent_steps = set(percent_step_map(target_steps).values())
     config_sha256 = rows[0].get("config_sha256") if rows else None
+    dataset_size = expected_dataset_size
+    batch_size = expected_batch_size
     for row in rows:
         if row.get("schema") != TRAINING_RECORD_SCHEMA:
             raise P3CompletionError("training ledger has an unknown schema")
@@ -465,9 +553,17 @@ def validate_training_records(
         ):
             raise P3CompletionError("training ledger contains nonfinite loss")
         require_job_id(row.get("slurm_job_id"))
-        sampler = row.get("sampler")
-        if not isinstance(sampler, Mapping) or sampler.get("next_step") != step:
-            raise P3CompletionError("training ledger sampler cursor differs")
+        row_dataset_size, row_batch_size, _steps_per_epoch = (
+            _validate_training_cursor(
+                row,
+                step=step,
+                dataset_order_sha256=dataset_order_sha256,
+                expected_dataset_size=dataset_size,
+                expected_batch_size=batch_size,
+            )
+        )
+        dataset_size = row_dataset_size
+        batch_size = row_batch_size
         _validate_checkpoint_reference(row.get("checkpoint"), global_step=step)
         if step in percent_steps and row["checkpoint"]["step"] != step:
             raise P3CompletionError("percent training step lacks its exact checkpoint")
@@ -499,6 +595,8 @@ def _training_tail_index_record(
     immutable_run_card_sha256: str,
     dataset_order_sha256: str,
     config_sha256: str,
+    dataset_size: int,
+    batch_size: int,
     target_steps: int,
 ) -> Mapping[str, Any]:
     size = path.stat().st_size if path.exists() else 0
@@ -528,6 +626,10 @@ def _training_tail_index_record(
         "immutable_run_card_sha256": immutable_run_card_sha256,
         "dataset_order_sha256": dataset_order_sha256,
         "config_sha256": config_sha256,
+        "dataset_size": int(dataset_size),
+        "batch_size": int(batch_size),
+        "steps_per_epoch": (int(dataset_size) + int(batch_size) - 1)
+        // int(batch_size),
         "target_steps": int(target_steps),
     }
 
@@ -540,6 +642,8 @@ def initialize_training_tail_index(
     immutable_run_card_sha256: str,
     dataset_order_sha256: str,
     config_sha256: str,
+    dataset_size: int,
+    batch_size: int,
     target_steps: int,
 ) -> Mapping[str, Any]:
     """Full-validate a scanned ledger, then atomically rebuild its O(1) marker."""
@@ -550,6 +654,8 @@ def initialize_training_tail_index(
         immutable_run_card_sha256=immutable_run_card_sha256,
         dataset_order_sha256=dataset_order_sha256,
         target_steps=target_steps,
+        expected_dataset_size=dataset_size,
+        expected_batch_size=batch_size,
     )
     if rows and rows[0].get("config_sha256") != config_sha256:
         raise P3CompletionError("training tail index configuration drift")
@@ -560,6 +666,8 @@ def initialize_training_tail_index(
         immutable_run_card_sha256=immutable_run_card_sha256,
         dataset_order_sha256=dataset_order_sha256,
         config_sha256=config_sha256,
+        dataset_size=dataset_size,
+        batch_size=batch_size,
         target_steps=target_steps,
     )
     atomic_write_json(training_tail_index_path(path), record)
@@ -574,6 +682,8 @@ def verify_training_tail_index(
     immutable_run_card_sha256: str,
     dataset_order_sha256: str,
     config_sha256: str,
+    dataset_size: int,
+    batch_size: int,
     target_steps: int,
 ) -> Mapping[str, Any]:
     """Bind a fully scanned ledger to its atomic tail marker."""
@@ -588,6 +698,8 @@ def verify_training_tail_index(
         immutable_run_card_sha256=immutable_run_card_sha256,
         dataset_order_sha256=dataset_order_sha256,
         config_sha256=config_sha256,
+        dataset_size=dataset_size,
+        batch_size=batch_size,
         target_steps=target_steps,
     )
     if actual != expected:
@@ -606,6 +718,9 @@ def _load_incremental_training_tail_index(
     tail_offset = index.get("tail_offset_bytes")
     tail_size = index.get("tail_size_bytes")
     tail_line_sha256 = index.get("tail_line_sha256")
+    dataset_size = index.get("dataset_size")
+    batch_size = index.get("batch_size")
+    steps_per_epoch = index.get("steps_per_epoch")
     if (
         index.get("schema") != TRAINING_TAIL_INDEX_SCHEMA
         or index.get("ledger_path") != str(path.resolve())
@@ -619,6 +734,15 @@ def _load_incremental_training_tail_index(
         or not isinstance(ledger_size, int)
         or isinstance(ledger_size, bool)
         or ledger_size < 0
+        or not isinstance(dataset_size, int)
+        or isinstance(dataset_size, bool)
+        or dataset_size <= 0
+        or not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size <= 0
+        or not isinstance(steps_per_epoch, int)
+        or isinstance(steps_per_epoch, bool)
+        or steps_per_epoch != (dataset_size + batch_size - 1) // batch_size
         or (tail is not None and not is_sha256(tail))
         or (tail_line_sha256 is not None and not is_sha256(tail_line_sha256))
         or (record_count == 0) != (tail is None)
@@ -683,6 +807,13 @@ def _load_incremental_training_tail_index(
                 raise P3CompletionError(
                     "training ledger tail has immutable provenance drift"
                 )
+        _validate_training_cursor(
+            tail_row,
+            step=record_count,
+            dataset_order_sha256=str(index["dataset_order_sha256"]),
+            expected_dataset_size=dataset_size,
+            expected_batch_size=batch_size,
+        )
     return index
 
 
@@ -719,6 +850,13 @@ def _validate_new_training_record(
     ):
         if value.get(field) != provenance.get(field):
             raise P3CompletionError("new training record has provenance drift")
+    _validate_training_cursor(
+        value,
+        step=step,
+        dataset_order_sha256=str(provenance["dataset_order_sha256"]),
+        expected_dataset_size=provenance.get("dataset_size"),
+        expected_batch_size=provenance.get("batch_size"),
+    )
     if not isinstance(value.get("loss"), (int, float)) or not math.isfinite(
         float(value["loss"])
     ):
@@ -760,6 +898,11 @@ def append_training_record(
                 "config_sha256",
             )
         }
+        sampler = value.get("sampler")
+        if not isinstance(sampler, Mapping):
+            raise P3CompletionError("new training record sampler is absent")
+        provenance["dataset_size"] = sampler.get("dataset_size")
+        provenance["batch_size"] = sampler.get("batch_size")
         _validate_new_training_record(
             value, target_steps=target_steps, provenance=provenance
         )
@@ -770,6 +913,8 @@ def append_training_record(
             immutable_run_card_sha256=str(value["immutable_run_card_sha256"]),
             dataset_order_sha256=str(value["dataset_order_sha256"]),
             config_sha256=str(value["config_sha256"]),
+            dataset_size=int(provenance["dataset_size"]),
+            batch_size=int(provenance["batch_size"]),
             target_steps=target_steps,
         )
     index = _load_incremental_training_tail_index(
@@ -782,6 +927,8 @@ def append_training_record(
             "immutable_run_card_sha256",
             "dataset_order_sha256",
             "config_sha256",
+            "dataset_size",
+            "batch_size",
         )
     }
     step = _validate_new_training_record(
@@ -796,6 +943,8 @@ def append_training_record(
             immutable_run_card_sha256=str(index["immutable_run_card_sha256"]),
             dataset_order_sha256=str(index["dataset_order_sha256"]),
             target_steps=target_steps,
+            expected_dataset_size=int(index["dataset_size"]),
+            expected_batch_size=int(index["batch_size"]),
         )
         verify_training_tail_index(
             path,
@@ -804,6 +953,8 @@ def append_training_record(
             immutable_run_card_sha256=str(index["immutable_run_card_sha256"]),
             dataset_order_sha256=str(index["dataset_order_sha256"]),
             config_sha256=str(index["config_sha256"]),
+            dataset_size=int(index["dataset_size"]),
+            batch_size=int(index["batch_size"]),
             target_steps=target_steps,
         )
         if step < 1 or step > len(rows):
@@ -1056,6 +1207,7 @@ def validate_validation_records(
 ) -> None:
     mapping = percent_step_map(target_steps)
     seen = set()
+    expected_percent = 1
     prior = None
     immutable_fields = (
         "source_commit",
@@ -1086,7 +1238,12 @@ def validate_validation_records(
             raise P3CompletionError("held-out loss ledger has an invalid percent")
         if percent in seen:
             raise P3CompletionError("held-out loss ledger duplicates a percent")
+        if percent != expected_percent:
+            raise P3CompletionError(
+                "held-out loss ledger is not in canonical percent order"
+            )
         seen.add(percent)
+        expected_percent += 1
         if row.get("global_step") != mapping[percent]:
             raise P3CompletionError(
                 "held-out loss uses the wrong percent-to-step mapping"
@@ -1098,6 +1255,8 @@ def validate_validation_records(
             raise P3CompletionError("held-out loss provenance drift")
         if any(row.get(field) != immutable[field] for field in immutable_fields):
             raise P3CompletionError("held-out loss immutable provenance drift")
+        if row.get("state_restored") is not True:
+            raise P3CompletionError("held-out loss did not restore exact state")
         numerator = row.get("loss_numerator")
         count = row.get("element_count")
         mean = row.get("mean_loss")
