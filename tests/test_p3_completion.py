@@ -24,6 +24,7 @@ from p3_completion import (
     percent_step_map,
     plateau_verdict,
     sha256_file,
+    validate_checkpoint_evidence_bindings,
     validate_training_records,
     validate_validation_records,
     write_final_receipt,
@@ -201,6 +202,63 @@ def test_training_ledger_is_exactly_once_and_rejects_gap_duplicate_or_drift(tmp_
             dataset_order_sha256="b" * 64,
             target_steps=100,
             require_complete=True,
+        )
+
+
+def test_ledgers_resolve_exact_checkpoint_history_records(tmp_path):
+    manager = StepCheckpointManager(tmp_path / "steps")
+    checkpoint_path, checkpoint_sha256 = manager.save(
+        {
+            "schema": CHECKPOINT_SCHEMA,
+            "global_step": 1,
+            "source_commit": "f" * 40,
+            "immutable_run_card_sha256": "a" * 64,
+            "dataset_order_sha256": "b" * 64,
+        },
+        1,
+        reasons=("INTEGER_PERCENT",),
+    )
+    history = load_checkpoint_history(manager.history_path)
+    training = _training_row(1)
+    training["checkpoint"] = {
+        "step": 1,
+        "path": str(checkpoint_path),
+        "checkpoint_sha256": checkpoint_sha256,
+        "history_record_sha256": history[0]["record_sha256"],
+    }
+    training_path = tmp_path / "training.jsonl"
+    append_training_record(training_path, training, target_steps=100)
+    training_rows = [
+        json.loads(line) for line in training_path.read_text().splitlines()
+    ]
+    validation = _validation_row(1, 1.0)
+    validation["checkpoint_sha256"] = checkpoint_sha256
+    validation["checkpoint_history_record_sha256"] = history[0]["record_sha256"]
+    validation_path = tmp_path / "validation.jsonl"
+    append_validation_record(validation_path, validation, target_steps=100)
+    validation_rows = [
+        json.loads(line) for line in validation_path.read_text().splitlines()
+    ]
+    validate_checkpoint_evidence_bindings(
+        history,
+        directory=manager.directory,
+        source_commit="f" * 40,
+        immutable_run_card_sha256="a" * 64,
+        dataset_order_sha256="b" * 64,
+        training_rows=training_rows,
+        validation_rows=validation_rows,
+    )
+    changed = [dict(training_rows[0])]
+    changed[0]["checkpoint"] = dict(changed[0]["checkpoint"])
+    changed[0]["checkpoint"]["history_record_sha256"] = "0" * 64
+    with pytest.raises(P3CompletionError, match="unknown checkpoint history"):
+        validate_checkpoint_evidence_bindings(
+            history,
+            directory=manager.directory,
+            source_commit="f" * 40,
+            immutable_run_card_sha256="a" * 64,
+            dataset_order_sha256="b" * 64,
+            training_rows=changed,
         )
 
 

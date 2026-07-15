@@ -308,6 +308,80 @@ def checkpoint_reference(
     }
 
 
+def validate_checkpoint_evidence_bindings(
+    history: Sequence[Mapping[str, Any]],
+    *,
+    directory: str | Path,
+    source_commit: str,
+    immutable_run_card_sha256: str,
+    dataset_order_sha256: str,
+    training_rows: Sequence[Mapping[str, Any]] = (),
+    validation_rows: Sequence[Mapping[str, Any]] = (),
+    final_receipt: Mapping[str, Any] | None = None,
+) -> None:
+    by_record_sha256 = {record["record_sha256"]: record for record in history}
+    if len(by_record_sha256) != len(history):
+        raise P3CompletionError("checkpoint history duplicates a record hash")
+    for record in history:
+        if (
+            record.get("source_commit") != source_commit
+            or record.get("immutable_run_card_sha256") != immutable_run_card_sha256
+            or record.get("dataset_order_sha256") != dataset_order_sha256
+        ):
+            raise P3CompletionError("checkpoint history provenance drift")
+
+    directory = Path(directory).resolve()
+
+    def resolve_reference(
+        history_record_sha256: Any,
+        checkpoint_sha256: Any,
+        *,
+        expected_step: int,
+        expected_path: Any = None,
+    ) -> Mapping[str, Any]:
+        record = by_record_sha256.get(history_record_sha256)
+        if record is None:
+            raise P3CompletionError(
+                "evidence references an unknown checkpoint history record"
+            )
+        if (
+            record.get("step") != expected_step
+            or record.get("checkpoint_sha256") != checkpoint_sha256
+        ):
+            raise P3CompletionError(
+                "checkpoint evidence differs from its history record"
+            )
+        if (
+            expected_path is not None
+            and Path(str(expected_path)).resolve()
+            != (directory / str(record["filename"])).resolve()
+        ):
+            raise P3CompletionError("checkpoint evidence path differs from history")
+        return record
+
+    for row in training_rows:
+        reference = row["checkpoint"]
+        resolve_reference(
+            reference["history_record_sha256"],
+            reference["checkpoint_sha256"],
+            expected_step=int(reference["step"]),
+            expected_path=reference["path"],
+        )
+    for row in validation_rows:
+        resolve_reference(
+            row["checkpoint_history_record_sha256"],
+            row["checkpoint_sha256"],
+            expected_step=int(row["global_step"]),
+        )
+    if final_receipt is not None:
+        resolve_reference(
+            final_receipt["checkpoint_history_record_sha256"],
+            final_receipt["checkpoint_sha256"],
+            expected_step=int(final_receipt["global_step"]),
+            expected_path=final_receipt["checkpoint"],
+        )
+
+
 def _validate_checkpoint_reference(value: Any, *, global_step: int) -> None:
     if not isinstance(value, Mapping):
         raise P3CompletionError("training record has no checkpoint reference")

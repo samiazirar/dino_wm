@@ -57,6 +57,7 @@ from p3_completion import (
     require_job_id,
     runtime_slice_entries,
     sha256_file as completion_sha256_file,
+    validate_checkpoint_evidence_bindings,
     validate_runtime_heldout_manifest,
     validate_training_records,
     validate_validation_records,
@@ -645,6 +646,15 @@ class Trainer:
                 immutable_run_card_sha256=self.immutable_run_card_sha256,
                 manifest_sha256=str(self.cfg.training.p3_heldout_manifest_sha256),
             )
+            validate_checkpoint_evidence_bindings(
+                load_checkpoint_history(self.checkpoint_manager.history_path),
+                directory=self.checkpoint_manager.directory,
+                source_commit=self.source_commit,
+                immutable_run_card_sha256=self.immutable_run_card_sha256,
+                dataset_order_sha256=self.dataset_order_sha256,
+                training_rows=training_rows,
+                validation_rows=validation_rows,
+            )
         except P3CompletionError as exc:
             raise RuntimeError(str(exc)) from exc
         self.p3_training_rows = training_rows
@@ -1172,6 +1182,16 @@ class Trainer:
             },
             **self._p3_depth_provenance(),
         }
+        validate_checkpoint_evidence_bindings(
+            history,
+            directory=self.checkpoint_manager.directory,
+            source_commit=self.source_commit,
+            immutable_run_card_sha256=self.immutable_run_card_sha256,
+            dataset_order_sha256=self.dataset_order_sha256,
+            training_rows=training_rows,
+            validation_rows=validation_rows,
+            final_receipt=receipt,
+        )
         write_final_receipt(
             Path(self.cfg.saved_folder) / "final_acceptance.json", receipt
         )

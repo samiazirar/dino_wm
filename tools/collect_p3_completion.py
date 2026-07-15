@@ -20,6 +20,7 @@ from p3_completion import (  # noqa: E402
     load_jsonl,
     plateau_verdict,
     sha256_file,
+    validate_checkpoint_evidence_bindings,
     validate_training_records,
     validate_validation_records,
 )
@@ -179,6 +180,16 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
             f"cell final receipt depth provenance differs: {card['run_id']}"
         )
     history = load_checkpoint_history(history_path)
+    validate_checkpoint_evidence_bindings(
+        history,
+        directory=history_path.parent,
+        source_commit=card["source_commit"],
+        immutable_run_card_sha256=card["run_card_sha256"],
+        dataset_order_sha256=sampler["dataset_order_sha256"],
+        training_rows=training_rows,
+        validation_rows=validation_rows,
+        final_receipt=receipt,
+    )
     reasons = {reason for record in history for reason in record["reasons"]}
     required_reasons = {
         "CONFIGURED_INTERVAL",
