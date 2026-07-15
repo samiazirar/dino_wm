@@ -288,6 +288,32 @@ def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
     assert len(path.read_text(encoding="utf-8").splitlines()) == 10
 
 
+def test_training_replay_uses_validated_direct_index(tmp_path, monkeypatch):
+    path = tmp_path / "training_steps.jsonl"
+    for step in range(1, 4):
+        append_training_record(path, _training_row(step), target_steps=100)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+
+    class OnePassRows(list):
+        def __init__(self, values):
+            super().__init__(values)
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("replay lookup scanned the validated rows")
+            return super().__iter__()
+
+    guarded_rows = OnePassRows(rows)
+    monkeypatch.setattr(p3_completion, "load_jsonl", lambda _path: guarded_rows)
+
+    assert append_training_record(
+        path, _training_row(2), target_steps=100
+    ) == rows[1]
+    assert guarded_rows.iterations == 1
+
+
 def test_ledgers_resolve_exact_checkpoint_history_records(tmp_path):
     manager = StepCheckpointManager(tmp_path / "steps")
     checkpoint_path, checkpoint_sha256 = manager.save(

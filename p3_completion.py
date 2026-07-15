@@ -710,12 +710,16 @@ def append_training_record(
             config_sha256=str(index["config_sha256"]),
             target_steps=target_steps,
         )
-        existing = next(
-            (row for row in rows if row.get("global_step") == step), None
-        )
-        if existing is None or _stable_training_record(
-            existing
-        ) != _stable_training_record(value):
+        if step < 1 or step > len(rows):
+            raise P3CompletionError(
+                f"replayed optimizer step {step} is outside the validated ledger"
+            )
+        existing = rows[step - 1]
+        if existing.get("global_step") != step:
+            raise P3CompletionError(
+                f"replayed optimizer step {step} differs from its validated index"
+            )
+        if _stable_training_record(existing) != _stable_training_record(value):
             raise P3CompletionError(
                 f"replayed optimizer step {step} differs from its exactly-once record"
             )
