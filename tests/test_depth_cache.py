@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from tools import precompute_depth as depth_module
 from tools.precompute_depth import (
     ARTIFACTS,
     MAP_SIZE,
@@ -22,7 +23,10 @@ from tools.precompute_depth import (
     normalize_depth,
     select_calibration_keys,
     sha256_bytes,
+    sha256_file,
     streaming_chunks,
+    load_loop_detector_model_offline,
+    verify_local_dinov2_hub,
     world_model_resize_crop,
 )
 from tools.validate_depth_cache import (
@@ -313,3 +317,95 @@ def test_normalization_is_global_clip_without_inversion() -> None:
     assert gray[0, 0] == 0.0
     assert gray[-1, -1] == 1.0
     assert gray[100, 100] < gray[120, 120]
+
+
+def _fake_torch_hub(tmp_path: Path):
+    repo = tmp_path / "facebookresearch_dinov2_main"
+    repo.mkdir()
+    hubconf = repo / "hubconf.py"
+    hubconf.write_text("# pinned test hubconf\n", encoding="utf-8")
+    calls: list[tuple[str, str, tuple, dict]] = []
+
+    def load(repo_or_dir: str, model: str, *args, **kwargs):
+        calls.append((repo_or_dir, model, args, kwargs))
+        return model
+
+    hub = type("FakeHub", (), {})()
+    hub.get_dir = lambda: str(tmp_path)
+    hub.load = load
+    torch_module = type("FakeTorch", (), {})()
+    torch_module.hub = hub
+    return torch_module, hubconf, calls, load
+
+
+def test_dinov2_hub_redirect_is_exact_and_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch_module, hubconf, calls, original_load = _fake_torch_hub(tmp_path)
+    monkeypatch.setattr(
+        depth_module, "DINOV2_HUBCONF_SHA256", sha256_file(hubconf)
+    )
+
+    class Detector:
+        def load_model(self) -> None:
+            torch_module.hub.load(
+                "facebookresearch/dinov2", "dinov2_vitb14", verbose=False
+            )
+            torch_module.hub.load("other/repository", "other_model", source="github")
+
+    provenance = verify_local_dinov2_hub(torch_module)
+    load_loop_detector_model_offline(Detector(), torch_module)
+
+    assert provenance == {
+        "requested_repository": "facebookresearch/dinov2",
+        "repo_or_dir": str(tmp_path / "facebookresearch_dinov2_main"),
+        "source": "local",
+        "hubconf_sha256": sha256_file(hubconf),
+    }
+    assert calls[0] == (
+        str(tmp_path / "facebookresearch_dinov2_main"),
+        "dinov2_vitb14",
+        (),
+        {"verbose": False, "source": "local"},
+    )
+    assert calls[1] == (
+        "other/repository",
+        "other_model",
+        (),
+        {"source": "github"},
+    )
+    assert torch_module.hub.load is original_load
+
+
+def test_dinov2_hub_redirect_fails_closed_on_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch_module, _hubconf, calls, original_load = _fake_torch_hub(tmp_path)
+    monkeypatch.setattr(depth_module, "DINOV2_HUBCONF_SHA256", "0" * 64)
+
+    class Detector:
+        def load_model(self) -> None:
+            raise AssertionError("hash gate must run before model loading")
+
+    with pytest.raises(ContractError, match="hubconf mismatch"):
+        load_loop_detector_model_offline(Detector(), torch_module)
+    assert calls == []
+    assert torch_module.hub.load is original_load
+
+
+def test_dinov2_hub_redirect_restores_after_load_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch_module, hubconf, _calls, original_load = _fake_torch_hub(tmp_path)
+    monkeypatch.setattr(
+        depth_module, "DINOV2_HUBCONF_SHA256", sha256_file(hubconf)
+    )
+
+    class Detector:
+        def load_model(self) -> None:
+            torch_module.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+            raise RuntimeError("injected load failure")
+
+    with pytest.raises(RuntimeError, match="injected load failure"):
+        load_loop_detector_model_offline(Detector(), torch_module)
+    assert torch_module.hub.load is original_load
