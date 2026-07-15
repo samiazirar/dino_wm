@@ -40,6 +40,17 @@ training:
   checkpoint_every_steps: 1000
   strict_determinism: false
   test_signal_after_step: null
+  # P3 completion is enabled only by immutable P3 cards. The manifest is
+  # materialized from the complete validation split before training starts.
+  p3_completion_enabled: false
+  p3_heldout_manifest: null
+  p3_heldout_manifest_sha256: null
+  p3_heldout_metadata: null
+  p3_heldout_metadata_sha256: null
+  p3_data_manifest_sha256: null
+  p3_split_sha256: null
+  # The segment wrapper sets this only in its second, fresh model process.
+  final_acceptance: false
   # Optional fixed-step timing window around the production step loop. The
   # warmup and measured intervals are absolute optimizer-step counts.
   timing_output: null

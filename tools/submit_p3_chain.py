@@ -8,11 +8,18 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+sys_path = str(Path(__file__).resolve().parents[1])
+if sys_path not in sys.path:
+    sys.path.insert(0, sys_path)
+
+from p3_completion import P3CompletionError, load_final_receipt  # noqa: E402
 
 try:
     from .harness_common import validate_run_card
@@ -246,6 +253,74 @@ def continue_chain(args: argparse.Namespace) -> None:
     if int(progress["global_step"]) == int(manifest["target_steps"]):
         if progress["status"] != "TARGET_REACHED":
             raise RuntimeError("Target step was reached without TARGET_REACHED status")
+        if manifest.get("run_card_kind") == "p3-training":
+            run_card = yaml.safe_load(
+                Path(manifest["run_card"]).read_text(encoding="utf-8")
+            )
+            completion = progress.get("p3_completion")
+            if not isinstance(completion, dict):
+                raise RuntimeError("P3 target progress lacks completion evidence")
+            expected_receipt = {
+                "slurm_job_id": str(args.parent_job),
+                "source_commit": manifest["source_commit"],
+                "immutable_run_card_sha256": manifest["run_card_sha256"],
+                "config_sha256": run_card["config_sha256"],
+                "container_sha256": manifest["container"]["sha256"],
+                "target_steps": int(manifest["target_steps"]),
+                "global_step": int(manifest["target_steps"]),
+                "checkpoint_sha256": progress["checkpoint_sha256"],
+                "parameter_sha256": progress["parameter_sha256"],
+                "optimizer_sha256": progress["optimizer_sha256"],
+                "scheduler_sha256": progress["scheduler_sha256"],
+                "manifest_sha256": completion["heldout_manifest_sha256"],
+                "data_manifest_sha256": completion["data_manifest_sha256"],
+                "split_sha256": completion["split_sha256"],
+                "training_ledger_sha256": completion["training_ledger_sha256"],
+                "validation_ledger_sha256": completion[
+                    "validation_ledger_sha256"
+                ],
+                "checkpoint_history_sha256": completion[
+                    "checkpoint_history_sha256"
+                ],
+                "dataset_order_sha256": progress["sampler"][
+                    "dataset_order_sha256"
+                ],
+            }
+            depth = run_card.get("depth_inputs")
+            expected_receipt.update(
+                {
+                    "depth_producer_sha256": depth.get("producer_sha256")
+                    if depth
+                    else None,
+                    "depth_cache_manifest_sha256": depth.get(
+                        "cache_manifest_sha256"
+                    )
+                    if depth
+                    else None,
+                    "depth_native_contract_sha256": depth.get(
+                        "native_contract_sha256"
+                    )
+                    if depth
+                    else None,
+                    "depth_validation_sha256": depth.get("validation_sha256")
+                    if depth
+                    else None,
+                    "depth_checkpoint_sha256": depth.get("checkpoint_sha256")
+                    if depth
+                    else None,
+                }
+            )
+            try:
+                receipt, receipt_path, receipt_sha256 = load_final_receipt(
+                    manifest["run_dir"], expected=expected_receipt
+                )
+            except P3CompletionError as exc:
+                raise RuntimeError(str(exc)) from exc
+            event["final_acceptance_receipt"] = str(receipt_path)
+            event["final_acceptance_receipt_sha256"] = receipt_sha256
+            event["final_acceptance_process_id"] = receipt["process_id"]
+            manifest["final_acceptance_receipt"] = str(receipt_path)
+            manifest["final_acceptance_receipt_sha256"] = receipt_sha256
         manifest["status"] = "PASSED"
         manifest["completed_at"] = now()
         manifest["final_progress"] = progress

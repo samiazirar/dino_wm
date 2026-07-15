@@ -509,6 +509,39 @@ def _sizing(arm, environment, target_steps, rate=10.0):
     }
 
 
+def _add_p3_completion_contract(card, environment, seed):
+    card["heldout_loss_manifest"] = {
+        "path": f"/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/heldout_{environment}.jsonl",
+        "sha256": "8" * 64,
+        "metadata_path": f"/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/heldout_{environment}.meta.json",
+        "metadata_sha256": "9" * 64,
+        "data_manifest_sha256": "a" * 64,
+        "split_sha256": "b" * 64,
+        "selection": "all_validation_examples",
+        "entry_count": 1,
+    }
+    card["initialization_policy"] = {
+        "predictor": "fresh_seeded",
+        "action_encoder": "fresh_seeded",
+        "proprio_encoder": "fresh_seeded",
+        "seed": seed,
+        "encoder": "frozen",
+    }
+    card["optimizer_policy"] = {
+        "predictor": "adamw",
+        "predictor_lr": 0.00005,
+        "action_proprio": "adamw",
+        "action_proprio_lr": 0.0005,
+    }
+    card["schedule_policy"] = "fixed_learning_rates"
+    card["encoder_boundary"] = {
+        "dino_pinned": "not_applicable",
+        "dinocular": "informative_depth_and_mask",
+        "dinocular_zerodepth": "manifest_neutral_depth_and_mask",
+    }[card["arm"]]
+    return card
+
+
 def _card(run_id, arm, environment, seed, kind="p3-training", gate_mode=None):
     sizing = _sizing(arm, environment, LOCKED_TARGETS[environment])
     card = {
@@ -543,6 +576,8 @@ def _card(run_id, arm, environment, seed, kind="p3-training", gate_mode=None):
     }
     if gate_mode is not None:
         card["gate_mode"] = gate_mode
+    if kind == "p3-training":
+        _add_p3_completion_contract(card, environment, seed)
     return finalize_run_card(card)
 
 
@@ -614,6 +649,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
                     )
                 card["segment_sizing"] = _sizing(arm, environment, card["target_steps"])
                 card["segment_steps"] = card["segment_sizing"]["derived_segment_steps"]
+                _add_p3_completion_contract(card, environment, seed)
                 p3_cards.append(make_manifests._finish_card(spec, card))
     p3_matrix_path = tmp_path / "p3.yaml"
     p3_matrix = write_matrix(
@@ -685,6 +721,21 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
         assert set(p4_card["environment_variables"]) == expected_environment
         assert p4_card["overrides"] == p3_card["overrides"]
         assert p4_card["config_sha256"] == p3_card["config_sha256"]
+    p4_dry_run = subprocess.run(
+        [
+            "python3",
+            str(root / "tools/submit_matrix.py"),
+            "open-loop",
+            "--matrix",
+            str(p4_matrix_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    p4_dry_result = json.loads(p4_dry_run.stdout)
+    assert p4_dry_result["job_count"] == 36
+    assert p4_dry_result["sbatch_calls"] == 0
 
     p2a_cards = []
     for index, producer in enumerate(spec["p2a"]["producers"], 1):
@@ -939,10 +990,65 @@ def test_p2_cli_locks_and_actual_gate_modes(tmp_path):
         subprocess.run(base, check=True, capture_output=True, text=True).stdout
     )
     assert result["job_count"] == 12
+    assert result["sbatch_calls"] == 0
     failed = subprocess.run(
         base[:-1] + ["pusht=5,wall=5,rope=5,granular=5"], capture_output=True, text=True
     )
     assert failed.returncode == 2
+
+    timing_cards = []
+    for arm in LOCKED_ARMS:
+        for environment in LOCKED_ENVS:
+            card = _card(
+                f"p2-timing-{arm}-{environment}-s1",
+                arm,
+                environment,
+                1,
+                kind="p2-timing",
+                gate_mode="timing",
+            )
+            card = dict(card)
+            card["target_steps"] = 220
+            card["segment_steps"] = 220
+            card["timing"] = {"fixed_steps": 200, "warmup_steps": 20}
+            timing_cards.append(finalize_run_card(card))
+    timing_matrix = tmp_path / "p2-timing.yaml"
+    write_matrix(
+        timing_matrix,
+        kind="p2-timing",
+        cards=timing_cards,
+        source_commit="f" * 40,
+    )
+    timing_result = json.loads(
+        subprocess.run(
+            [
+                "python3",
+                str(tool),
+                "timing",
+                "--matrix",
+                str(timing_matrix),
+                "--encoders",
+                "dino_pinned,dinocular,dinocular_zerodepth",
+                "--envs",
+                "pusht,wall,rope,granular",
+                "--seeds",
+                "1",
+                "--minutes",
+                "50",
+                "--fixed-steps",
+                "200",
+                "--warmup-steps",
+                "20",
+                "--frameskips",
+                "pusht=5,wall=5,rope=1,granular=1",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    assert timing_result["job_count"] == 12
+    assert timing_result["sbatch_calls"] == 0
 
 
 def test_all_run_card_container_invocations_forward_dinocular_environment():
@@ -952,7 +1058,7 @@ def test_all_run_card_container_invocations_forward_dinocular_environment():
     helper_path = "$PROJECT/code/dino_wm/tools/dinocular_container_env.sh"
     assert f'source "{helper_path}"' in p3_wrapper
     assert f'source "{helper_path}"' in matrix_wrapper
-    assert p3_wrapper.count('"${DINOCULAR_CONTAINER_ENV[@]}"') == 3
+    assert p3_wrapper.count('"${DINOCULAR_CONTAINER_ENV[@]}"') == 4
     geometry_block = p3_wrapper.split("p2-geometry)", 1)[1].split(";;", 1)[0]
     timing_block = p3_wrapper.split("p2-timing)", 1)[1].split(";;", 1)[0]
     assert '"${DINOCULAR_CONTAINER_ENV[@]}"' in geometry_block

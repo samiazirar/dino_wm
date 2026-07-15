@@ -75,6 +75,7 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
         }
     )
     trainer.datasets = {"train": TinyStepDataset()}
+    trainer.p3_completion_enabled = False
     trainer.accelerator = SimpleNamespace(prepare=lambda loader: loader)
     trainer.global_step = start_step
     trainer.epoch = start_step // 3
@@ -85,6 +86,9 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
     trainer._last_saved_step = None
     trainer._last_checkpoint_path = None
     trainer._last_checkpoint_sha256 = None
+    trainer._last_checkpoint_history_record = None
+    trainer._last_checkpoint_state_hashes = None
+    trainer._loaded_checkpoint_metadata = None
     trainer.source_commit = "f" * 40
     trainer.resume_config_sha256 = "b" * 64
     trainer.immutable_run_card_sha256 = immutable_run_card_sha256
@@ -99,9 +103,9 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
 
     saved_payloads = []
 
-    def save_and_record():
+    def save_and_record(reasons=("LEGACY_CALL",)):
         previous_step = trainer._last_saved_step
-        path, digest = Trainer.save_step_checkpoint(trainer)
+        path, digest = Trainer.save_step_checkpoint(trainer, reasons)
         if trainer._last_saved_step != previous_step:
             assert file_sha256(path) == digest
             payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -214,10 +218,10 @@ def test_constant_scheduler_state_is_exact():
 def test_checkpoint_manager_hash_falls_back_one_checkpoint(tmp_path):
     manager = StepCheckpointManager(tmp_path)
     first, first_digest = manager.save(
-        {"schema": CHECKPOINT_SCHEMA, "global_step": 1}, 1
+        {"schema": CHECKPOINT_SCHEMA, "global_step": 1}, 1, reasons=("COMPLETE_EPOCH",)
     )
     second, _second_digest = manager.save(
-        {"schema": CHECKPOINT_SCHEMA, "global_step": 2}, 2
+        {"schema": CHECKPOINT_SCHEMA, "global_step": 2}, 2, reasons=("EXACT_TARGET",)
     )
     second.write_bytes(b"corrupt")
     resolved, digest = manager.resolve("auto")

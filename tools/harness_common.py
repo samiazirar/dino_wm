@@ -263,6 +263,16 @@ def validate_spec(spec: Mapping[str, Any]) -> None:
         raise HarnessError(
             "segment sizing policy differs from the locked safety contract"
         )
+    if spec.get("p3_completion") != {
+        "heldout_selection": "all_validation_examples",
+        "percent_rounding": "ceil_target_times_percent_over_100",
+        "progress_points": 100,
+        "early_window": [76, 77, 78, 79, 80],
+        "late_window": [96, 97, 98, 99, 100],
+        "plateau_relative_threshold": 0.02,
+        "final_receipt": "final_acceptance.json",
+    }:
+        raise HarnessError("P3 completion policy differs from the locked contract")
     p2a = spec.get("p2a")
     if not isinstance(p2a, Mapping):
         raise HarnessError("P2a spec is absent")
@@ -548,6 +558,54 @@ def validate_run_card(card: Mapping[str, Any]) -> None:
         raise HarnessError("run card source hashes are absent")
     if card.get("decoder") is not False:
         raise HarnessError("decoder must remain off")
+    if card.get("kind") in {"p3-training", "p4-open-loop"}:
+        heldout = card.get("heldout_loss_manifest")
+        if (
+            not isinstance(heldout, Mapping)
+            or heldout.get("selection") != "all_validation_examples"
+            or not all(
+                _is_lower_hex(heldout.get(field), 64)
+                for field in (
+                    "sha256",
+                    "metadata_sha256",
+                    "data_manifest_sha256",
+                    "split_sha256",
+                )
+            )
+        ):
+            raise HarnessError("P3/P4 card has no immutable held-out loss manifest")
+        initialization = card.get("initialization_policy")
+        if initialization != {
+            "predictor": "fresh_seeded",
+            "action_encoder": "fresh_seeded",
+            "proprio_encoder": "fresh_seeded",
+            "seed": card.get("seed"),
+            "encoder": "frozen",
+        }:
+            raise HarnessError("P3/P4 initialization policy differs")
+        if card.get("optimizer_policy") != {
+            "predictor": "adamw",
+            "predictor_lr": 0.00005,
+            "action_proprio": "adamw",
+            "action_proprio_lr": 0.0005,
+        } or card.get("schedule_policy") != "fixed_learning_rates":
+            raise HarnessError("P3/P4 optimizer or schedule policy differs")
+        expected_boundary = {
+            "dino_pinned": "not_applicable",
+            "dinocular": "informative_depth_and_mask",
+            "dinocular_zerodepth": "manifest_neutral_depth_and_mask",
+        }.get(card.get("arm"))
+        if card.get("encoder_boundary") != expected_boundary:
+            raise HarnessError("P3/P4 encoder boundary policy differs")
+    if card.get("kind") == "p4-open-loop":
+        completion = card.get("training_completion_receipt")
+        if (
+            not isinstance(completion, Mapping)
+            or completion.get("schema") != "dino-wm.p3-final-acceptance.v1"
+            or completion.get("training_run_card_sha256")
+            != card.get("training_run_card", {}).get("run_card_sha256")
+        ):
+            raise HarnessError("P4 card is not bound to a P3 completion receipt")
 
 
 def verify_evaluation_bindings(
@@ -610,8 +668,24 @@ def verify_evaluation_bindings(
         or training.get("overrides") != card.get("overrides")
         or training.get("depth_inputs") != card.get("depth_inputs")
         or training.get("environment_variables") != card.get("environment_variables")
+        or training.get("heldout_loss_manifest")
+        != card.get("heldout_loss_manifest")
+        or training.get("initialization_policy")
+        != card.get("initialization_policy")
+        or training.get("optimizer_policy") != card.get("optimizer_policy")
+        or training.get("schedule_policy") != card.get("schedule_policy")
+        or training.get("encoder_boundary") != card.get("encoder_boundary")
     ):
         raise HarnessError("evaluation card is not exactly bound to its training card")
+    if card.get("kind") == "p4-open-loop":
+        completion = card["training_completion_receipt"]
+        if (
+            Path(str(completion.get("path"))).resolve()
+            != Path(str(training["run_dir"])).resolve() / "final_acceptance.json"
+            or completion.get("training_run_card_sha256")
+            != training.get("run_card_sha256")
+        ):
+            raise HarnessError("P4 completion receipt reference differs from P3")
     return training, metadata
 
 

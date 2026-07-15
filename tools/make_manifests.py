@@ -159,6 +159,19 @@ def _training_overrides(spec: Mapping[str, Any], card: dict[str, Any]) -> list[s
                 f"+env.dataset.depth_checkpoint_sha256={inputs['checkpoint_sha256']}",
             ]
         )
+    heldout = card.get("heldout_loss_manifest")
+    if heldout is not None:
+        overrides.extend(
+            [
+                "training.p3_completion_enabled=true",
+                f"training.p3_heldout_manifest={heldout['path']}",
+                f"training.p3_heldout_manifest_sha256={heldout['sha256']}",
+                f"training.p3_heldout_metadata={heldout['metadata_path']}",
+                f"training.p3_heldout_metadata_sha256={heldout['metadata_sha256']}",
+                f"training.p3_data_manifest_sha256={heldout['data_manifest_sha256']}",
+                f"training.p3_split_sha256={heldout['split_sha256']}",
+            ]
+        )
     if card.get("gate_mode") == "timing":
         timing = card["timing"]
         overrides.extend(
@@ -315,6 +328,42 @@ def _load_winner(path: Path, spec: Mapping[str, Any]) -> str:
     return str(winner)
 
 
+def _heldout_manifest_record(
+    directory: Path,
+    environment: str,
+    source_commit: str,
+) -> Mapping[str, Any]:
+    path = directory / f"heldout_{environment}.jsonl"
+    metadata_path = path.with_suffix(".meta.json")
+    if not path.is_file() or not metadata_path.is_file():
+        raise HarnessError(f"P3 held-out loss manifest is absent for {environment}")
+    metadata = load_json(metadata_path)
+    if (
+        metadata.get("schema") != "dino-wm.p3-heldout-manifest.v1"
+        or metadata.get("environment") != environment
+        or metadata.get("selection") != "all_validation_examples"
+        or metadata.get("source_commit") != source_commit
+        or metadata.get("manifest_sha256") != sha256_file(path)
+        or not isinstance(metadata.get("entry_count"), int)
+        or metadata.get("entry_count", 0) <= 0
+        or len(str(metadata.get("data_manifest_sha256"))) != 64
+        or len(str(metadata.get("split_sha256"))) != 64
+    ):
+        raise HarnessError(f"P3 held-out manifest contract differs for {environment}")
+    return {
+        "path": require_real_marvin_path(str(path), f"{environment} held-out manifest"),
+        "sha256": sha256_file(path),
+        "metadata_path": require_real_marvin_path(
+            str(metadata_path), f"{environment} held-out metadata"
+        ),
+        "metadata_sha256": sha256_file(metadata_path),
+        "data_manifest_sha256": metadata["data_manifest_sha256"],
+        "split_sha256": metadata["split_sha256"],
+        "selection": "all_validation_examples",
+        "entry_count": metadata["entry_count"],
+    }
+
+
 def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
     spec, contracts, evidence = _resolve_inputs(args)
     if tuple(_parse_csv(args.encoders)) != LOCKED_ARMS:
@@ -334,6 +383,12 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
     if _parse_int_map(args.frameskips) != LOCKED_FRAMESKIPS:
         raise HarnessError("training frameskip map differs from the locked protocol")
     winner = _load_winner(args.producer_decision, spec)
+    heldout = {
+        environment: _heldout_manifest_record(
+            args.heldout_manifests_dir, environment, evidence["source_commit"]
+        )
+        for environment in LOCKED_ENVS
+    }
     for environment in LOCKED_ENVS:
         depth_inputs(contracts, winner, environment)
 
@@ -353,6 +408,30 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
                 )
                 if arm != "dino_pinned":
                     _depth_overrides(card, depth_inputs(contracts, winner, environment))
+                card["heldout_loss_manifest"] = copy.deepcopy(heldout[environment])
+                card["initialization_policy"] = {
+                    "predictor": "fresh_seeded",
+                    "action_encoder": "fresh_seeded",
+                    "proprio_encoder": "fresh_seeded",
+                    "seed": seed,
+                    "encoder": "frozen",
+                }
+                card["optimizer_policy"] = {
+                    "predictor": "adamw",
+                    "predictor_lr": 0.00005,
+                    "action_proprio": "adamw",
+                    "action_proprio_lr": 0.0005,
+                }
+                card["schedule_policy"] = "fixed_learning_rates"
+                card["encoder_boundary"] = (
+                    "not_applicable"
+                    if arm == "dino_pinned"
+                    else (
+                        "manifest_neutral_depth_and_mask"
+                        if arm == "dinocular_zerodepth"
+                        else "informative_depth_and_mask"
+                    )
+                )
                 card["segment_sizing"] = _segment_record(
                     spec,
                     evidence,
@@ -444,6 +523,22 @@ def make_open_loop(args: argparse.Namespace) -> Mapping[str, Any]:
                     "path": p3_reference["path"],
                     "file_sha256": p3_reference["file_sha256"],
                     "run_card_sha256": p3_reference["run_card_sha256"],
+                }
+                card["heldout_loss_manifest"] = copy.deepcopy(
+                    p3_card["heldout_loss_manifest"]
+                )
+                card["initialization_policy"] = copy.deepcopy(
+                    p3_card["initialization_policy"]
+                )
+                card["optimizer_policy"] = copy.deepcopy(
+                    p3_card["optimizer_policy"]
+                )
+                card["schedule_policy"] = p3_card["schedule_policy"]
+                card["encoder_boundary"] = p3_card["encoder_boundary"]
+                card["training_completion_receipt"] = {
+                    "path": f"{p3_card['run_dir']}/final_acceptance.json",
+                    "schema": "dino-wm.p3-final-acceptance.v1",
+                    "training_run_card_sha256": p3_card["run_card_sha256"],
                 }
                 if p3_card.get("depth_inputs") is not None:
                     _depth_overrides(card, p3_card["depth_inputs"])
@@ -570,6 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     training.add_argument("--decoder", required=True)
     training.add_argument("--producer-decision", type=Path, required=True)
     training.add_argument("--rates", type=Path, required=True)
+    training.add_argument("--heldout-manifests-dir", type=Path, required=True)
     training.add_argument("--out", type=Path, required=True)
     training.set_defaults(function=make_training)
 

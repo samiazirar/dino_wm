@@ -14,6 +14,12 @@ import numpy as np
 import torch
 from torch.utils.data import Sampler
 
+from p3_completion import (
+    P3CompletionError,
+    append_checkpoint_history,
+    load_checkpoint_history,
+)
+
 
 CHECKPOINT_SCHEMA = "dino-wm.step-checkpoint.v1"
 INDEX_SCHEMA = "dino-wm.step-checkpoint-index.v1"
@@ -43,7 +49,9 @@ def capture_rng_state() -> dict[str, Any]:
         "python": random.getstate(),
         "numpy": np.random.get_state(),
         "torch_cpu": torch.get_rng_state(),
-        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        "torch_cuda": torch.cuda.get_rng_state_all()
+        if torch.cuda.is_available()
+        else [],
     }
 
 
@@ -238,6 +246,8 @@ class StepCheckpointManager:
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
         self.index_path = self.directory / "step_latest.json"
+        self.history_path = self.directory / "checkpoint_history.json"
+        self.last_history_record: Mapping[str, Any] | None = None
 
     def _read_index(self) -> dict[str, Any] | None:
         if not self.index_path.exists():
@@ -250,7 +260,23 @@ class StepCheckpointManager:
             raise RuntimeError(f"Malformed checkpoint index: {self.index_path}")
         return value
 
-    def save(self, payload: Mapping[str, Any], step: int) -> tuple[Path, str]:
+    def history_record(self, step: int) -> Mapping[str, Any]:
+        matches = [
+            record
+            for record in load_checkpoint_history(self.history_path)
+            if record["step"] == int(step)
+        ]
+        if not matches:
+            raise RuntimeError(f"Checkpoint history has no record for step {step}")
+        self.last_history_record = matches[-1]
+        return matches[-1]
+
+    def save(
+        self,
+        payload: Mapping[str, Any],
+        step: int,
+        reasons: Sequence[str] = ("LEGACY_CALL",),
+    ) -> tuple[Path, str]:
         if payload.get("schema") != CHECKPOINT_SCHEMA:
             raise ValueError("Refusing to save an unknown checkpoint schema")
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -261,17 +287,51 @@ class StepCheckpointManager:
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
         digest = file_sha256(temporary)
+        content_digest = nested_state_sha256(dict(payload))
+        existing_history = next(
+            (
+                record
+                for record in load_checkpoint_history(self.history_path)
+                if record["step"] == int(step)
+            ),
+            None,
+        )
+        if existing_history is not None and (
+            existing_history.get("filename") != filename
+            or existing_history.get("checkpoint_sha256") != digest
+            or existing_history.get("content_sha256") != content_digest
+        ):
+            temporary.unlink(missing_ok=True)
+            raise P3CompletionError(
+                f"checkpoint step {step} would create a divergent duplicate"
+            )
         os.replace(temporary, final_path)
 
+        history_record = append_checkpoint_history(
+            self.history_path,
+            step=int(step),
+            filename=filename,
+            checkpoint_sha256=digest,
+            content_sha256=content_digest,
+            reasons=reasons,
+            source_commit=payload.get("source_commit"),
+            immutable_run_card_sha256=payload.get("immutable_run_card_sha256"),
+            dataset_order_sha256=payload.get("dataset_order_sha256"),
+        )
+        self.last_history_record = history_record
+
         previous_index = self._read_index()
-        previous_entries = [] if previous_index is None else previous_index["checkpoints"]
+        previous_entries = (
+            [] if previous_index is None else previous_index["checkpoints"]
+        )
         entries = [
-            {"step": int(step), "file": filename, "sha256": digest},
-            *[
-                entry
-                for entry in previous_entries
-                if entry.get("file") != filename
-            ],
+            {
+                "step": int(step),
+                "file": filename,
+                "sha256": digest,
+                "history_record_sha256": history_record["record_sha256"],
+            },
+            *[entry for entry in previous_entries if entry.get("file") != filename],
         ][:2]
         atomic_write_json(
             self.index_path,
@@ -294,7 +354,11 @@ class StepCheckpointManager:
 
         index = self._read_index()
         if index is None:
-            unindexed = list(self.directory.glob("step_*.pth")) if self.directory.exists() else []
+            unindexed = (
+                list(self.directory.glob("step_*.pth"))
+                if self.directory.exists()
+                else []
+            )
             if unindexed:
                 raise RuntimeError(
                     f"Checkpoint files exist without a valid index in {self.directory}"

@@ -131,6 +131,44 @@ if [ "$TRAIN_STATUS" -ne 0 ]; then
     exit "$TRAIN_STATUS"
 fi
 
+PROGRESS_STATUS=$(python3 - "$RUN_DIR/progress.json" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])
+PY
+)
+if [ "$RUN_KIND" = p3-training ] && [ "$PROGRESS_STATUS" = TARGET_REACHED ]; then
+    /usr/bin/apptainer exec --nv --writable-tmpfs \
+        --bind "$PROJECT:$PROJECT" \
+        --env TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
+        --env XDG_CACHE_HOME="$XDG_CACHE_HOME" \
+        --env HF_HOME="$HF_HOME" \
+        --env TORCH_HOME="$TORCH_HOME" \
+        --env CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+        --env NVIDIA_TF32_OVERRIDE=0 \
+        --env PYTHONHASHSEED=0 \
+        --env PYTHONNOUSERSITE=1 \
+        --env HF_HUB_OFFLINE=1 \
+        --env TRANSFORMERS_OFFLINE=1 \
+        --env WANDB_MODE=disabled \
+        --env P3_FINAL_ACCEPTANCE_PROCESS=1 \
+        --env SLURM_JOB_ID="$SLURM_JOB_ID" \
+        --env STRICT_P2_ENV="$STRICT_P2_ENV" \
+        --env STRICT_P2_ARM="$STRICT_P2_ARM" \
+        --env STRICT_P2_CONTAINER="$STRICT_P2_CONTAINER" \
+        --env STRICT_P2_CONTAINER_SHA256="$STRICT_P2_CONTAINER_SHA256" \
+        --env STRICT_P2_SLURM_WRAPPER="$STRICT_P2_SLURM_WRAPPER" \
+        --env STRICT_P2_IMMUTABLE_RUN_CARD="$STRICT_P2_IMMUTABLE_RUN_CARD" \
+        --env STRICT_P2_IMMUTABLE_RUN_CARD_SHA256="$STRICT_P2_IMMUTABLE_RUN_CARD_SHA256" \
+        --env DATASET_DIR="$PROJECT/data/raw" \
+        --env DINOV2_REPO="$PROJECT/code/dinov2" \
+        --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
+        "${DINOCULAR_CONTAINER_ENV[@]}" \
+        --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+        "$SIF" \
+        "${TRAIN_ARGS[@]}" "training.final_acceptance=true"
+fi
+
 case "$RUN_KIND" in
     p2-geometry)
         /usr/bin/apptainer exec --nv --writable-tmpfs \

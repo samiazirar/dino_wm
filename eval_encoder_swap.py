@@ -15,6 +15,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from p3_completion import P3CompletionError, load_final_receipt
+
 from tools.harness_common import (
     HarnessError,
     build_evaluation_provenance,
@@ -400,6 +402,77 @@ def _verify_training_completion(
         raise EvaluationContractError(
             "training checkpoint belongs to a different run card"
         )
+    if card.get("kind") == "p4-open-loop":
+        chain = json.loads(
+            (training_run_dir / "chain.json").read_text(encoding="utf-8")
+        )
+        jobs = chain.get("jobs")
+        tail_job_id = (
+            str(jobs[-1].get("job_id"))
+            if isinstance(jobs, list) and jobs and isinstance(jobs[-1], Mapping)
+            else ""
+        )
+        completion = progress.get("p3_completion")
+        if (
+            chain.get("status") != "PASSED"
+            or not tail_job_id.isdigit()
+            or not isinstance(completion, Mapping)
+        ):
+            raise EvaluationContractError("P3 chain has no accepted completion tail")
+        expected = {
+            "slurm_job_id": tail_job_id,
+            "source_commit": card["source_commit"],
+            "immutable_run_card_sha256": training_card["run_card_sha256"],
+            "config_sha256": card["config_sha256"],
+            "container_sha256": card["container"]["sha256"],
+            "target_steps": int(card["target_steps"]),
+            "global_step": int(card["target_steps"]),
+            "checkpoint_sha256": progress["checkpoint_sha256"],
+            "parameter_sha256": progress["parameter_sha256"],
+            "optimizer_sha256": progress["optimizer_sha256"],
+            "scheduler_sha256": progress["scheduler_sha256"],
+            "manifest_sha256": completion["heldout_manifest_sha256"],
+            "data_manifest_sha256": completion["data_manifest_sha256"],
+            "split_sha256": completion["split_sha256"],
+            "training_ledger_sha256": completion["training_ledger_sha256"],
+            "validation_ledger_sha256": completion["validation_ledger_sha256"],
+            "checkpoint_history_sha256": completion["checkpoint_history_sha256"],
+            "dataset_order_sha256": progress["sampler"]["dataset_order_sha256"],
+        }
+        depth = card.get("depth_inputs")
+        expected.update(
+            {
+                "depth_producer_sha256": depth.get("producer_sha256")
+                if depth
+                else None,
+                "depth_cache_manifest_sha256": depth.get("cache_manifest_sha256")
+                if depth
+                else None,
+                "depth_native_contract_sha256": depth.get("native_contract_sha256")
+                if depth
+                else None,
+                "depth_validation_sha256": depth.get("validation_sha256")
+                if depth
+                else None,
+                "depth_checkpoint_sha256": depth.get("checkpoint_sha256")
+                if depth
+                else None,
+            }
+        )
+        try:
+            _receipt, receipt_path, receipt_sha256 = load_final_receipt(
+                training_run_dir, expected=expected
+            )
+        except P3CompletionError as exc:
+            raise EvaluationContractError(str(exc)) from exc
+        final_event = chain.get("events", [])[-1]
+        if (
+            chain.get("final_acceptance_receipt") != str(receipt_path)
+            or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
+            or final_event.get("final_acceptance_receipt") != str(receipt_path)
+            or final_event.get("final_acceptance_receipt_sha256") != receipt_sha256
+        ):
+            raise EvaluationContractError("P4 checkpoint lacks accepted P3 receipt binding")
     return progress, checkpoint_path
 
 

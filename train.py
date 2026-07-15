@@ -9,6 +9,7 @@ import logging
 import warnings
 import threading
 import itertools
+import json
 import numpy as np
 from tqdm import tqdm
 from omegaconf import OmegaConf, open_dict
@@ -41,6 +42,26 @@ from training_resume import (
     restore_rng_state,
 )
 from training_timing import StrictTimingWindow
+from p3_completion import (
+    FINAL_RECEIPT_SCHEMA,
+    TRAINING_RECORD_SCHEMA,
+    VALIDATION_RECORD_SCHEMA,
+    P3CompletionError,
+    append_training_record,
+    append_validation_record,
+    checkpoint_reference,
+    load_checkpoint_history,
+    load_jsonl,
+    percent_step_map,
+    percents_at_step,
+    require_job_id,
+    runtime_slice_entries,
+    sha256_file as completion_sha256_file,
+    validate_runtime_heldout_manifest,
+    validate_training_records,
+    validate_validation_records,
+    write_final_receipt,
+)
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -60,6 +81,10 @@ class Trainer:
         self.cfg = cfg
         self.step_mode = cfg.training.target_steps is not None
         self.strict_determinism = bool(cfg.training.strict_determinism)
+        self.p3_completion_enabled = bool(cfg.training.p3_completion_enabled)
+        self.final_acceptance = bool(cfg.training.final_acceptance)
+        if self.final_acceptance and not self.p3_completion_enabled:
+            raise RuntimeError("final acceptance requires the P3 completion contract")
         configure_strict_determinism(self.strict_determinism)
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
@@ -96,6 +121,9 @@ class Trainer:
         self.device = self.accelerator.device
         log.info(f"device: {self.device}   model_name: {model_name}")
         self.base_path = os.path.dirname(os.path.abspath(__file__))
+        self.source_commit = subprocess.check_output(
+            ["git", "-C", self.base_path, "rev-parse", "HEAD"], text=True
+        ).strip()
 
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
@@ -170,12 +198,18 @@ class Trainer:
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
 
+        self.p3_heldout_rows = None
+        self.p3_heldout_metadata = None
+        self.p3_validation_indices = None
+        if self.p3_completion_enabled:
+            self._initialize_p3_heldout_manifest()
+
         phases = ["valid"] if self.step_mode else ["train", "valid"]
         self.dataloaders = {
             phase: torch.utils.data.DataLoader(
                 self.datasets[phase],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False, # already shuffled in TrajSlicerDataset
+                shuffle=False,  # already shuffled in TrajSlicerDataset
                 num_workers=self.cfg.env.num_workers,
                 collate_fn=None,
             )
@@ -189,9 +223,23 @@ class Trainer:
                 self.dataloaders["valid"]
             )
         else:
-            self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
-                self.dataloaders["train"], self.dataloaders["valid"]
+            self.dataloaders["train"], self.dataloaders["valid"] = (
+                self.accelerator.prepare(
+                    self.dataloaders["train"], self.dataloaders["valid"]
+                )
             )
+        if self.p3_completion_enabled:
+            heldout_subset = torch.utils.data.Subset(
+                self.datasets["valid"], self.p3_validation_indices
+            )
+            heldout_loader = torch.utils.data.DataLoader(
+                heldout_subset,
+                batch_size=self.cfg.gpu_batch_size,
+                shuffle=False,
+                num_workers=0,
+                collate_fn=None,
+            )
+            self.p3_validation_loader = self.accelerator.prepare(heldout_loader)
 
         self.encoder = None
         self.action_encoder = None
@@ -201,10 +249,12 @@ class Trainer:
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
-        log.info(f"Train encoder, predictor, decoder:\
+        log.info(
+            f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
             {self.cfg.model.train_predictor}\
-            {self.cfg.model.train_decoder}")
+            {self.cfg.model.train_decoder}"
+        )
 
         self._keys_to_save = [
             "epoch",
@@ -232,6 +282,9 @@ class Trainer:
         self._last_saved_step = None
         self._last_checkpoint_path = None
         self._last_checkpoint_sha256 = None
+        self._last_checkpoint_history_record = None
+        self._last_checkpoint_state_hashes = None
+        self._loaded_checkpoint_metadata = None
         if self.step_mode:
             self._initialize_step_resume()
 
@@ -265,6 +318,45 @@ class Trainer:
         not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
         if len(not_in_ckpt):
             log.warning("Keys not found in ckpt: %s", not_in_ckpt)
+
+    def _initialize_p3_heldout_manifest(self):
+        required = {
+            "path": self.cfg.training.p3_heldout_manifest,
+            "sha256": self.cfg.training.p3_heldout_manifest_sha256,
+            "metadata_path": self.cfg.training.p3_heldout_metadata,
+            "metadata_sha256": self.cfg.training.p3_heldout_metadata_sha256,
+            "data_manifest_sha256": self.cfg.training.p3_data_manifest_sha256,
+            "split_sha256": self.cfg.training.p3_split_sha256,
+        }
+        if any(
+            value is None or str(value).lower() in {"", "none", "null"}
+            for value in required.values()
+        ):
+            raise RuntimeError(
+                "P3 completion requires a complete held-out manifest record"
+            )
+        environment = str(self.cfg.env.name)
+        if environment == "deformable_env":
+            environment = str(self.cfg.env.dataset.object_name)
+        training_entries = runtime_slice_entries(
+            self.datasets["train"], environment=environment, partition="train"
+        )
+        validation_entries = runtime_slice_entries(
+            self.datasets["valid"], environment=environment, partition="valid"
+        )
+        try:
+            rows, indices, metadata = validate_runtime_heldout_manifest(
+                required,
+                environment=environment,
+                source_commit=self.source_commit,
+                training_entries=training_entries,
+                validation_entries=validation_entries,
+            )
+        except P3CompletionError as exc:
+            raise RuntimeError(str(exc)) from exc
+        self.p3_heldout_rows = rows
+        self.p3_validation_indices = indices
+        self.p3_heldout_metadata = metadata
 
     def init_models(self):
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
@@ -457,6 +549,7 @@ class Trainer:
             "timing_warmup_steps",
             "timing_measured_steps",
             "timing_projection_target_steps",
+            "final_acceptance",
         ]:
             training.pop(key, None)
         return config
@@ -475,9 +568,10 @@ class Trainer:
     def _initialize_step_resume(self):
         if int(self.cfg.training.target_steps) <= 0:
             raise ValueError("training.target_steps must be positive")
-        if self.cfg.training.segment_steps is not None and int(
-            self.cfg.training.segment_steps
-        ) <= 0:
+        if (
+            self.cfg.training.segment_steps is not None
+            and int(self.cfg.training.segment_steps) <= 0
+        ):
             raise ValueError("training.segment_steps must be positive when set")
         if int(self.cfg.training.checkpoint_every_steps) < 0:
             raise ValueError("training.checkpoint_every_steps must be non-negative")
@@ -495,9 +589,6 @@ class Trainer:
             )
         ):
             raise RuntimeError("immutable run-card SHA-256 environment is invalid")
-        self.source_commit = subprocess.check_output(
-            ["git", "-C", self.base_path, "rev-parse", "HEAD"], text=True
-        ).strip()
         self.checkpoint_manager = StepCheckpointManager(
             Path(self.cfg.saved_folder) / "checkpoints" / "steps"
         )
@@ -505,7 +596,58 @@ class Trainer:
         checkpoint_path, checkpoint_digest = self.checkpoint_manager.resolve(requested)
         if checkpoint_path is not None:
             self._load_step_checkpoint(checkpoint_path, checkpoint_digest)
+        if self.p3_completion_enabled:
+            self._initialize_p3_completion_evidence()
         self._install_signal_handlers()
+
+    def _initialize_p3_completion_evidence(self):
+        if self.immutable_run_card_sha256 is None:
+            raise RuntimeError("P3 completion requires an immutable run-card SHA-256")
+        run_card_path = os.environ.get("STRICT_P2_IMMUTABLE_RUN_CARD")
+        if not run_card_path:
+            raise RuntimeError("P3 completion requires the immutable run-card path")
+        run_card_path = Path(run_card_path).resolve()
+        run_card = __import__("yaml").safe_load(
+            run_card_path.read_text(encoding="utf-8")
+        )
+        if (
+            not isinstance(run_card, dict)
+            or run_card.get("kind") != "p3-training"
+            or run_card.get("run_card_sha256") != self.immutable_run_card_sha256
+            or run_card.get("source_commit") != self.source_commit
+            or run_card.get("heldout_loss_manifest", {}).get("sha256")
+            != str(self.cfg.training.p3_heldout_manifest_sha256)
+        ):
+            raise RuntimeError("P3 completion run card differs from the live process")
+        container_sha256 = os.environ.get("STRICT_P2_CONTAINER_SHA256")
+        if run_card.get("container", {}).get("sha256") != container_sha256:
+            raise RuntimeError("P3 completion container differs from the run card")
+        self.p3_run_card = run_card
+        self.p3_training_ledger_path = (
+            Path(self.cfg.saved_folder) / "training_steps.jsonl"
+        )
+        self.p3_validation_ledger_path = (
+            Path(self.cfg.saved_folder) / "heldout_loss.jsonl"
+        )
+        training_rows = load_jsonl(self.p3_training_ledger_path, allow_missing=True)
+        validation_rows = load_jsonl(self.p3_validation_ledger_path, allow_missing=True)
+        try:
+            validate_training_records(
+                training_rows,
+                source_commit=self.source_commit,
+                immutable_run_card_sha256=self.immutable_run_card_sha256,
+                dataset_order_sha256=self.dataset_order_sha256,
+                target_steps=int(self.cfg.training.target_steps),
+            )
+            validate_validation_records(
+                validation_rows,
+                target_steps=int(self.cfg.training.target_steps),
+                immutable_run_card_sha256=self.immutable_run_card_sha256,
+                manifest_sha256=str(self.cfg.training.p3_heldout_manifest_sha256),
+            )
+        except P3CompletionError as exc:
+            raise RuntimeError(str(exc)) from exc
+        self.p3_training_rows = training_rows
 
     def _install_signal_handlers(self):
         def request_checkpoint(signum, _frame):
@@ -528,8 +670,13 @@ class Trainer:
                 f"{checkpoint.get('source_commit')} versus {self.source_commit}"
             )
         if checkpoint.get("resume_config_sha256") != self.resume_config_sha256:
-            raise RuntimeError("Semantic training configuration differs from checkpoint")
-        if checkpoint.get("immutable_run_card_sha256") != self.immutable_run_card_sha256:
+            raise RuntimeError(
+                "Semantic training configuration differs from checkpoint"
+            )
+        if (
+            checkpoint.get("immutable_run_card_sha256")
+            != self.immutable_run_card_sha256
+        ):
             raise RuntimeError("Immutable run card differs from checkpoint")
         if checkpoint.get("dataset_order_sha256") != self.dataset_order_sha256:
             raise RuntimeError("Dataset order differs from checkpoint")
@@ -563,13 +710,27 @@ class Trainer:
         self._last_saved_step = self.global_step
         self._last_checkpoint_path = Path(path)
         self._last_checkpoint_sha256 = digest
-        log.info(
-            "Resuming at optimizer step %d from %s", self.global_step, path
+        self._last_checkpoint_history_record = self.checkpoint_manager.history_record(
+            self.global_step
         )
+        self._last_checkpoint_state_hashes = {
+            "parameter_sha256": checkpoint["parameter_sha256"],
+            "optimizer_sha256": checkpoint["optimizer_sha256"],
+            "scheduler_sha256": checkpoint["scheduler_sha256"],
+        }
+        self._loaded_checkpoint_metadata = checkpoint
+        log.info("Resuming at optimizer step %d from %s", self.global_step, path)
 
-    def save_step_checkpoint(self):
+    def save_step_checkpoint(self, reasons=("LEGACY_CALL",)):
         if self._last_saved_step == self.global_step:
-            return self._last_checkpoint_path, self._last_checkpoint_sha256
+            normalized = sorted(set(str(reason) for reason in reasons))
+            existing = (
+                []
+                if self._last_checkpoint_history_record is None
+                else list(self._last_checkpoint_history_record["reasons"])
+            )
+            if normalized == existing:
+                return self._last_checkpoint_path, self._last_checkpoint_sha256
         components = self._model_components()
         optimizers = self._optimizers()
         optimizer_states = {
@@ -599,14 +760,31 @@ class Trainer:
             "optimizer_sha256": nested_state_sha256(optimizer_states),
             "scheduler_sha256": nested_state_sha256(scheduler_states),
         }
-        path, digest = self.checkpoint_manager.save(payload, self.global_step)
+        path, digest = self.checkpoint_manager.save(
+            payload, self.global_step, reasons=reasons
+        )
         self._last_saved_step = self.global_step
         self._last_checkpoint_path = path
         self._last_checkpoint_sha256 = digest
-        log.info("Saved deterministic step checkpoint %s", path)
+        self._last_checkpoint_history_record = (
+            self.checkpoint_manager.last_history_record
+        )
+        self._last_checkpoint_state_hashes = {
+            "parameter_sha256": payload["parameter_sha256"],
+            "optimizer_sha256": payload["optimizer_sha256"],
+            "scheduler_sha256": payload["scheduler_sha256"],
+        }
+        self._loaded_checkpoint_metadata = payload
+        log.info(
+            "Saved deterministic step checkpoint %s reasons=%s",
+            path,
+            sorted(set(reasons)),
+        )
         return path, digest
 
-    def _write_step_progress(self, status, segment_start, segment_stop, elapsed_seconds):
+    def _write_step_progress(
+        self, status, segment_start, segment_stop, elapsed_seconds
+    ):
         components = self._model_components()
         progress = {
             "schema": PROGRESS_SCHEMA,
@@ -640,6 +818,26 @@ class Trainer:
             "stop_signal": self._stop_signal,
             "elapsed_seconds": elapsed_seconds,
         }
+        if self.p3_completion_enabled:
+            progress["p3_completion"] = {
+                "heldout_manifest_sha256": str(
+                    self.cfg.training.p3_heldout_manifest_sha256
+                ),
+                "data_manifest_sha256": str(self.cfg.training.p3_data_manifest_sha256),
+                "split_sha256": str(self.cfg.training.p3_split_sha256),
+                "training_ledger": str(self.p3_training_ledger_path),
+                "training_ledger_sha256": completion_sha256_file(
+                    self.p3_training_ledger_path
+                ),
+                "validation_ledger": str(self.p3_validation_ledger_path),
+                "validation_ledger_sha256": completion_sha256_file(
+                    self.p3_validation_ledger_path
+                ),
+                "checkpoint_history": str(self.checkpoint_manager.history_path),
+                "checkpoint_history_sha256": completion_sha256_file(
+                    self.checkpoint_manager.history_path
+                ),
+            }
         atomic_write_json(Path(self.cfg.saved_folder) / "progress.json", progress)
         print(
             "STEP_PROGRESS "
@@ -681,6 +879,304 @@ class Trainer:
         gathered_loss = self.accelerator.gather_for_metrics(loss.detach()).mean()
         return float(gathered_loss.cpu().item())
 
+    def _p3_checkpoint_reference(self):
+        if self._last_checkpoint_history_record is None:
+            raise RuntimeError("P3 step record has no checkpoint history reference")
+        return checkpoint_reference(
+            self._last_checkpoint_history_record,
+            self.checkpoint_manager.directory,
+        )
+
+    def _p3_append_training_record(self):
+        checkpoint = self._p3_checkpoint_reference()
+        hashes = (
+            self._last_checkpoint_state_hashes
+            if int(checkpoint["step"]) == self.global_step
+            else {}
+        )
+        record = {
+            "schema": TRAINING_RECORD_SCHEMA,
+            "source_commit": self.source_commit,
+            "immutable_run_card_sha256": self.immutable_run_card_sha256,
+            "dataset_order_sha256": self.dataset_order_sha256,
+            "config_sha256": self.p3_run_card["config_sha256"],
+            "global_step": self.global_step,
+            "completed_epochs": self.epoch,
+            "sampler": self._sampler_state(),
+            "loss": self.last_step_loss,
+            "parameter_sha256": hashes.get("parameter_sha256"),
+            "optimizer_sha256": hashes.get("optimizer_sha256"),
+            "scheduler_sha256": hashes.get("scheduler_sha256"),
+            "slurm_job_id": require_job_id(os.environ.get("SLURM_JOB_ID")),
+            "checkpoint": checkpoint,
+        }
+        try:
+            append_training_record(
+                self.p3_training_ledger_path,
+                record,
+                target_steps=int(self.cfg.training.target_steps),
+                known_rows=self.p3_training_rows,
+            )
+        except P3CompletionError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    def _p3_validation_loss(self, *, maximum_batches=None):
+        model_was_training = self.model.training
+        rng_state = capture_rng_state()
+        before = {
+            "parameter_sha256": parameter_sha256(self._model_components()),
+            "optimizer_sha256": nested_state_sha256(
+                {
+                    name: optimizer.state_dict()
+                    for name, optimizer in self._optimizers().items()
+                }
+            ),
+            "scheduler_sha256": nested_state_sha256(
+                {
+                    name: scheduler.state_dict()
+                    for name, scheduler in self.schedulers.items()
+                }
+            ),
+            "rng_sha256": nested_state_sha256(rng_state),
+        }
+        numerator = 0.0
+        element_count = 0
+        try:
+            self.model.eval()
+            with torch.no_grad():
+                for batch_index, data in enumerate(self.p3_validation_loader):
+                    if maximum_batches is not None and batch_index >= maximum_batches:
+                        break
+                    obs, act, _state = data
+                    z_pred, _visual, _reconstructed, loss, _components = self.model(
+                        obs, act
+                    )
+                    if z_pred is None or not torch.isfinite(loss):
+                        raise FloatingPointError(
+                            "held-out validation produced nonfinite loss"
+                        )
+                    if self.model.concat_dim == 0:
+                        count = int(z_pred[:, :, :-1, :].numel())
+                    else:
+                        count = int(z_pred[..., : -self.model.action_dim].numel())
+                    if count <= 0:
+                        raise RuntimeError(
+                            "held-out validation produced no loss elements"
+                        )
+                    numerator += float(loss.detach().to(torch.float64).cpu()) * count
+                    element_count += count
+        finally:
+            restore_rng_state(rng_state)
+            self.model.train(model_was_training)
+        after = {
+            "parameter_sha256": parameter_sha256(self._model_components()),
+            "optimizer_sha256": nested_state_sha256(
+                {
+                    name: optimizer.state_dict()
+                    for name, optimizer in self._optimizers().items()
+                }
+            ),
+            "scheduler_sha256": nested_state_sha256(
+                {
+                    name: scheduler.state_dict()
+                    for name, scheduler in self.schedulers.items()
+                }
+            ),
+            "rng_sha256": nested_state_sha256(capture_rng_state()),
+        }
+        if before != after:
+            raise RuntimeError(
+                "held-out validation did not restore model/optimizer/RNG state"
+            )
+        mean = numerator / element_count if element_count else float("nan")
+        if not np.isfinite(numerator) or not np.isfinite(mean) or element_count <= 0:
+            raise FloatingPointError(
+                "held-out validation aggregate is nonfinite or empty"
+            )
+        return numerator, element_count, mean, before
+
+    def _p3_depth_provenance(self):
+        depth = self.p3_run_card.get("depth_inputs")
+        if depth is None:
+            return {
+                "depth_producer_sha256": None,
+                "depth_cache_manifest_sha256": None,
+                "depth_native_contract_sha256": None,
+                "depth_validation_sha256": None,
+                "depth_checkpoint_sha256": None,
+            }
+        return {
+            "depth_producer_sha256": depth["producer_sha256"],
+            "depth_cache_manifest_sha256": depth["cache_manifest_sha256"],
+            "depth_native_contract_sha256": depth["native_contract_sha256"],
+            "depth_validation_sha256": depth["validation_sha256"],
+            "depth_checkpoint_sha256": depth["checkpoint_sha256"],
+        }
+
+    def _p3_complete_percent(self, percent):
+        mapping = percent_step_map(int(self.cfg.training.target_steps))
+        if mapping[int(percent)] != self.global_step:
+            raise RuntimeError("held-out percent is not at its exact mapped step")
+        existing = load_jsonl(self.p3_validation_ledger_path, allow_missing=True)
+        prior = next((row for row in existing if row.get("percent") == percent), None)
+        if prior is not None:
+            if (
+                prior.get("global_step") != self.global_step
+                or prior.get("checkpoint_sha256") != self._last_checkpoint_sha256
+            ):
+                raise RuntimeError("existing held-out percent differs from checkpoint")
+            return
+        if self._last_saved_step != self.global_step:
+            raise RuntimeError("held-out percent lacks an exact step checkpoint")
+        numerator, count, mean, hashes = self._p3_validation_loss()
+        metadata = self.p3_heldout_metadata
+        record = {
+            "schema": VALIDATION_RECORD_SCHEMA,
+            "percent": int(percent),
+            "global_step": self.global_step,
+            "target_steps": int(self.cfg.training.target_steps),
+            "rounding_rule": "ceil(target_steps*percent/100)",
+            "loss_numerator": numerator,
+            "element_count": count,
+            "mean_loss": mean,
+            "source_commit": self.source_commit,
+            "config_sha256": self.p3_run_card["config_sha256"],
+            "container_sha256": self.p3_run_card["container"]["sha256"],
+            "model_sha256": hashes["parameter_sha256"],
+            "checkpoint_sha256": self._last_checkpoint_sha256,
+            "checkpoint_history_record_sha256": self._last_checkpoint_history_record[
+                "record_sha256"
+            ],
+            "manifest_sha256": str(self.cfg.training.p3_heldout_manifest_sha256),
+            "data_manifest_sha256": metadata["data_manifest_sha256"],
+            "split_sha256": metadata["split_sha256"],
+            "immutable_run_card_sha256": self.immutable_run_card_sha256,
+            "slurm_job_id": require_job_id(os.environ.get("SLURM_JOB_ID")),
+            "state_restored": True,
+            **self._p3_depth_provenance(),
+        }
+        try:
+            append_validation_record(
+                self.p3_validation_ledger_path,
+                record,
+                target_steps=int(self.cfg.training.target_steps),
+            )
+        except P3CompletionError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    def _p3_reconcile_loaded_step(self):
+        rows = self.p3_training_rows
+        if len(rows) < max(0, self.global_step - 1):
+            raise RuntimeError("training ledger is too short for the loaded checkpoint")
+        if self.global_step > 0 and len(rows) == self.global_step - 1:
+            self._p3_append_training_record()
+        for percent in percents_at_step(
+            int(self.cfg.training.target_steps), self.global_step
+        ):
+            self._p3_complete_percent(percent)
+
+    def _run_p3_final_acceptance(self):
+        if os.environ.get("P3_FINAL_ACCEPTANCE_PROCESS") != "1":
+            raise RuntimeError("final acceptance must run in the fresh wrapper process")
+        target_steps = int(self.cfg.training.target_steps)
+        if self.global_step != target_steps or self._loaded_checkpoint_metadata is None:
+            raise RuntimeError(
+                "final acceptance did not load the exact target checkpoint"
+            )
+        training_rows = load_jsonl(self.p3_training_ledger_path)
+        validation_rows = load_jsonl(self.p3_validation_ledger_path)
+        validate_training_records(
+            training_rows,
+            source_commit=self.source_commit,
+            immutable_run_card_sha256=self.immutable_run_card_sha256,
+            dataset_order_sha256=self.dataset_order_sha256,
+            target_steps=target_steps,
+            require_complete=True,
+        )
+        validate_validation_records(
+            validation_rows,
+            target_steps=target_steps,
+            immutable_run_card_sha256=self.immutable_run_card_sha256,
+            manifest_sha256=str(self.cfg.training.p3_heldout_manifest_sha256),
+            require_complete=True,
+        )
+        progress_path = Path(self.cfg.saved_folder) / "progress.json"
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        checkpoint = self._loaded_checkpoint_metadata
+        if (
+            progress.get("status") != "TARGET_REACHED"
+            or progress.get("global_step") != target_steps
+            or progress.get("checkpoint_sha256") != self._last_checkpoint_sha256
+            or progress.get("parameter_sha256") != checkpoint["parameter_sha256"]
+            or progress.get("optimizer_sha256") != checkpoint["optimizer_sha256"]
+            or progress.get("scheduler_sha256") != checkpoint["scheduler_sha256"]
+            or checkpoint.get("sampler") != self._sampler_state()
+        ):
+            raise RuntimeError(
+                "final checkpoint metadata differs from progress/runtime"
+            )
+        history = load_checkpoint_history(self.checkpoint_manager.history_path)
+        if not history or history[-1]["step"] != target_steps:
+            raise RuntimeError("checkpoint history does not end at the exact target")
+        restore_rng_state(checkpoint["rng"])
+        numerator, count, mean, hashes = self._p3_validation_loss(maximum_batches=1)
+        expected_fresh_hashes = {
+            "parameter_sha256": checkpoint["parameter_sha256"],
+            "optimizer_sha256": checkpoint["optimizer_sha256"],
+            "scheduler_sha256": checkpoint["scheduler_sha256"],
+            "rng_sha256": nested_state_sha256(checkpoint["rng"]),
+        }
+        if hashes != expected_fresh_hashes:
+            raise RuntimeError(
+                "fresh-load model/optimizer/scheduler/RNG differs from final checkpoint"
+            )
+        heldout = self.p3_run_card["heldout_loss_manifest"]
+        receipt = {
+            "schema": FINAL_RECEIPT_SCHEMA,
+            "state": "PASS",
+            "fresh_model_process": True,
+            "process_id": os.getpid(),
+            "slurm_job_id": require_job_id(os.environ.get("SLURM_JOB_ID")),
+            "source_commit": self.source_commit,
+            "immutable_run_card_sha256": self.immutable_run_card_sha256,
+            "config_sha256": self.p3_run_card["config_sha256"],
+            "container_sha256": self.p3_run_card["container"]["sha256"],
+            "target_steps": target_steps,
+            "global_step": self.global_step,
+            "sampler": self._sampler_state(),
+            "checkpoint": str(self._last_checkpoint_path),
+            "checkpoint_sha256": self._last_checkpoint_sha256,
+            "checkpoint_history_record_sha256": history[-1]["record_sha256"],
+            "parameter_sha256": checkpoint["parameter_sha256"],
+            "optimizer_sha256": checkpoint["optimizer_sha256"],
+            "scheduler_sha256": checkpoint["scheduler_sha256"],
+            "rng_sha256": nested_state_sha256(checkpoint["rng"]),
+            "manifest_sha256": heldout["sha256"],
+            "data_manifest_sha256": heldout["data_manifest_sha256"],
+            "split_sha256": heldout["split_sha256"],
+            "training_ledger_sha256": completion_sha256_file(
+                self.p3_training_ledger_path
+            ),
+            "validation_ledger_sha256": completion_sha256_file(
+                self.p3_validation_ledger_path
+            ),
+            "checkpoint_history_sha256": completion_sha256_file(
+                self.checkpoint_manager.history_path
+            ),
+            "dataset_order_sha256": self.dataset_order_sha256,
+            "validation_batch": {
+                "manifest_key": self.p3_heldout_rows[0]["key"],
+                "loss_numerator": numerator,
+                "element_count": count,
+                "mean_loss": mean,
+            },
+            **self._p3_depth_provenance(),
+        }
+        write_final_receipt(
+            Path(self.cfg.saved_folder) / "final_acceptance.json", receipt
+        )
+        print("P3_FINAL_ACCEPTANCE=PASS")
+
     def run_steps(self):
         target_steps = int(self.cfg.training.target_steps)
         if self.global_step > target_steps:
@@ -691,9 +1187,7 @@ class Trainer:
         configured_segment = self.cfg.training.segment_steps
         segment_stop = target_steps
         if configured_segment is not None:
-            segment_stop = min(
-                target_steps, segment_start + int(configured_segment)
-            )
+            segment_stop = min(target_steps, segment_start + int(configured_segment))
         sampler = StepBatchSampler(
             dataset_size=len(self.datasets["train"]),
             batch_size=int(self.cfg.gpu_batch_size),
@@ -713,6 +1207,11 @@ class Trainer:
         if self._resume_rng_state is not None:
             restore_rng_state(self._resume_rng_state)
             self._resume_rng_state = None
+
+        if self.p3_completion_enabled:
+            if self._last_saved_step is None:
+                self.save_step_checkpoint(("INITIAL_STATE",))
+            self._p3_reconcile_loaded_step()
 
         started = time.perf_counter()
         checkpoint_every = int(self.cfg.training.checkpoint_every_steps)
@@ -742,14 +1241,40 @@ class Trainer:
                         batch_samples=batch_samples,
                     )
 
-                if test_signal_step is not None and self.global_step == int(test_signal_step):
+                if test_signal_step is not None and self.global_step == int(
+                    test_signal_step
+                ):
                     os.kill(os.getpid(), signal.SIGUSR1)
                 checkpoint_due = (
                     checkpoint_every > 0 and self.global_step % checkpoint_every == 0
                 )
                 epoch_complete = self.global_step % sampler.steps_per_epoch == 0
-                if checkpoint_due or epoch_complete or self._stop_requested:
-                    self.save_step_checkpoint()
+                reasons = []
+                if checkpoint_due:
+                    reasons.append("CONFIGURED_INTERVAL")
+                if epoch_complete:
+                    reasons.append("COMPLETE_EPOCH")
+                if self._stop_requested:
+                    reasons.append(
+                        "USR1" if self._stop_signal == "SIGUSR1" else "SIGNAL_STOP"
+                    )
+                if self.global_step == segment_stop:
+                    reasons.append("SEGMENT_BOUNDARY")
+                if self.global_step == target_steps:
+                    reasons.append("EXACT_TARGET")
+                due_percents = (
+                    percents_at_step(target_steps, self.global_step)
+                    if self.p3_completion_enabled
+                    else []
+                )
+                if due_percents:
+                    reasons.append("INTEGER_PERCENT")
+                if reasons:
+                    self.save_step_checkpoint(tuple(reasons))
+                if self.p3_completion_enabled:
+                    self._p3_append_training_record()
+                    for percent in due_percents:
+                        self._p3_complete_percent(percent)
                 if self._stop_requested:
                     break
         except BaseException as error:
@@ -757,7 +1282,22 @@ class Trainer:
                 timing.abort(error)
             raise
 
-        self.save_step_checkpoint()
+        final_reasons = []
+        if self.global_step == segment_stop:
+            final_reasons.append("SEGMENT_BOUNDARY")
+        if self.global_step == target_steps:
+            final_reasons.append("EXACT_TARGET")
+        stop_reason = None
+        if self._stop_requested:
+            stop_reason = "USR1" if self._stop_signal == "SIGUSR1" else "SIGNAL_STOP"
+            final_reasons.append(stop_reason)
+        if self._last_saved_step != self.global_step:
+            self.save_step_checkpoint(tuple(final_reasons or ["LOADER_STOP"]))
+        elif (
+            stop_reason is not None
+            and stop_reason not in self._last_checkpoint_history_record["reasons"]
+        ):
+            self.save_step_checkpoint((stop_reason,))
         if self.global_step == target_steps:
             status = "TARGET_REACHED"
         elif self._stop_requested:
@@ -798,6 +1338,9 @@ class Trainer:
             time.sleep(1)
 
     def run(self):
+        if self.final_acceptance:
+            self._run_p3_final_acceptance()
+            return
         if self.step_mode:
             self.run_steps()
             return
@@ -1098,11 +1641,15 @@ class Trainer:
                     if obs["visual"].shape[0] > min_horizon * self.cfg.frameskip + 1:
                         start = np.random.randint(
                             0,
-                            obs["visual"].shape[0] - min_horizon * self.cfg.frameskip - 1,
+                            obs["visual"].shape[0]
+                            - min_horizon * self.cfg.frameskip
+                            - 1,
                         )
                     else:
                         start = 0
-                    max_horizon = (obs["visual"].shape[0] - start - 1) // self.cfg.frameskip
+                    max_horizon = (
+                        obs["visual"].shape[0] - start - 1
+                    ) // self.cfg.frameskip
                     if max_horizon > min_horizon:
                         valid_traj = True
                         horizon = np.random.randint(min_horizon, max_horizon + 1)
@@ -1113,9 +1660,9 @@ class Trainer:
 
             for k in obs.keys():
                 obs[k] = obs[k][
-                    start : 
-                    start + horizon * self.cfg.frameskip + 1 : 
-                    self.cfg.frameskip
+                    start : start
+                    + horizon * self.cfg.frameskip
+                    + 1 : self.cfg.frameskip
                 ]
             act = act[start : start + horizon * self.cfg.frameskip]
             act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.frameskip)
@@ -1142,13 +1689,9 @@ class Trainer:
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
                     if log_key in logs:
-                        logs[f"z_{k}_err_rollout{postfix}"].append(
-                            div_loss[k]
-                        )
+                        logs[f"z_{k}_err_rollout{postfix}"].append(div_loss[k])
                     else:
-                        logs[f"z_{k}_err_rollout{postfix}"] = [
-                            div_loss[k]
-                        ]
+                        logs[f"z_{k}_err_rollout{postfix}"] = [div_loss[k]]
 
                 if self.cfg.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
@@ -1181,8 +1724,10 @@ class Trainer:
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-        log.info(f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}")
+        log.info(
+            f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
+                Validation loss: {epoch_log['val_loss']:.4f}"
+        )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)

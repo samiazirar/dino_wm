@@ -62,6 +62,14 @@ segment_sizing:
   max_productive_hours: 8.0
   safety_margin_fraction: 0.2
   quantum_steps: 1000
+p3_completion:
+  heldout_selection: all_validation_examples
+  percent_rounding: ceil_target_times_percent_over_100
+  progress_points: 100
+  early_window: [76, 77, 78, 79, 80]
+  late_window: [96, 97, 98, 99, 100]
+  plateau_relative_threshold: 0.02
+  final_receipt: final_acceptance.json
 p2:
   geometry_minutes: 30
   timing_minutes: 50
@@ -87,6 +95,7 @@ artifacts:
 source_hash_files:
   - train.py
   - training_resume.py
+  - p3_completion.py
   - depth_contract.py
   - datasets/depth_cache.py
   - datasets/pusht_dset.py
@@ -111,6 +120,8 @@ source_hash_files:
   - tools/submit_matrix.py
   - tools/collect_runs.py
   - tools/collect_p2_timing.py
+  - tools/materialize_p3_heldout.py
+  - tools/collect_p3_completion.py
   - tools/harness_common.py
   - tools/p2_harness_gate.py
   - tools/run_matrix_card.py
