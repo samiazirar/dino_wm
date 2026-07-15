@@ -715,6 +715,7 @@ def test_validation_ledger_rejects_rehashed_state_and_percent_order_drift(tmp_pa
     ("field", "value", "message"),
     [
         ("global_step", True, "percent-to-step mapping"),
+        ("target_steps", 101, "target or rounding rule"),
         ("target_steps", 100.0, "target or rounding rule"),
         ("target_steps", True, "target or rounding rule"),
         ("rounding_rule", "round", "target or rounding rule"),
