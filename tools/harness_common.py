@@ -32,6 +32,30 @@ LOCKED_HORIZONS = {
 LOCKED_NUM_HIST = {"pusht": 3, "wall": 1, "rope": 1, "granular": 1}
 STUDENT_SHA256 = "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc"
 TIMING_SUMMARY_SCHEMA = "dino-wm-p2-timing-summary-v1"
+EVALUATION_DEPTH_PROVENANCE_FIELDS = (
+    "depth_producer_sha256",
+    "depth_cache_manifest_sha256",
+    "depth_native_contract_sha256",
+    "depth_validation_sha256",
+    "depth_checkpoint_sha256",
+)
+EVALUATION_IMMUTABLE_PROVENANCE_FIELDS = (
+    "evaluation_run_card_sha256",
+    "evaluation_run_card_file_sha256",
+    "training_run_card_sha256",
+    "training_run_card_file_sha256",
+    "source_commit",
+    "config_sha256",
+    "container_sha256",
+    "checkpoint_sha256",
+    "manifest_sha256",
+    *EVALUATION_DEPTH_PROVENANCE_FIELDS,
+)
+EVALUATION_SHA256_PROVENANCE_FIELDS = tuple(
+    field
+    for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS
+    if field != "source_commit"
+)
 
 
 class HarnessError(RuntimeError):
@@ -54,6 +78,90 @@ def sha256_file(path: str | Path) -> str:
         for block in iter(lambda: handle.read(16 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _is_lower_hex(value: Any, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and value == value.lower()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def build_evaluation_provenance(
+    card: Mapping[str, Any],
+    training_card: Mapping[str, Any],
+    *,
+    evaluation_run_card_file_sha256: str,
+    checkpoint_sha256: str,
+    manifest_sha256: str,
+    slurm_job_id: str | None,
+) -> Mapping[str, Any]:
+    depth = card.get("depth_inputs")
+    if isinstance(depth, Mapping):
+        depth_values = {
+            "depth_producer_sha256": depth.get("producer_sha256"),
+            "depth_cache_manifest_sha256": depth.get("cache_manifest_sha256"),
+            "depth_native_contract_sha256": depth.get("native_contract_sha256"),
+            "depth_validation_sha256": depth.get("validation_sha256"),
+            "depth_checkpoint_sha256": depth.get("checkpoint_sha256"),
+        }
+    else:
+        depth_values = {field: None for field in EVALUATION_DEPTH_PROVENANCE_FIELDS}
+    training_reference = card.get("training_run_card")
+    container = card.get("container")
+    if not isinstance(training_reference, Mapping) or not isinstance(
+        container, Mapping
+    ):
+        raise HarnessError("evaluation card lacks training or container provenance")
+    provenance = {
+        "evaluation_run_card_sha256": card.get("run_card_sha256"),
+        "evaluation_run_card_file_sha256": evaluation_run_card_file_sha256,
+        "training_run_card_sha256": training_card.get("run_card_sha256"),
+        "training_run_card_file_sha256": training_reference.get("file_sha256"),
+        "source_commit": card.get("source_commit"),
+        "config_sha256": card.get("config_sha256"),
+        "container_sha256": container.get("sha256"),
+        "checkpoint_sha256": checkpoint_sha256,
+        "manifest_sha256": manifest_sha256,
+        "slurm_job_id": slurm_job_id,
+        **depth_values,
+    }
+    validate_evaluation_provenance(
+        provenance, requires_depth=isinstance(depth, Mapping)
+    )
+    return provenance
+
+
+def validate_evaluation_provenance(
+    value: Mapping[str, Any],
+    *,
+    expected: Mapping[str, Any] | None = None,
+    requires_depth: bool,
+) -> None:
+    for field in EVALUATION_SHA256_PROVENANCE_FIELDS:
+        field_value = value.get(field)
+        if field in EVALUATION_DEPTH_PROVENANCE_FIELDS and not requires_depth:
+            if field_value is not None:
+                raise HarnessError("depth provenance is present for a depth-free run")
+        elif not _is_lower_hex(field_value, 64):
+            raise HarnessError(f"evaluation provenance has invalid {field}")
+    if not _is_lower_hex(value.get("source_commit"), 40):
+        raise HarnessError("evaluation provenance has invalid source_commit")
+    slurm_job_id = value.get("slurm_job_id")
+    if not isinstance(slurm_job_id, str) or not slurm_job_id.isdigit():
+        raise HarnessError("evaluation provenance has invalid slurm_job_id")
+    if expected is not None:
+        differing = [
+            field
+            for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS
+            if value.get(field) != expected.get(field)
+        ]
+        if differing:
+            raise HarnessError(
+                f"immutable evaluation provenance differs: {sorted(differing)}"
+            )
 
 
 def load_yaml(path: str | Path) -> Mapping[str, Any]:
@@ -100,11 +208,16 @@ def validate_spec(spec: Mapping[str, Any]) -> None:
     if len(str(container.get("sha256"))) != 64:
         raise HarnessError("container SHA-256 is invalid")
     arms = spec.get("arms")
-    if not isinstance(arms, list) or tuple(item.get("id") for item in arms) != LOCKED_ARMS:
+    if (
+        not isinstance(arms, list)
+        or tuple(item.get("id") for item in arms) != LOCKED_ARMS
+    ):
         raise HarnessError("study arms must be exactly the locked three-arm order")
     environments = spec.get("environments")
     if not isinstance(environments, Mapping) or tuple(environments) != LOCKED_ENVS:
-        raise HarnessError("study environments must be exactly the locked four-env order")
+        raise HarnessError(
+            "study environments must be exactly the locked four-env order"
+        )
     for environment in LOCKED_ENVS:
         record = environments[environment]
         expected = (
@@ -139,13 +252,17 @@ def validate_spec(spec: Mapping[str, Any]) -> None:
         "plan_during_training": False,
     }
     if protocol != required_protocol:
-        raise HarnessError("shared protocol differs from the locked decoder-off contract")
+        raise HarnessError(
+            "shared protocol differs from the locked decoder-off contract"
+        )
     if spec.get("segment_sizing") != {
         "max_productive_hours": 8.0,
         "safety_margin_fraction": 0.2,
         "quantum_steps": 1000,
     }:
-        raise HarnessError("segment sizing policy differs from the locked safety contract")
+        raise HarnessError(
+            "segment sizing policy differs from the locked safety contract"
+        )
     p2a = spec.get("p2a")
     if not isinstance(p2a, Mapping):
         raise HarnessError("P2a spec is absent")
@@ -184,14 +301,18 @@ def load_timing_summary(path: str | Path) -> Mapping[str, Any]:
         raise HarnessError("P2 timing summary is absent, failed, or incompatible")
     rates = summary.get("rates")
     expected = {
-        f"{arm}/{environment}"
-        for arm in LOCKED_ARMS
-        for environment in LOCKED_ENVS
+        f"{arm}/{environment}" for arm in LOCKED_ARMS for environment in LOCKED_ENVS
     }
     if not isinstance(rates, Mapping) or set(rates) != expected:
-        raise HarnessError("P2 timing summary must contain exactly 12 arm/environment rates")
+        raise HarnessError(
+            "P2 timing summary must contain exactly 12 arm/environment rates"
+        )
     for key, record in rates.items():
-        rate = record.get("optimizer_steps_per_second") if isinstance(record, Mapping) else None
+        rate = (
+            record.get("optimizer_steps_per_second")
+            if isinstance(record, Mapping)
+            else None
+        )
         if (
             not isinstance(record, Mapping)
             or record.get("state") != "PASS"
@@ -238,14 +359,19 @@ def derive_segment_sizing(
         "quantum_steps": quantum,
         "derived_segment_steps": derived,
     }
-    validate_segment_sizing(record, arm=arm, environment=environment, target_steps=target_steps)
+    validate_segment_sizing(
+        record, arm=arm, environment=environment, target_steps=target_steps
+    )
     return record
 
 
 def validate_segment_sizing(
     record: Mapping[str, Any], *, arm: str, environment: str, target_steps: int
 ) -> None:
-    if not isinstance(record, Mapping) or record.get("rate_key") != f"{arm}/{environment}":
+    if (
+        not isinstance(record, Mapping)
+        or record.get("rate_key") != f"{arm}/{environment}"
+    ):
         raise HarnessError("segment sizing rate key differs from the run card")
     rate = record.get("optimizer_steps_per_second")
     max_hours = record.get("max_productive_hours")
@@ -270,14 +396,20 @@ def validate_segment_sizing(
         raise HarnessError("segment sizing record has invalid rate or policy fields")
     expected = min(
         int(target_steps),
-        int((float(rate) * float(max_hours) * 3600.0 * (1.0 - float(margin))) // quantum)
+        int(
+            (float(rate) * float(max_hours) * 3600.0 * (1.0 - float(margin))) // quantum
+        )
         * quantum,
     )
     if expected < quantum or derived != expected:
-        raise HarnessError("segment steps were not derived from the accepted rate and margin")
+        raise HarnessError(
+            "segment steps were not derived from the accepted rate and margin"
+        )
 
 
-def source_evidence(spec: Mapping[str, Any], local_code_root: Path) -> Mapping[str, Any]:
+def source_evidence(
+    spec: Mapping[str, Any], local_code_root: Path
+) -> Mapping[str, Any]:
     local_code_root = local_code_root.resolve()
     commit = subprocess.check_output(
         ["git", "-C", str(local_code_root), "rev-parse", "HEAD"], text=True
@@ -286,9 +418,7 @@ def source_evidence(spec: Mapping[str, Any], local_code_root: Path) -> Mapping[s
         ["git", "-C", str(local_code_root), "status", "--porcelain"], text=True
     )
     if status:
-        raise HarnessError(
-            "run cards cannot be materialized from a dirty source tree"
-        )
+        raise HarnessError("run cards cannot be materialized from a dirty source tree")
     files = spec.get("source_hash_files")
     if not isinstance(files, list) or not files:
         raise HarnessError("source_hash_files is empty")
@@ -328,16 +458,23 @@ def load_contract_index(path: str | Path) -> Mapping[str, Any]:
         raise HarnessError("depth producer index is absent")
     required_producers = {"da3_giant_video", "mapanything_recovered_framewise"}
     if set(producers) != required_producers:
-        raise HarnessError("contract index must contain exactly the two locked producers")
+        raise HarnessError(
+            "contract index must contain exactly the two locked producers"
+        )
     for producer_name, producer in producers.items():
-        if not isinstance(producer, Mapping) or len(str(producer.get("producer_sha256"))) != 64:
+        if (
+            not isinstance(producer, Mapping)
+            or len(str(producer.get("producer_sha256"))) != 64
+        ):
             raise HarnessError(f"invalid producer record for {producer_name}")
         caches = producer.get("caches")
         if not isinstance(caches, Mapping):
             raise HarnessError(f"cache records are absent for {producer_name}")
         for environment, cache in caches.items():
             if environment not in LOCKED_ENVS or not isinstance(cache, Mapping):
-                raise HarnessError(f"invalid cache record {producer_name}/{environment}")
+                raise HarnessError(
+                    f"invalid cache record {producer_name}/{environment}"
+                )
             require_real_marvin_path(
                 str(cache.get("cache_dir")), f"{producer_name}/{environment}.cache_dir"
             )
@@ -345,7 +482,9 @@ def load_contract_index(path: str | Path) -> Mapping[str, Any]:
                 "path": str(Path(str(cache["cache_dir"])) / "manifest.json"),
                 "sha256": cache.get("manifest_sha256"),
             }
-            verify_hashed_path(manifest_record, f"{producer_name}/{environment} manifest")
+            verify_hashed_path(
+                manifest_record, f"{producer_name}/{environment} manifest"
+            )
             validation = verify_hashed_path(
                 {
                     "path": cache.get("validation_path"),
@@ -427,7 +566,9 @@ def verify_evaluation_bindings(
         or not metadata_path.is_file()
         or sha256_file(metadata_path) != fixed.get("metadata_sha256")
     ):
-        raise HarnessError("fixed manifest or metadata hash differs from evaluation card")
+        raise HarnessError(
+            "fixed manifest or metadata hash differs from evaluation card"
+        )
     metadata = load_json(metadata_path)
     environment = str(card.get("environment"))
     if (
@@ -450,7 +591,9 @@ def verify_evaluation_bindings(
     training = load_yaml(training_path)
     validate_run_card(training)
     if training.get("run_card_sha256") != reference.get("run_card_sha256"):
-        raise HarnessError("training run-card content hash differs from evaluation card")
+        raise HarnessError(
+            "training run-card content hash differs from evaluation card"
+        )
     expected_kind = (
         "p3-training" if card.get("kind") == "p4-open-loop" else "p2a-producer-pilot"
     )
@@ -477,7 +620,9 @@ def immutable_yaml(path: str | Path, value: Mapping[str, Any]) -> str:
     text = yaml.safe_dump(dict(value), sort_keys=False, allow_unicode=False)
     if path.exists():
         if path.read_text(encoding="utf-8") != text:
-            raise HarnessError(f"immutable YAML already exists with different bytes: {path}")
+            raise HarnessError(
+                f"immutable YAML already exists with different bytes: {path}"
+            )
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")

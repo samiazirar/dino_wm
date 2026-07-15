@@ -25,7 +25,12 @@ from depth_contract import (
 from models import dinocular_backbone
 from models.dinocular import DinocularEncoder
 from models.dinocular_backbone import BackendSpec
-from eval_encoder_swap import EvaluationContractError, _verify_training_completion
+from eval_encoder_swap import (
+    EvaluationContractError,
+    _result_provenance,
+    _validate_existing_result_provenance,
+    _verify_training_completion,
+)
 from tools import make_manifests
 from tools.harness_common import (
     HarnessError,
@@ -1521,17 +1526,44 @@ def test_pusht_segment_budget_rejects_26000_and_derives_safe_chunk(tmp_path):
     _validate_rates(rates, [safe], 8.0)
 
 
+def _provenance_fields(
+    *,
+    arm: str,
+    token: str,
+    slurm_job_id: str = "12345",
+    depth_token: str = "a",
+):
+    depth = arm != "dino_pinned"
+    return {
+        "evaluation_run_card_sha256": token * 64,
+        "evaluation_run_card_file_sha256": token * 64,
+        "training_run_card_sha256": token * 64,
+        "training_run_card_file_sha256": token * 64,
+        "source_commit": "f" * 40,
+        "config_sha256": token * 64,
+        "container_sha256": "c" * 64,
+        "checkpoint_sha256": token * 64,
+        "manifest_sha256": "9" * 64,
+        "slurm_job_id": slurm_job_id,
+        "depth_producer_sha256": depth_token * 64 if depth else None,
+        "depth_cache_manifest_sha256": depth_token * 64 if depth else None,
+        "depth_native_contract_sha256": depth_token * 64 if depth else None,
+        "depth_validation_sha256": depth_token * 64 if depth else None,
+        "depth_checkpoint_sha256": depth_token * 64 if depth else None,
+    }
+
+
 def _result_row(producer, episode, model5, persistence5, model10, persistence10):
+    token = "a" if producer == "da3_giant_video" else "b"
     return {
         "schema": "dino-wm-open-loop-episode-errors-v1",
-        "run_id": f"{producer}-{episode}",
+        "run_id": f"p2a-{producer}",
         "arm": "dinocular",
         "producer": producer,
         "seed": 1,
         "environment": "pusht",
         "episode": episode,
-        "manifest_sha256": "9" * 64,
-        "checkpoint_sha256": "8" * 64,
+        **_provenance_fields(arm="dinocular", token=token, depth_token=token),
         "manifest_keys": [f"pusht/valid/{episode:05d}/000000"],
         "manifest_key_count": 1,
         "horizons": {
@@ -1554,14 +1586,16 @@ def _result_row(producer, episode, model5, persistence5, model10, persistence10)
 
 def test_p4_collector_rejects_manifest_hash_key_or_horizon_mismatch():
     groups = {}
-    for arm in LOCKED_ARMS:
-        for seed in LOCKED_SEEDS:
+    for arm_index, arm in enumerate(LOCKED_ARMS):
+        for seed_index, seed in enumerate(LOCKED_SEEDS):
+            token = "123456789"[arm_index * len(LOCKED_SEEDS) + seed_index]
             row = {
+                "run_id": f"p4-wall-{arm}-s{seed}",
                 "environment": "wall",
                 "arm": arm,
                 "seed": seed,
                 "episode": 0,
-                "manifest_sha256": "9" * 64,
+                **_provenance_fields(arm=arm, token=token),
                 "manifest_keys": ["wall/valid/00000/000000"],
                 "horizons": {str(value): {} for value in (1, 5, 10)},
             }
@@ -1578,6 +1612,98 @@ def test_p4_collector_rejects_manifest_hash_key_or_horizon_mismatch():
             _validate_open_loop_coverage(changed)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("evaluation_run_card_sha256", "0" * 64),
+        ("training_run_card_sha256", "0" * 64),
+        ("source_commit", "0" * 40),
+        ("config_sha256", "0" * 64),
+        ("container_sha256", "0" * 64),
+        ("checkpoint_sha256", "0" * 64),
+        ("depth_cache_manifest_sha256", "0" * 64),
+        ("depth_native_contract_sha256", "0" * 64),
+        ("depth_validation_sha256", "0" * 64),
+    ],
+)
+def test_p4_collector_rejects_immutable_provenance_drift(field, value):
+    groups = {}
+    for arm_index, arm in enumerate(LOCKED_ARMS):
+        for seed_index, seed in enumerate(LOCKED_SEEDS):
+            token = "123456789"[arm_index * len(LOCKED_SEEDS) + seed_index]
+            rows = []
+            for episode in (0, 1):
+                rows.append(
+                    {
+                        "run_id": f"p4-wall-{arm}-s{seed}",
+                        "environment": "wall",
+                        "arm": arm,
+                        "seed": seed,
+                        "episode": episode,
+                        **_provenance_fields(arm=arm, token=token),
+                        "manifest_keys": [f"wall/valid/{episode:05d}/000000"],
+                        "horizons": {str(value): {} for value in (1, 5, 10)},
+                    }
+                )
+            groups[("wall", arm, seed)] = rows
+    changed = {key: [dict(row) for row in rows] for key, rows in groups.items()}
+    changed[("wall", "dinocular", 2)][1][field] = value
+    with pytest.raises(CollectionError, match="provenance drift"):
+        _validate_open_loop_coverage(changed)
+
+
+def test_existing_output_resume_rejects_immutable_provenance_drift(tmp_path):
+    run_card_path = tmp_path / "evaluation.yaml"
+    run_card_path.write_text("immutable: true\n", encoding="utf-8")
+    card = {
+        "run_card_sha256": "1" * 64,
+        "training_run_card": {"file_sha256": "2" * 64},
+        "source_commit": "f" * 40,
+        "config_sha256": "3" * 64,
+        "container": {"sha256": "4" * 64},
+        "depth_inputs": {
+            "producer_sha256": "5" * 64,
+            "cache_manifest_sha256": "6" * 64,
+            "native_contract_sha256": "7" * 64,
+            "validation_sha256": "8" * 64,
+            "checkpoint_sha256": "9" * 64,
+        },
+    }
+    training_card = {"run_card_sha256": "a" * 64}
+    expected = _result_provenance(
+        card,
+        training_card,
+        run_card_path=run_card_path,
+        checkpoint_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+        slurm_job_id="12345",
+    )
+    resumed_row = dict(expected)
+    resumed_row["slurm_job_id"] = "67890"
+    _validate_existing_result_provenance(resumed_row, expected, requires_depth=True)
+    for field, value in (
+        ("evaluation_run_card_sha256", "0" * 64),
+        ("training_run_card_sha256", "0" * 64),
+        ("source_commit", "0" * 40),
+        ("config_sha256", "0" * 64),
+        ("container_sha256", "0" * 64),
+        ("checkpoint_sha256", "0" * 64),
+        ("manifest_sha256", "0" * 64),
+        ("depth_producer_sha256", "0" * 64),
+        ("depth_cache_manifest_sha256", "0" * 64),
+        ("depth_native_contract_sha256", "0" * 64),
+        ("depth_validation_sha256", "0" * 64),
+    ):
+        changed = dict(resumed_row)
+        changed[field] = value
+        with pytest.raises(EvaluationContractError, match="provenance differs"):
+            _validate_existing_result_provenance(changed, expected, requires_depth=True)
+    changed = dict(resumed_row)
+    changed["slurm_job_id"] = "not-a-job"
+    with pytest.raises(EvaluationContractError, match="slurm_job_id"):
+        _validate_existing_result_provenance(changed, expected, requires_depth=True)
+
+
 def test_pooled_nre_lower_point_decision_and_episode_bootstrap(tmp_path):
     paths = []
     for producer, multiplier in (
@@ -1589,6 +1715,7 @@ def test_pooled_nre_lower_point_decision_and_episode_bootstrap(tmp_path):
             _result_row(producer, 0, 1 * multiplier, 2, 3 * multiplier, 6),
             _result_row(producer, 1, 9 * multiplier, 18, 1 * multiplier, 2),
         ]
+        rows[1]["slurm_job_id"] = "12346"
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
         paths.append(path)
     output = tmp_path / "decision.json"
@@ -1615,3 +1742,36 @@ def test_pooled_nre_lower_point_decision_and_episode_bootstrap(tmp_path):
     assert decision["winner"] == "da3_giant_video"
     assert decision["pooled"]["da3_giant_video"]["5"]["nre"] == pytest.approx(0.5)
     assert decision["paired_trajectory_bootstrap"]["unit"] == "held_out_episode"
+    assert (
+        decision["input_provenance"]["da3_giant_video"]["evaluation_run_card_sha256"]
+        == "a" * 64
+    )
+    assert decision["input_provenance"]["da3_giant_video"]["slurm_job_ids"] == [
+        "12345",
+        "12346",
+    ]
+    rows = [json.loads(line) for line in paths[0].read_text().splitlines()]
+    rows[1]["config_sha256"] = "0" * 64
+    paths[0].write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    completed = subprocess.run(
+        [
+            "python3",
+            str(tool),
+            "producer-pilot",
+            "--inputs",
+            *(str(path) for path in paths),
+            "--bootstrap",
+            "10000",
+            "--seed",
+            "20260714",
+            "--out",
+            str(output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 2
+    assert "provenance drift" in completed.stderr

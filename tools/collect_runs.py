@@ -14,6 +14,19 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+try:
+    from .harness_common import (
+        EVALUATION_IMMUTABLE_PROVENANCE_FIELDS,
+        HarnessError,
+        validate_evaluation_provenance,
+    )
+except ImportError:
+    from harness_common import (  # type: ignore[no-redef]
+        EVALUATION_IMMUTABLE_PROVENANCE_FIELDS,
+        HarnessError,
+        validate_evaluation_provenance,
+    )
+
 
 RESULT_SCHEMA = "dino-wm-open-loop-episode-errors-v1"
 DECISION_SCHEMA = "dino-wm-p2a-producer-decision-v1"
@@ -36,6 +49,47 @@ class CollectionError(RuntimeError):
     """Coverage, finite-value, denominator, pairing, or decision gate failed."""
 
 
+def _row_provenance(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    requires_depth = row.get("arm") != "dino_pinned"
+    try:
+        validate_evaluation_provenance(row, requires_depth=requires_depth)
+    except HarnessError as exc:
+        raise CollectionError(f"invalid evaluator provenance: {exc}") from exc
+    return {field: row[field] for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS}
+
+
+def _group_provenance(
+    rows: Sequence[Mapping[str, Any]], label: str
+) -> Mapping[str, Any]:
+    if not rows:
+        raise CollectionError(f"empty evaluator group for {label}")
+    reference = _row_provenance(rows[0])
+    run_id = rows[0].get("run_id")
+    job_ids = set()
+    for row in rows:
+        current = _row_provenance(row)
+        if current != reference or row.get("run_id") != run_id:
+            raise CollectionError(
+                f"immutable evaluator provenance drift within {label}"
+            )
+        job_ids.add(str(row["slurm_job_id"]))
+    return {
+        "run_id": run_id,
+        **reference,
+        "slurm_job_ids": sorted(job_ids, key=int),
+    }
+
+
+def _require_common_code_provenance(
+    provenance: Iterable[Mapping[str, Any]], label: str
+) -> None:
+    identities = {
+        (item["source_commit"], item["container_sha256"]) for item in provenance
+    }
+    if len(identities) != 1:
+        raise CollectionError(f"source or container provenance drift across {label}")
+
+
 def _read(paths: Iterable[Path]) -> list[Mapping[str, Any]]:
     rows = []
     for path in paths:
@@ -50,7 +104,10 @@ def _read(paths: Iterable[Path]) -> list[Mapping[str, Any]]:
                         f"invalid JSONL at {path}:{line_number}: {exc}"
                     ) from exc
                 if not isinstance(row, Mapping) or row.get("schema") != RESULT_SCHEMA:
-                    raise CollectionError(f"invalid evaluator record at {path}:{line_number}")
+                    raise CollectionError(
+                        f"invalid evaluator record at {path}:{line_number}"
+                    )
+                _row_provenance(row)
                 rows.append(row)
     if not rows:
         raise CollectionError("no evaluator records were provided")
@@ -126,7 +183,9 @@ def producer_pilot(args: argparse.Namespace) -> None:
         or args.seed != BOOTSTRAP_SEED
         or args.tie_tolerance != TIE_TOLERANCE
     ):
-        raise CollectionError("P2a bootstrap or tie rule differs from the locked contract")
+        raise CollectionError(
+            "P2a bootstrap or tie rule differs from the locked contract"
+        )
     rows = _read(args.inputs)
     if any(
         row.get("environment") != "pusht"
@@ -144,8 +203,12 @@ def producer_pilot(args: argparse.Namespace) -> None:
     if tuple(grouped) != PRODUCERS and set(grouped) != set(PRODUCERS):
         raise CollectionError("P2a must contain exactly both locked producers")
     paired = {}
+    input_provenance = {}
     manifest_hashes = set()
     for producer in PRODUCERS:
+        input_provenance[producer] = _group_provenance(
+            grouped[producer], f"P2a/{producer}"
+        )
         rows_by_episode = {}
         keys = []
         for row in grouped[producer]:
@@ -167,6 +230,7 @@ def producer_pilot(args: argparse.Namespace) -> None:
         raise CollectionError("P2a producer coverage is not exactly paired")
     if len(manifest_hashes) != 1:
         raise CollectionError("P2a producers used different fixed manifest hashes")
+    _require_common_code_provenance(input_provenance.values(), "P2a producers")
     episodes = sorted(episode_sets[0])
     pooled = {}
     scores = {}
@@ -183,7 +247,9 @@ def producer_pilot(args: argparse.Namespace) -> None:
         raise CollectionError(
             f"P2a point estimates tie within {args.tie_tolerance}: delta={delta}"
         )
-    winner = PRODUCERS[0] if scores[PRODUCERS[0]] < scores[PRODUCERS[1]] else PRODUCERS[1]
+    winner = (
+        PRODUCERS[0] if scores[PRODUCERS[0]] < scores[PRODUCERS[1]] else PRODUCERS[1]
+    )
 
     rng = np.random.default_rng(args.seed)
     bootstrap = np.empty(args.bootstrap, dtype=np.float64)
@@ -201,7 +267,9 @@ def producer_pilot(args: argparse.Namespace) -> None:
                     persistence += p
                     elements += n
                 if persistence / elements <= 1e-12:
-                    raise CollectionError("bootstrap replicate has degenerate denominator")
+                    raise CollectionError(
+                        "bootstrap replicate has degenerate denominator"
+                    )
                 horizon_scores.append(model / persistence)
             sample_scores[producer] = 0.5 * sum(horizon_scores)
         bootstrap[replicate] = sample_scores[PRODUCERS[0]] - sample_scores[PRODUCERS[1]]
@@ -215,6 +283,7 @@ def producer_pilot(args: argparse.Namespace) -> None:
         "manifest_sha256": next(iter(manifest_hashes)),
         "episode_count": len(episodes),
         "manifest_key_count": len(key_sets[0]),
+        "input_provenance": input_provenance,
         "decision_horizons": list(P2A_HORIZONS),
         "pooled": pooled,
         "scores": scores,
@@ -234,10 +303,12 @@ def producer_pilot(args: argparse.Namespace) -> None:
 
 
 def _validate_open_loop_coverage(
-    groups: Mapping[tuple[str, str, int], Sequence[Mapping[str, Any]]]
+    groups: Mapping[tuple[str, str, int], Sequence[Mapping[str, Any]]],
 ) -> Mapping[str, Mapping[str, Any]]:
     environments = sorted({key[0] for key in groups})
-    if not environments or any(environment not in P4_HORIZONS for environment in environments):
+    if not environments or any(
+        environment not in P4_HORIZONS for environment in environments
+    ):
         raise CollectionError("P4 contains no environment or an unknown environment")
     contracts = {}
     for environment in environments:
@@ -250,8 +321,12 @@ def _validate_open_loop_coverage(
                 f"P4 must contain exactly all 9 arm/seed groups for {environment}"
             )
         group_contracts = {}
+        group_provenance = {}
         for key in sorted(expected_groups):
             rows = groups[key]
+            group_provenance[key] = _group_provenance(
+                rows, f"P4/{key[0]}/{key[1]}/s{key[2]}"
+            )
             episodes = []
             coverage = []
             hashes = set()
@@ -260,8 +335,14 @@ def _validate_open_loop_coverage(
                 if row_horizons != set(P4_HORIZONS[environment]):
                     raise CollectionError(f"P4 horizon set differs for {key}")
                 keys = row.get("manifest_keys")
-                if not isinstance(keys, list) or not keys or len(keys) != len(set(keys)):
-                    raise CollectionError(f"P4 manifest-key record is empty or duplicated for {key}")
+                if (
+                    not isinstance(keys, list)
+                    or not keys
+                    or len(keys) != len(set(keys))
+                ):
+                    raise CollectionError(
+                        f"P4 manifest-key record is empty or duplicated for {key}"
+                    )
                 episodes.append(int(row["episode"]))
                 coverage.extend(str(value) for value in keys)
                 hashes.add(str(row.get("manifest_sha256")))
@@ -270,7 +351,9 @@ def _validate_open_loop_coverage(
                 or len(coverage) != len(set(coverage))
                 or len(hashes) != 1
             ):
-                raise CollectionError(f"duplicate coverage or manifest hashes within {key}")
+                raise CollectionError(
+                    f"duplicate coverage or manifest hashes within {key}"
+                )
             group_contracts[key] = {
                 "episodes": frozenset(episodes),
                 "keys": frozenset(coverage),
@@ -282,15 +365,41 @@ def _validate_open_loop_coverage(
                 raise CollectionError(
                     f"P4 manifest hash, exact keys, or episode coverage differs for {key}"
                 )
+        _require_common_code_provenance(
+            group_provenance.values(), f"P4 {environment} groups"
+        )
+        depth_identities = {
+            tuple(
+                provenance[field]
+                for field in (
+                    "depth_producer_sha256",
+                    "depth_cache_manifest_sha256",
+                    "depth_native_contract_sha256",
+                    "depth_validation_sha256",
+                    "depth_checkpoint_sha256",
+                )
+            )
+            for key, provenance in group_provenance.items()
+            if key[1] != "dino_pinned"
+        }
+        if len(depth_identities) != 1:
+            raise CollectionError(
+                f"P4 depth provenance drift across {environment} depth arms"
+            )
         contracts[environment] = {
             **reference,
             "horizons": P4_HORIZONS[environment],
+            "group_provenance": group_provenance,
         }
     return contracts
 
 
 def open_loop(args: argparse.Namespace) -> None:
-    if args.bootstrap != BOOTSTRAP_REPLICATES or args.seed != BOOTSTRAP_SEED or not args.paired:
+    if (
+        args.bootstrap != BOOTSTRAP_REPLICATES
+        or args.seed != BOOTSTRAP_SEED
+        or not args.paired
+    ):
         raise CollectionError("P4 requires the locked paired 10000-replicate bootstrap")
     rows = _read(args.inputs)
     groups: dict[tuple[str, str, int], list[Mapping[str, Any]]] = defaultdict(list)
@@ -298,11 +407,17 @@ def open_loop(args: argparse.Namespace) -> None:
         key = (str(row["environment"]), str(row["arm"]), int(row["seed"]))
         groups[key].append(row)
     coverage_contracts = _validate_open_loop_coverage(groups)
+    _require_common_code_provenance(
+        (_group_provenance(values, str(key)) for key, values in groups.items()),
+        "P4 environments",
+    )
     summaries = {}
     for key, values in sorted(groups.items()):
         environment, arm, seed = key
         episodes = [int(row["episode"]) for row in values]
-        coverage = [manifest_key for row in values for manifest_key in row["manifest_keys"]]
+        coverage = [
+            manifest_key for row in values for manifest_key in row["manifest_keys"]
+        ]
         if len(episodes) != len(set(episodes)) or len(coverage) != len(set(coverage)):
             raise CollectionError(f"duplicate episode or manifest key for {key}")
         horizons = list(coverage_contracts[environment]["horizons"])
@@ -310,26 +425,28 @@ def open_loop(args: argparse.Namespace) -> None:
             "episode_count": len(episodes),
             "manifest_key_count": len(coverage),
             "manifest_sha256": values[0]["manifest_sha256"],
-            "horizons": {
-                str(horizon): _pool(values, horizon) for horizon in horizons
-            },
+            "provenance": coverage_contracts[environment]["group_provenance"][key],
+            "horizons": {str(horizon): _pool(values, horizon) for horizon in horizons},
         }
 
     environments = sorted({key[0] for key in groups})
     contrasts = {}
     rng = np.random.default_rng(args.seed)
     for environment in environments:
-        env_keys = [key for key in groups if key[0] == environment]
         arms = list(P4_ARMS)
         seeds = list(P4_SEEDS)
         episode_sets = {
-            (arm, seed): {int(row["episode"]) for row in groups[(environment, arm, seed)]}
+            (arm, seed): {
+                int(row["episode"]) for row in groups[(environment, arm, seed)]
+            }
             for arm in arms
             for seed in seeds
         }
         common_episodes = set.intersection(*episode_sets.values())
         if any(value != common_episodes for value in episode_sets.values()):
-            raise CollectionError(f"P4 episode coverage is not paired for {environment}")
+            raise CollectionError(
+                f"P4 episode coverage is not paired for {environment}"
+            )
         by_arm_seed_episode = {
             (arm, seed, int(row["episode"])): row
             for arm in arms

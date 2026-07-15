@@ -36,6 +36,7 @@ test -w "$TRITON_CACHE_DIR" -a -w "$XDG_CACHE_HOME" -a -w "$HF_HOME"
     --bind "$PROJECT:$PROJECT" \
     --env RUN_CARD_FILE_SHA256="$RUN_CARD_FILE_SHA256" \
     --env RUN_CARD_SHA256="$RUN_CARD_SHA256" \
+    --env SLURM_JOB_ID="$SLURM_JOB_ID" \
     --env TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
     --env XDG_CACHE_HOME="$XDG_CACHE_HOME" \
     --env HF_HOME="$HF_HOME" \

@@ -11,13 +11,15 @@ import os
 from pathlib import Path
 import pickle
 import sys
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from tools.harness_common import (
     HarnessError,
+    build_evaluation_provenance,
     validate_run_card,
+    validate_evaluation_provenance,
     verify_evaluation_bindings,
 )
 
@@ -142,7 +144,9 @@ def make_manifest(args: argparse.Namespace) -> None:
     if args.seed != SELECTION_SEED:
         raise EvaluationContractError(f"manifest seed must be exactly {SELECTION_SEED}")
     if args.n != 1000:
-        raise EvaluationContractError("fixed open-loop manifest size must be exactly 1000")
+        raise EvaluationContractError(
+            "fixed open-loop manifest size must be exactly 1000"
+        )
     expected_horizons = HORIZONS.get(environment)
     if args.horizons != expected_horizons:
         raise EvaluationContractError(
@@ -165,9 +169,11 @@ def make_manifest(args: argparse.Namespace) -> None:
     num_hist = NUM_HIST[environment]
     candidates = []
     for episode in index:
-        maximum_start = int(episode["frame_count"]) - 1 - (
-            num_hist - 1 + maximum_horizon
-        ) * frameskip
+        maximum_start = (
+            int(episode["frame_count"])
+            - 1
+            - (num_hist - 1 + maximum_horizon) * frameskip
+        )
         for start in range(maximum_start + 1):
             key = f"{environment}/valid/{episode['episode']:05d}/{start:06d}"
             action_blocks = {
@@ -189,7 +195,9 @@ def make_manifest(args: argparse.Namespace) -> None:
                 "num_hist": num_hist,
                 "frameskip": frameskip,
                 "horizons": expected_horizons,
-                "history_frames": [start + step * frameskip for step in range(num_hist)],
+                "history_frames": [
+                    start + step * frameskip for step in range(num_hist)
+                ],
                 "target_frames": {
                     str(horizon): start + (num_hist - 1 + horizon) * frameskip
                     for horizon in expected_horizons
@@ -245,7 +253,9 @@ def _load_jsonl(path: Path) -> list[Mapping[str, Any]]:
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
-                raise EvaluationContractError(f"blank JSONL line at {path}:{line_number}")
+                raise EvaluationContractError(
+                    f"blank JSONL line at {path}:{line_number}"
+                )
             try:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -253,7 +263,9 @@ def _load_jsonl(path: Path) -> list[Mapping[str, Any]]:
                     f"invalid JSONL at {path}:{line_number}: {exc}"
                 ) from exc
             if not isinstance(value, Mapping):
-                raise EvaluationContractError(f"non-object JSONL record at line {line_number}")
+                raise EvaluationContractError(
+                    f"non-object JSONL record at line {line_number}"
+                )
             records.append(value)
     return records
 
@@ -376,15 +388,57 @@ def _verify_training_completion(
     if progress.get("immutable_run_card_sha256") != training_card.get(
         "run_card_sha256"
     ):
-        raise EvaluationContractError("training progress belongs to a different run card")
+        raise EvaluationContractError(
+            "training progress belongs to a different run card"
+        )
     checkpoint_metadata = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False
     )
     if checkpoint_metadata.get("immutable_run_card_sha256") != training_card.get(
         "run_card_sha256"
     ):
-        raise EvaluationContractError("training checkpoint belongs to a different run card")
+        raise EvaluationContractError(
+            "training checkpoint belongs to a different run card"
+        )
     return progress, checkpoint_path
+
+
+def _result_provenance(
+    card: Mapping[str, Any],
+    training_card: Mapping[str, Any],
+    *,
+    run_card_path: Path,
+    checkpoint_sha256: str,
+    manifest_sha256: str,
+    slurm_job_id: str | None,
+) -> Mapping[str, Any]:
+    try:
+        return build_evaluation_provenance(
+            card,
+            training_card,
+            evaluation_run_card_file_sha256=sha256_file(run_card_path),
+            checkpoint_sha256=checkpoint_sha256,
+            manifest_sha256=manifest_sha256,
+            slurm_job_id=slurm_job_id,
+        )
+    except HarnessError as exc:
+        raise EvaluationContractError(str(exc)) from exc
+
+
+def _validate_existing_result_provenance(
+    row: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    requires_depth: bool,
+) -> None:
+    try:
+        validate_evaluation_provenance(
+            row, expected=expected, requires_depth=requires_depth
+        )
+    except HarnessError as exc:
+        raise EvaluationContractError(
+            f"existing evaluator output provenance differs: {exc}"
+        ) from exc
 
 
 def evaluate(args: argparse.Namespace) -> None:
@@ -401,7 +455,9 @@ def evaluate(args: argparse.Namespace) -> None:
         "p4-open-loop",
         "p2a-open-loop",
     }:
-        raise EvaluationContractError("evaluator requires an immutable P4 or P2a run card")
+        raise EvaluationContractError(
+            "evaluator requires an immutable P4 or P2a run card"
+        )
     try:
         validate_run_card(card)
         training_card, _metadata = verify_evaluation_bindings(card)
@@ -419,10 +475,20 @@ def evaluate(args: argparse.Namespace) -> None:
         or record.get("horizons") != HORIZONS[environment]
         for record in records
     ):
-        raise EvaluationContractError("fixed manifest records violate environment contract")
+        raise EvaluationContractError(
+            "fixed manifest records violate environment contract"
+        )
 
     progress, checkpoint_path = _verify_training_completion(
         card, training_card, args.training_run_dir
+    )
+    result_provenance = _result_provenance(
+        card,
+        training_card,
+        run_card_path=args.run_card,
+        checkpoint_sha256=str(progress["checkpoint_sha256"]),
+        manifest_sha256=args.manifest_sha256,
+        slurm_job_id=os.environ.get("SLURM_JOB_ID"),
     )
 
     cfg, model, trajectory_dataset = _load_eval_model(
@@ -443,6 +509,11 @@ def evaluate(args: argparse.Namespace) -> None:
     completed = {}
     if args.out.exists():
         for row in _load_jsonl(args.out):
+            _validate_existing_result_provenance(
+                row,
+                result_provenance,
+                requires_depth=isinstance(card.get("depth_inputs"), Mapping),
+            )
             if (
                 row.get("schema") != RESULT_SCHEMA
                 or row.get("run_id") != card["run_id"]
@@ -460,15 +531,17 @@ def evaluate(args: argparse.Namespace) -> None:
                 )
             episode = int(row["episode"])
             if episode in completed:
-                raise EvaluationContractError("existing evaluator output duplicates an episode")
+                raise EvaluationContractError(
+                    "existing evaluator output duplicates an episode"
+                )
             completed[episode] = row
     expected_episodes = set(by_episode)
     if not set(completed).issubset(expected_episodes):
-        raise EvaluationContractError("existing evaluator output contains an extra episode")
+        raise EvaluationContractError(
+            "existing evaluator output contains an extra episode"
+        )
     for episode, row in completed.items():
-        expected_keys = {
-            str(record["key"]) for record in by_episode[episode]
-        }
+        expected_keys = {str(record["key"]) for record in by_episode[episode]}
         if set(row.get("manifest_keys", [])) != expected_keys:
             raise EvaluationContractError(
                 "existing evaluator output has different fixed-manifest keys"
@@ -498,7 +571,9 @@ def evaluate(args: argparse.Namespace) -> None:
                 action_blocks = []
                 for step in range(num_hist + maximum_horizon - 1):
                     raw_indices = record["raw_action_indices"][str(step)]
-                    action_blocks.append(base_dataset.actions[episode, raw_indices].reshape(-1))
+                    action_blocks.append(
+                        base_dataset.actions[episode, raw_indices].reshape(-1)
+                    )
                 actions = torch.stack(action_blocks).unsqueeze(0).to(args.device)
                 history_obs = _tensor_obs(history_obs, args.device)
                 target_obs = _tensor_obs(target_obs, args.device)
@@ -510,7 +585,9 @@ def evaluate(args: argparse.Namespace) -> None:
                     prediction = visual_rollout[:, num_hist - 1 + horizon]
                     target = target_z[:, target_index]
                     model_error = (prediction - target).to(torch.float64).square()
-                    persistence_error = (persistence - target).to(torch.float64).square()
+                    persistence_error = (
+                        (persistence - target).to(torch.float64).square()
+                    )
                     count = int(model_error.numel())
                     totals[horizon]["model"] += float(model_error.sum().cpu())
                     totals[horizon]["persistence"] += float(
@@ -547,8 +624,7 @@ def evaluate(args: argparse.Namespace) -> None:
                 "seed": int(card["seed"]),
                 "environment": environment,
                 "episode": episode,
-                "manifest_sha256": args.manifest_sha256,
-                "checkpoint_sha256": progress["checkpoint_sha256"],
+                **result_provenance,
                 "manifest_keys": episode_keys,
                 "manifest_key_count": len(episode_keys),
                 "horizons": horizon_records,
@@ -559,7 +635,9 @@ def evaluate(args: argparse.Namespace) -> None:
     final = _load_jsonl(args.out)
     coverage = [key for row in final for key in row["manifest_keys"]]
     if len(coverage) != len(set(coverage)) or set(coverage) != set(keys):
-        raise EvaluationContractError("evaluator output coverage differs from fixed manifest")
+        raise EvaluationContractError(
+            "evaluator output coverage differs from fixed manifest"
+        )
     print(
         json.dumps(
             {
@@ -576,7 +654,9 @@ def evaluate(args: argparse.Namespace) -> None:
 def _parse_horizons(value: str) -> list[int]:
     result = [int(item.strip()) for item in value.split(",") if item.strip()]
     if not result or len(set(result)) != len(result):
-        raise argparse.ArgumentTypeError("horizons must be unique comma-separated integers")
+        raise argparse.ArgumentTypeError(
+            "horizons must be unique comma-separated integers"
+        )
     return result
 
 
