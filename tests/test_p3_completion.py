@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 import torch
@@ -761,3 +764,107 @@ def test_fresh_process_wrapper_and_heldout_materializer_are_zero_submit(tmp_path
     assert result["state"] == "PASS"
     assert result["environments"] == list(LOCKED_ENVS)
     assert result["sbatch_calls"] == 0
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("accelerate") is None,
+    reason="the host environment lacks the pinned Trainer dependencies",
+)
+def test_fresh_trainer_process_loads_final_state_and_rejects_tampered_metadata(
+    tmp_path,
+):
+    root = Path(__file__).resolve().parents[1]
+    worker = root / "tests" / "p3_process_worker.py"
+    run_dir = tmp_path / "synthetic-p3"
+    run_dir.mkdir()
+    run_card = tmp_path / "p3-run-card.json"
+    run_card.write_text(
+        json.dumps(
+            {
+                "kind": "p3-training",
+                "run_card_sha256": "a" * 64,
+                "source_commit": "f" * 40,
+                "config_sha256": "b" * 64,
+                "container": {"sha256": "c" * 64},
+                "heldout_loss_manifest": {
+                    "sha256": "5" * 64,
+                    "data_manifest_sha256": "6" * 64,
+                    "split_sha256": "7" * 64,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PYTHONPATH": str(root),
+            "SLURM_JOB_ID": "424242",
+            "STRICT_P2_IMMUTABLE_RUN_CARD": str(run_card),
+            "STRICT_P2_IMMUTABLE_RUN_CARD_SHA256": "a" * 64,
+            "STRICT_P2_CONTAINER_SHA256": "c" * 64,
+        }
+    )
+    training = subprocess.run(
+        [sys.executable, str(worker), "train", str(run_dir)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert training.returncode == 0, training.stdout + training.stderr
+    assert "SYNTHETIC_P3_TRAIN=PASS" in training.stdout
+    progress = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
+    assert progress["status"] == "TARGET_REACHED"
+    assert progress["global_step"] == 100
+    assert len((run_dir / "training_steps.jsonl").read_text().splitlines()) == 100
+    assert len((run_dir / "heldout_loss.jsonl").read_text().splitlines()) == 100
+
+    final_environment = dict(environment, P3_FINAL_ACCEPTANCE_PROCESS="1")
+    final = subprocess.run(
+        [sys.executable, str(worker), "final", str(run_dir)],
+        env=final_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert final.returncode == 0, final.stdout + final.stderr
+    assert "P3_FINAL_ACCEPTANCE=PASS" in final.stdout
+    receipt_path = run_dir / "final_acceptance.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["training_process_id"] == progress["training_process_id"]
+    assert receipt["process_id"] != progress["training_process_id"]
+    assert receipt["global_step"] == receipt["sampler"]["next_step"] == 100
+    assert receipt["optimizer_sha256"] == progress["optimizer_sha256"]
+    assert receipt["scheduler_sha256"] == progress["scheduler_sha256"]
+    assert receipt["checkpoint_sha256"] == progress["checkpoint_sha256"]
+    assert receipt["validation_batch"]["element_count"] > 0
+
+    receipt_path.unlink()
+    checkpoint_path = Path(progress["checkpoint"])
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint["sampler"] = dict(checkpoint["sampler"])
+    checkpoint["sampler"]["next_step"] = 99
+    torch.save(checkpoint, checkpoint_path)
+    checkpoint_sha256 = sha256_file(checkpoint_path)
+    index_path = checkpoint_path.parent / "step_latest.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    target_entry = next(
+        entry for entry in index["checkpoints"] if entry["file"] == checkpoint_path.name
+    )
+    target_entry["sha256"] = checkpoint_sha256
+    _write_json(index_path, index)
+
+    rejected = subprocess.run(
+        [sys.executable, str(worker), "final", str(run_dir)],
+        env=final_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "Sampler cursor differs" in rejected.stdout + rejected.stderr
+    assert not receipt_path.exists()
