@@ -12,23 +12,39 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from harness_common import (  # noqa: E402
-    HarnessError,
-    LOCKED_ARMS,
-    LOCKED_ENVS,
-    LOCKED_FRAMESKIPS,
-    LOCKED_HORIZONS,
-    LOCKED_SEEDS,
-    LOCKED_TARGETS,
-    load_json,
-    load_matrix,
-    load_timing_summary,
-    require_real_marvin_path,
-    sha256_file,
-    validate_segment_sizing,
-)
+if __package__:
+    from .harness_common import (
+        HarnessError,
+        LOCKED_ARMS,
+        LOCKED_ENVS,
+        LOCKED_FRAMESKIPS,
+        LOCKED_HORIZONS,
+        LOCKED_SEEDS,
+        LOCKED_TARGETS,
+        load_json,
+        load_matrix,
+        load_timing_summary,
+        require_real_marvin_path,
+        sha256_file,
+        validate_segment_sizing,
+    )
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from harness_common import (  # noqa: E402
+        HarnessError,
+        LOCKED_ARMS,
+        LOCKED_ENVS,
+        LOCKED_FRAMESKIPS,
+        LOCKED_HORIZONS,
+        LOCKED_SEEDS,
+        LOCKED_TARGETS,
+        load_json,
+        load_matrix,
+        load_timing_summary,
+        require_real_marvin_path,
+        sha256_file,
+        validate_segment_sizing,
+    )
 
 
 MODE_KINDS = {
@@ -191,6 +207,99 @@ def _load_dependencies(path: Path | None) -> dict[str, str]:
     return result
 
 
+def verify_evaluation_training_dependencies(
+    cards: Sequence[Mapping[str, Any]], dependency_jobs: Mapping[str, str]
+) -> None:
+    for card in cards:
+        run_id = str(card["run_id"])
+        training_run_id = str(card.get("training_run_id"))
+        if card.get("depends_on") != [training_run_id]:
+            raise HarnessError(f"evaluation dependency differs for {run_id}")
+        indexed_job_id = dependency_jobs.get(training_run_id)
+        if indexed_job_id is None:
+            raise HarnessError(
+                f"evaluation execution has no dependency job for {training_run_id}"
+            )
+        training_reference = card.get("training_run_card")
+        if not isinstance(training_reference, Mapping):
+            raise HarnessError(
+                f"evaluation card has no training reference for {run_id}"
+            )
+        training_run_card = Path(str(training_reference.get("path"))).resolve()
+        if not training_run_card.is_file() or sha256_file(
+            training_run_card
+        ) != training_reference.get("file_sha256"):
+            raise HarnessError(f"training run-card file hash differs for {run_id}")
+        training_run_dir = Path(str(card.get("training_run_dir"))).resolve()
+        chain_path = training_run_dir / "chain.json"
+        progress_path = training_run_dir / "progress.json"
+        chain = load_json(chain_path)
+        progress = load_json(progress_path)
+        expected_run_card_sha256 = training_reference.get("run_card_sha256")
+        target_steps = int(card["target_steps"])
+        if (
+            chain.get("schema") != "dino-wm.p3-slurm-chain.v1"
+            or chain.get("status") != "PASSED"
+            or Path(str(chain.get("run_dir"))).resolve() != training_run_dir
+            or int(chain.get("target_steps", -1)) != target_steps
+            or chain.get("run_card_sha256") != expected_run_card_sha256
+            or Path(str(chain.get("run_card"))).resolve() != training_run_card
+            or chain.get("run_card_file_sha256")
+            != training_reference.get("file_sha256")
+            or chain.get("source_commit") != card.get("source_commit")
+        ):
+            raise HarnessError(f"training chain is not exact and PASSED for {run_id}")
+        jobs = chain.get("jobs")
+        if not isinstance(jobs, list) or not jobs or not isinstance(jobs[-1], Mapping):
+            raise HarnessError(f"training chain has no tail job for {run_id}")
+        tail_job_id = str(jobs[-1].get("job_id"))
+        if not tail_job_id.isdigit() or indexed_job_id != tail_job_id:
+            raise HarnessError(
+                f"dependency job for {training_run_id} is not chain tail {tail_job_id}"
+            )
+        checkpoint = Path(str(progress.get("checkpoint"))).resolve()
+        expected_checkpoint = (
+            training_run_dir / "checkpoints" / "steps" / f"step_{target_steps:09d}.pth"
+        )
+        sampler = progress.get("sampler")
+        if (
+            progress.get("status") != "TARGET_REACHED"
+            or int(progress.get("global_step", -1)) != target_steps
+            or int(progress.get("target_steps", -1)) != target_steps
+            or progress.get("source_commit") != card.get("source_commit")
+            or progress.get("immutable_run_card_sha256") != expected_run_card_sha256
+            or checkpoint != expected_checkpoint
+            or not checkpoint.is_file()
+            or sha256_file(checkpoint) != progress.get("checkpoint_sha256")
+            or not isinstance(sampler, Mapping)
+            or sampler.get("next_step") != target_steps
+        ):
+            raise HarnessError(
+                f"training progress/checkpoint is not exact TARGET_REACHED for {run_id}"
+            )
+        if chain.get("final_progress") != progress:
+            raise HarnessError(
+                f"chain final progress differs from progress file for {run_id}"
+            )
+        events = chain.get("events")
+        if (
+            not isinstance(events, list)
+            or not events
+            or not isinstance(events[-1], Mapping)
+        ):
+            raise HarnessError(f"training chain has no final event for {run_id}")
+        final_event = events[-1]
+        if (
+            str(final_event.get("job_id")) != tail_job_id
+            or final_event.get("progress_status") != "TARGET_REACHED"
+            or int(final_event.get("global_step", -1)) != target_steps
+            or final_event.get("immutable_run_card_sha256") != expected_run_card_sha256
+            or Path(str(final_event.get("checkpoint"))).resolve() != checkpoint
+            or final_event.get("checkpoint_sha256") != progress.get("checkpoint_sha256")
+        ):
+            raise HarnessError(f"training chain final event differs for {run_id}")
+
+
 def _write_submission_state(path: Path, value: Mapping[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     with temporary.open("w", encoding="utf-8") as handle:
@@ -201,7 +310,9 @@ def _write_submission_state(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _validate_rates(path: Path, cards: Sequence[Mapping[str, Any]], max_hours: float) -> None:
+def _validate_rates(
+    path: Path, cards: Sequence[Mapping[str, Any]], max_hours: float
+) -> None:
     if float(max_hours) != 8.0:
         raise HarnessError("productive wall limit must remain exactly 8 hours")
     rates = load_timing_summary(path)
@@ -227,7 +338,9 @@ def _validate_rates(path: Path, cards: Sequence[Mapping[str, Any]], max_hours: f
             or sizing.get("optimizer_steps_per_second") != float(rate)
             or int(card["segment_steps"]) != sizing.get("derived_segment_steps")
         ):
-            raise HarnessError(f"run card is not bound to the supplied timing summary for {key}")
+            raise HarnessError(
+                f"run card is not bound to the supplied timing summary for {key}"
+            )
         projected = float(card["segment_steps"]) / float(rate) / 3600.0
         safe_hours = max_hours * (1.0 - float(sizing["safety_margin_fraction"]))
         if projected > safe_hours:
@@ -265,9 +378,7 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
             raise HarnessError("P3/P4 card axes differ from the locked 3x4x3 matrix")
         for card in cards:
             environment = str(card["environment"])
-            if (
-                card.get("target_steps") != LOCKED_TARGETS[environment]
-            ):
+            if card.get("target_steps") != LOCKED_TARGETS[environment]:
                 raise HarnessError(f"locked step settings differ for {card['run_id']}")
             validate_segment_sizing(
                 card.get("segment_sizing"),
@@ -275,15 +386,16 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
                 environment=environment,
                 target_steps=int(card["target_steps"]),
             )
-            if card.get("segment_steps") != card["segment_sizing"][
-                "derived_segment_steps"
-            ]:
-                raise HarnessError("run card segment differs from its accepted sizing record")
+            if (
+                card.get("segment_steps")
+                != card["segment_sizing"]["derived_segment_steps"]
+            ):
+                raise HarnessError(
+                    "run card segment differs from its accepted sizing record"
+                )
     elif kind in {"p2-geometry", "p2-timing"}:
         expected_axes = {
-            (arm, environment, 1)
-            for arm in LOCKED_ARMS
-            for environment in LOCKED_ENVS
+            (arm, environment, 1) for arm in LOCKED_ARMS for environment in LOCKED_ENVS
         }
         actual_axes = {
             (card.get("arm"), card.get("environment"), card.get("seed"))
@@ -299,9 +411,7 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
         ):
             raise HarnessError("P2 card steps differ from the selected gate mode")
     elif kind == "p2a-producer-pilot":
-        producers = {
-            card.get("producer_pilot", {}).get("producer") for card in cards
-        }
+        producers = {card.get("producer_pilot", {}).get("producer") for card in cards}
         if producers != LOCKED_P2A_PRODUCERS:
             raise HarnessError("P2a cards differ from the locked two producers")
         if any(
@@ -319,14 +429,15 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
                 environment="pusht",
                 target_steps=123858,
             )
-            if card.get("segment_steps") != card["segment_sizing"][
-                "derived_segment_steps"
-            ]:
-                raise HarnessError("P2a segment differs from its accepted sizing record")
+            if (
+                card.get("segment_steps")
+                != card["segment_sizing"]["derived_segment_steps"]
+            ):
+                raise HarnessError(
+                    "P2a segment differs from its accepted sizing record"
+                )
     elif kind == "p2a-open-loop":
-        producers = {
-            card.get("producer_pilot", {}).get("producer") for card in cards
-        }
+        producers = {card.get("producer_pilot", {}).get("producer") for card in cards}
         if producers != LOCKED_P2A_PRODUCERS or any(
             card.get("arm") != "dinocular"
             or card.get("environment") != "pusht"
@@ -335,7 +446,9 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
             or not isinstance(card.get("training_run_card"), Mapping)
             for card in cards
         ):
-            raise HarnessError("P2a evaluation cards differ from the locked paired pilot")
+            raise HarnessError(
+                "P2a evaluation cards differ from the locked paired pilot"
+            )
 
 
 def build_dry_run(
@@ -352,7 +465,9 @@ def build_dry_run(
         if missing:
             dependency = ":".join(f"<{item}>" for item in missing)
         else:
-            dependency = ":".join(dependency_jobs[item] for item in dependencies) or None
+            dependency = (
+                ":".join(dependency_jobs[item] for item in dependencies) or None
+            )
         if card["kind"] in CHAIN_KINDS:
             command = _chain_command(card, reference, dependency)
         else:
@@ -405,19 +520,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "P2 encoder, environment, seed, or frameskip CLI locks differ"
             )
         if expected_kind == "p2-geometry":
-            if args.minutes != 30 or args.fixed_steps is not None or args.warmup_steps is not None:
+            if (
+                args.minutes != 30
+                or args.fixed_steps is not None
+                or args.warmup_steps is not None
+            ):
                 raise HarnessError("P2 geometry must use the locked 30-minute gate")
             if any(card.get("gate_mode") != "geometry" for card in cards):
                 raise HarnessError("P2 geometry card does not invoke the geometry gate")
         else:
             if args.minutes != 50 or args.fixed_steps != 200 or args.warmup_steps != 20:
-                raise HarnessError("P2 timing must use locked 50-minute 20+200 settings")
+                raise HarnessError(
+                    "P2 timing must use locked 50-minute 20+200 settings"
+                )
             if any(
                 card.get("gate_mode") != "timing"
                 or card.get("timing") != {"fixed_steps": 200, "warmup_steps": 20}
                 for card in cards
             ):
-                raise HarnessError("P2 timing card does not invoke the strict timing gate")
+                raise HarnessError(
+                    "P2 timing card does not invoke the strict timing gate"
+                )
     if expected_kind == "p2a-producer-pilot" and len(cards) != 2:
         raise HarnessError("P2a matrix must contain exactly two cards")
     if expected_kind == "p2a-open-loop" and len(cards) != 2:
@@ -433,6 +556,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for card in cards:
             verify_live_card(card)
     dependencies = _load_dependencies(args.dependency_index)
+    if args.execute and expected_kind in {"p2a-open-loop", "p4-open-loop"}:
+        verify_evaluation_training_dependencies(cards, dependencies)
     dry_run = build_dry_run(matrix, cards, dependencies)
     if not args.execute:
         print(
@@ -460,13 +585,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             if dependency not in dependencies
         ]
         if missing:
-            raise HarnessError(f"execution lacks dependency job IDs: {sorted(set(missing))}")
+            raise HarnessError(
+                f"execution lacks dependency job IDs: {sorted(set(missing))}"
+            )
     state_path = matrix_path.with_suffix(".submissions.json")
     if state_path.exists():
         state = load_json(state_path)
         if state.get("matrix_sha256") != matrix["matrix_sha256"]:
             raise HarnessError("submission state belongs to a different matrix hash")
-        submitted = {str(key): str(value) for key, value in state.get("jobs", {}).items()}
+        submitted = {
+            str(key): str(value) for key, value in state.get("jobs", {}).items()
+        }
     else:
         state = {
             "schema": "dino-wm-matrix-submissions-v1",
@@ -481,8 +610,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise HarnessError(f"invalid recorded job ID for {run_id}")
             continue
         environment = os.environ.copy()
-        environment.update({str(k): str(v) for k, v in job["environment_variables"].items()})
-        output = subprocess.check_output(job["command"], text=True, env=environment).strip()
+        environment.update(
+            {str(k): str(v) for k, v in job["environment_variables"].items()}
+        )
+        output = subprocess.check_output(
+            job["command"], text=True, env=environment
+        ).strip()
         job_id = output.split(";")[0]
         if not job_id.isdigit():
             raise HarnessError(f"cannot parse submitted job ID from {output!r}")

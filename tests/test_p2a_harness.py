@@ -28,6 +28,7 @@ from models.dinocular_backbone import BackendSpec
 from eval_encoder_swap import EvaluationContractError, _verify_training_completion
 from tools import make_manifests
 from tools.harness_common import (
+    HarnessError,
     LOCKED_ARMS,
     LOCKED_ENVS,
     LOCKED_HORIZONS,
@@ -43,7 +44,10 @@ from tools.harness_common import (
 )
 from tools.p2_harness_gate import _run_cem_horizon_five
 from tools.run_matrix_card import _prepare_run_dir, evaluation_command
-from tools.submit_matrix import _validate_rates
+from tools.submit_matrix import (
+    _validate_rates,
+    verify_evaluation_training_dependencies,
+)
 from tools.collect_runs import CollectionError, _validate_open_loop_coverage
 
 
@@ -742,6 +746,10 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
     dry_result = json.loads(dry_run.stdout)
     assert dry_result["job_count"] == 2
     assert dry_result["sbatch_calls"] == 0
+    assert all(
+        "--dependency=afterok:<p2a-pusht-dinocular-s1-" in " ".join(job["command"])
+        for job in dry_result["jobs"]
+    )
     bad_config = dict(evaluation_cards[0])
     bad_config["config_sha256"] = "0" * 64
     with pytest.raises(Exception, match="exactly bound"):
@@ -781,6 +789,96 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
     _write_json(completion_dir / "progress.json", progress)
     with pytest.raises(EvaluationContractError, match="different run card"):
         _verify_training_completion(evaluation_cards[0], training_card, completion_dir)
+
+
+def test_evaluation_execute_requires_passed_chain_tail_dependency(tmp_path):
+    training_run_id = "p3-pusht-dinocular-s1"
+    run_card_sha256 = "a" * 64
+    source_commit = "f" * 40
+    target_steps = 7
+    training_run_dir = tmp_path / "training"
+    training_run_card = tmp_path / "training_run_card.yaml"
+    training_run_card.write_text("immutable: true\n", encoding="utf-8")
+    checkpoint_dir = training_run_dir / "checkpoints" / "steps"
+    checkpoint_dir.mkdir(parents=True)
+    checkpoint = checkpoint_dir / f"step_{target_steps:09d}.pth"
+    torch.save(
+        {
+            "global_step": target_steps,
+            "immutable_run_card_sha256": run_card_sha256,
+        },
+        checkpoint,
+    )
+    progress = {
+        "status": "TARGET_REACHED",
+        "global_step": target_steps,
+        "target_steps": target_steps,
+        "source_commit": source_commit,
+        "immutable_run_card_sha256": run_card_sha256,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "sampler": {"next_step": target_steps},
+    }
+    _write_json(training_run_dir / "progress.json", progress)
+    chain = {
+        "schema": "dino-wm.p3-slurm-chain.v1",
+        "status": "PASSED",
+        "run_dir": str(training_run_dir),
+        "target_steps": target_steps,
+        "run_card_sha256": run_card_sha256,
+        "run_card": str(training_run_card),
+        "run_card_file_sha256": sha256_file(training_run_card),
+        "source_commit": source_commit,
+        "jobs": [{"job_id": "111"}, {"job_id": "222"}],
+        "events": [
+            {
+                "job_id": "222",
+                "progress_status": "TARGET_REACHED",
+                "global_step": target_steps,
+                "immutable_run_card_sha256": run_card_sha256,
+                "checkpoint": str(checkpoint),
+                "checkpoint_sha256": sha256_file(checkpoint),
+            }
+        ],
+        "final_progress": progress,
+    }
+    chain_path = training_run_dir / "chain.json"
+    _write_json(chain_path, chain)
+    evaluation_card = {
+        "run_id": "p4-pusht-dinocular-s1",
+        "training_run_id": training_run_id,
+        "training_run_dir": str(training_run_dir),
+        "training_run_card": {
+            "path": str(training_run_card),
+            "file_sha256": sha256_file(training_run_card),
+            "run_card_sha256": run_card_sha256,
+        },
+        "depends_on": [training_run_id],
+        "target_steps": target_steps,
+        "source_commit": source_commit,
+    }
+
+    with pytest.raises(HarnessError, match="is not chain tail 222"):
+        verify_evaluation_training_dependencies(
+            [evaluation_card], {training_run_id: "111"}
+        )
+    verify_evaluation_training_dependencies([evaluation_card], {training_run_id: "222"})
+
+    chain["status"] = "CHAINED"
+    _write_json(chain_path, chain)
+    with pytest.raises(HarnessError, match="not exact and PASSED"):
+        verify_evaluation_training_dependencies(
+            [evaluation_card], {training_run_id: "222"}
+        )
+    chain["status"] = "PASSED"
+    _write_json(chain_path, chain)
+    changed_progress = dict(progress)
+    changed_progress["checkpoint_sha256"] = "0" * 64
+    _write_json(training_run_dir / "progress.json", changed_progress)
+    with pytest.raises(HarnessError, match="not exact TARGET_REACHED"):
+        verify_evaluation_training_dependencies(
+            [evaluation_card], {training_run_id: "222"}
+        )
 
 
 def test_p2_cli_locks_and_actual_gate_modes(tmp_path):
