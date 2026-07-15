@@ -8,6 +8,7 @@ import subprocess
 import pytest
 import torch
 
+import p3_completion
 from p3_completion import (
     CHECKPOINT_HISTORY_SCHEMA,
     FINAL_RECEIPT_SCHEMA,
@@ -232,6 +233,10 @@ def test_training_ledger_is_exactly_once_and_rejects_gap_duplicate_or_drift(tmp_
     changed["loss"] = 9.0
     with pytest.raises(P3CompletionError, match="differs"):
         append_training_record(path, changed, target_steps=100)
+    with pytest.raises(P3CompletionError, match="provenance drift"):
+        append_training_record(
+            path, _training_row(4, source="0" * 40), target_steps=100
+        )
     with pytest.raises(P3CompletionError, match="gap"):
         append_training_record(path, _training_row(5), target_steps=100)
     drift = [dict(row) for row in rows]
@@ -253,6 +258,31 @@ def test_training_ledger_is_exactly_once_and_rejects_gap_duplicate_or_drift(tmp_
             target_steps=100,
             require_complete=True,
         )
+
+
+def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "training_steps.jsonl"
+
+    def unexpected_full_scan(*_args, **_kwargs):
+        raise AssertionError("normal consecutive append performed a full scan")
+
+    monkeypatch.setattr(p3_completion, "load_jsonl", unexpected_full_scan)
+    monkeypatch.setattr(
+        p3_completion, "validate_training_records", unexpected_full_scan
+    )
+    records = [
+        append_training_record(path, _training_row(step), target_steps=100)
+        for step in range(1, 11)
+    ]
+    marker = json.loads(
+        (tmp_path / "training_steps.tail.json").read_text(encoding="utf-8")
+    )
+    assert marker["next_step"] == 11
+    assert marker["tail_record_sha256"] == records[-1]["record_sha256"]
+    assert marker["ledger_size_bytes"] == path.stat().st_size
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 10
 
 
 def test_ledgers_resolve_exact_checkpoint_history_records(tmp_path):

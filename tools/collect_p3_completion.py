@@ -25,6 +25,7 @@ from p3_completion import (  # noqa: E402
     validate_checkpoint_evidence_bindings,
     validate_training_records,
     validate_validation_records,
+    verify_training_tail_index,
 )
 from tools.harness_common import (  # noqa: E402
     HarnessError,
@@ -193,6 +194,15 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         dataset_order_sha256=sampler["dataset_order_sha256"],
         target_steps=target,
         require_complete=True,
+    )
+    verify_training_tail_index(
+        training_path,
+        training_rows,
+        source_commit=card["source_commit"],
+        immutable_run_card_sha256=card["run_card_sha256"],
+        dataset_order_sha256=sampler["dataset_order_sha256"],
+        config_sha256=card["config_sha256"],
+        target_steps=target,
     )
     if any(row.get("config_sha256") != card["config_sha256"] for row in training_rows):
         raise HarnessError(f"cell training config provenance differs: {card['run_id']}")

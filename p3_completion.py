@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 CHECKPOINT_HISTORY_SCHEMA = "dino-wm.step-checkpoint-history.v1"
 TRAINING_RECORD_SCHEMA = "dino-wm.p3-training-step.v1"
+TRAINING_TAIL_INDEX_SCHEMA = "dino-wm.p3-training-tail-index.v1"
 VALIDATION_RECORD_SCHEMA = "dino-wm.p3-heldout-loss.v1"
 HELDOUT_ENTRY_SCHEMA = "dino-wm.p3-heldout-example.v1"
 HELDOUT_METADATA_SCHEMA = "dino-wm.p3-heldout-manifest.v1"
@@ -473,25 +474,136 @@ def validate_training_records(
         raise P3CompletionError("training ledger does not cover every target step")
 
 
-def append_training_record(
+def training_tail_index_path(path: str | Path) -> Path:
+    path = Path(path)
+    return path.with_name(f"{path.stem}.tail.json")
+
+
+def _training_tail_index_record(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    source_commit: str,
+    immutable_run_card_sha256: str,
+    dataset_order_sha256: str,
+    config_sha256: str,
+    target_steps: int,
+) -> Mapping[str, Any]:
+    size = path.stat().st_size if path.exists() else 0
+    return {
+        "schema": TRAINING_TAIL_INDEX_SCHEMA,
+        "ledger_path": str(path.resolve()),
+        "ledger_size_bytes": size,
+        "next_step": len(rows) + 1,
+        "tail_record_sha256": rows[-1]["record_sha256"] if rows else None,
+        "source_commit": source_commit,
+        "immutable_run_card_sha256": immutable_run_card_sha256,
+        "dataset_order_sha256": dataset_order_sha256,
+        "config_sha256": config_sha256,
+        "target_steps": int(target_steps),
+    }
+
+
+def initialize_training_tail_index(
     path: str | Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    source_commit: str,
+    immutable_run_card_sha256: str,
+    dataset_order_sha256: str,
+    config_sha256: str,
+    target_steps: int,
+) -> Mapping[str, Any]:
+    """Atomically rebuild the O(1) append marker after a validated full scan."""
+    path = Path(path)
+    if rows and rows[0].get("config_sha256") != config_sha256:
+        raise P3CompletionError("training tail index configuration drift")
+    record = _training_tail_index_record(
+        path,
+        rows,
+        source_commit=source_commit,
+        immutable_run_card_sha256=immutable_run_card_sha256,
+        dataset_order_sha256=dataset_order_sha256,
+        config_sha256=config_sha256,
+        target_steps=target_steps,
+    )
+    atomic_write_json(training_tail_index_path(path), record)
+    return record
+
+
+def verify_training_tail_index(
+    path: str | Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    source_commit: str,
+    immutable_run_card_sha256: str,
+    dataset_order_sha256: str,
+    config_sha256: str,
+    target_steps: int,
+) -> Mapping[str, Any]:
+    """Bind a fully scanned ledger to its atomic tail marker."""
+    path = Path(path)
+    if rows and rows[0].get("config_sha256") != config_sha256:
+        raise P3CompletionError("training tail index configuration drift")
+    actual = load_json(training_tail_index_path(path))
+    expected = _training_tail_index_record(
+        path,
+        rows,
+        source_commit=source_commit,
+        immutable_run_card_sha256=immutable_run_card_sha256,
+        dataset_order_sha256=dataset_order_sha256,
+        config_sha256=config_sha256,
+        target_steps=target_steps,
+    )
+    if actual != expected:
+        raise P3CompletionError("training tail index differs from the full ledger")
+    return actual
+
+
+def _load_incremental_training_tail_index(
+    path: Path, *, target_steps: int
+) -> Mapping[str, Any]:
+    index = load_json(training_tail_index_path(path))
+    next_step = index.get("next_step")
+    ledger_size = index.get("ledger_size_bytes")
+    tail = index.get("tail_record_sha256")
+    if (
+        index.get("schema") != TRAINING_TAIL_INDEX_SCHEMA
+        or index.get("ledger_path") != str(path.resolve())
+        or index.get("target_steps") != int(target_steps)
+        or not isinstance(next_step, int)
+        or isinstance(next_step, bool)
+        or not 1 <= next_step <= int(target_steps) + 1
+        or not isinstance(ledger_size, int)
+        or isinstance(ledger_size, bool)
+        or ledger_size < 0
+        or (tail is not None and not is_sha256(tail))
+        or (next_step == 1) != (tail is None)
+        or (next_step == 1) != (ledger_size == 0)
+        or not is_source_commit(index.get("source_commit"))
+        or not all(
+            is_sha256(index.get(field))
+            for field in (
+                "immutable_run_card_sha256",
+                "dataset_order_sha256",
+                "config_sha256",
+            )
+        )
+    ):
+        raise P3CompletionError("training tail index is invalid")
+    actual_size = path.stat().st_size if path.exists() else 0
+    if actual_size != ledger_size:
+        raise P3CompletionError("training ledger size differs from its tail index")
+    return index
+
+
+def _validate_new_training_record(
     value: Mapping[str, Any],
     *,
     target_steps: int,
-    known_rows: list[Mapping[str, Any]] | None = None,
-) -> Mapping[str, Any]:
-    path = Path(path)
-    rows = load_jsonl(path, allow_missing=True) if known_rows is None else known_rows
+    provenance: Mapping[str, Any],
+) -> int:
     step = int(value.get("global_step", -1))
-    existing = next((row for row in rows if row.get("global_step") == step), None)
-    if existing is not None:
-        if _stable_training_record(existing) != _stable_training_record(value):
-            raise P3CompletionError(
-                f"replayed optimizer step {step} differs from its exactly-once record"
-            )
-        return existing
-    if step != len(rows) + 1:
-        raise P3CompletionError("new training record would create a gap")
     if value.get("schema") != TRAINING_RECORD_SCHEMA:
         raise P3CompletionError("new training record has an unknown schema")
     if not is_source_commit(value.get("source_commit")) or not all(
@@ -503,6 +615,14 @@ def append_training_record(
         )
     ):
         raise P3CompletionError("new training record has invalid provenance")
+    for field in (
+        "source_commit",
+        "immutable_run_card_sha256",
+        "dataset_order_sha256",
+        "config_sha256",
+    ):
+        if value.get(field) != provenance.get(field):
+            raise P3CompletionError("new training record has provenance drift")
     if not isinstance(value.get("loss"), (int, float)) or not math.isfinite(
         float(value["loss"])
     ):
@@ -519,22 +639,98 @@ def append_training_record(
     for field in ("parameter_sha256", "optimizer_sha256", "scheduler_sha256"):
         if value.get(field) is not None and not is_sha256(value[field]):
             raise P3CompletionError(f"new training record has invalid {field}")
-    if rows:
-        first = rows[0]
+    return step
+
+
+def append_training_record(
+    path: str | Path,
+    value: Mapping[str, Any],
+    *,
+    target_steps: int,
+) -> Mapping[str, Any]:
+    path = Path(path)
+    index_path = training_tail_index_path(path)
+    if not index_path.exists():
+        if path.exists() and path.stat().st_size != 0:
+            raise P3CompletionError(
+                "nonempty training ledger requires a full-scan tail-index rebuild"
+            )
+        provenance = {
+            field: value.get(field)
+            for field in (
+                "source_commit",
+                "immutable_run_card_sha256",
+                "dataset_order_sha256",
+                "config_sha256",
+            )
+        }
+        _validate_new_training_record(
+            value, target_steps=target_steps, provenance=provenance
+        )
+        initialize_training_tail_index(
+            path,
+            [],
+            source_commit=str(value["source_commit"]),
+            immutable_run_card_sha256=str(value["immutable_run_card_sha256"]),
+            dataset_order_sha256=str(value["dataset_order_sha256"]),
+            config_sha256=str(value["config_sha256"]),
+            target_steps=target_steps,
+        )
+    index = _load_incremental_training_tail_index(
+        path, target_steps=target_steps
+    )
+    provenance = {
+        field: index[field]
         for field in (
             "source_commit",
             "immutable_run_card_sha256",
             "dataset_order_sha256",
             "config_sha256",
-        ):
-            if value.get(field) != first.get(field):
-                raise P3CompletionError("new training record has provenance drift")
+        )
+    }
+    step = _validate_new_training_record(
+        value, target_steps=target_steps, provenance=provenance
+    )
+    next_step = int(index["next_step"])
+    if step < next_step:
+        rows = load_jsonl(path)
+        validate_training_records(
+            rows,
+            source_commit=str(index["source_commit"]),
+            immutable_run_card_sha256=str(index["immutable_run_card_sha256"]),
+            dataset_order_sha256=str(index["dataset_order_sha256"]),
+            target_steps=target_steps,
+        )
+        verify_training_tail_index(
+            path,
+            rows,
+            source_commit=str(index["source_commit"]),
+            immutable_run_card_sha256=str(index["immutable_run_card_sha256"]),
+            dataset_order_sha256=str(index["dataset_order_sha256"]),
+            config_sha256=str(index["config_sha256"]),
+            target_steps=target_steps,
+        )
+        existing = next(
+            (row for row in rows if row.get("global_step") == step), None
+        )
+        if existing is None or _stable_training_record(
+            existing
+        ) != _stable_training_record(value):
+            raise P3CompletionError(
+                f"replayed optimizer step {step} differs from its exactly-once record"
+            )
+        return existing
+    if step != next_step:
+        raise P3CompletionError("new training record would create a gap")
     record = dict(value)
-    record["previous_record_sha256"] = rows[-1]["record_sha256"] if rows else None
+    record["previous_record_sha256"] = index["tail_record_sha256"]
     record["record_sha256"] = _record_digest(record)
     append_jsonl(path, record)
-    if known_rows is not None:
-        known_rows.append(record)
+    updated_index = dict(index)
+    updated_index["ledger_size_bytes"] = path.stat().st_size
+    updated_index["next_step"] = step + 1
+    updated_index["tail_record_sha256"] = record["record_sha256"]
+    atomic_write_json(index_path, updated_index)
     return record
 
 

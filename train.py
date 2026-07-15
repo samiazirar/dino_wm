@@ -50,6 +50,7 @@ from p3_completion import (
     append_training_record,
     append_validation_record,
     checkpoint_reference,
+    initialize_training_tail_index,
     load_checkpoint_history,
     load_jsonl,
     percent_step_map,
@@ -655,9 +656,21 @@ class Trainer:
                 training_rows=training_rows,
                 validation_rows=validation_rows,
             )
+            training_tail_index = initialize_training_tail_index(
+                self.p3_training_ledger_path,
+                training_rows,
+                source_commit=self.source_commit,
+                immutable_run_card_sha256=self.immutable_run_card_sha256,
+                dataset_order_sha256=self.dataset_order_sha256,
+                config_sha256=self.p3_run_card["config_sha256"],
+                target_steps=int(self.cfg.training.target_steps),
+            )
         except P3CompletionError as exc:
             raise RuntimeError(str(exc)) from exc
-        self.p3_training_rows = training_rows
+        self.p3_training_next_step = int(training_tail_index["next_step"])
+        self.p3_training_rows_for_final = (
+            training_rows if self.final_acceptance else None
+        )
 
     def _install_signal_handlers(self):
         def request_checkpoint(signum, _frame):
@@ -918,14 +931,14 @@ class Trainer:
             "checkpoint": checkpoint,
         }
         try:
-            append_training_record(
+            appended = append_training_record(
                 self.p3_training_ledger_path,
                 record,
                 target_steps=int(self.cfg.training.target_steps),
-                known_rows=self.p3_training_rows,
             )
         except P3CompletionError as exc:
             raise RuntimeError(str(exc)) from exc
+        self.p3_training_next_step = int(appended["global_step"]) + 1
 
     def _p3_validation_loss(self, *, maximum_batches=None):
         module_training_modes = [
@@ -1080,10 +1093,12 @@ class Trainer:
             raise RuntimeError(str(exc)) from exc
 
     def _p3_reconcile_loaded_step(self):
-        rows = self.p3_training_rows
-        if len(rows) < max(0, self.global_step - 1):
+        recorded_steps = self.p3_training_next_step - 1
+        if recorded_steps < max(0, self.global_step - 1):
             raise RuntimeError("training ledger is too short for the loaded checkpoint")
-        if self.global_step > 0 and len(rows) == self.global_step - 1:
+        if recorded_steps > self.global_step:
+            raise RuntimeError("training ledger is ahead of the loaded checkpoint")
+        if self.global_step > 0 and recorded_steps == self.global_step - 1:
             self._p3_append_training_record()
         for percent in percents_at_step(
             int(self.cfg.training.target_steps), self.global_step
@@ -1098,7 +1113,9 @@ class Trainer:
             raise RuntimeError(
                 "final acceptance did not load the exact target checkpoint"
             )
-        training_rows = load_jsonl(self.p3_training_ledger_path)
+        training_rows = self.p3_training_rows_for_final
+        if training_rows is None:
+            training_rows = load_jsonl(self.p3_training_ledger_path)
         validation_rows = load_jsonl(self.p3_validation_ledger_path)
         validate_training_records(
             training_rows,
