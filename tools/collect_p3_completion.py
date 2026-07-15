@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,29 @@ from tools.harness_common import (  # noqa: E402
 )
 
 
+_PAIRED_TOP_LEVEL_DIFFERENCES = frozenset(
+    {
+        "arm",
+        "config_sha256",
+        "depth_inputs",
+        "encoder_boundary",
+        "run_card_sha256",
+        "run_dir",
+        "run_id",
+        "segment_sizing",
+        "segment_steps",
+    }
+)
+_PAIRED_ARM_ENVIRONMENT_VARIABLES = frozenset(
+    {
+        "DINOCULAR_CACHE_PRODUCER_SHA256",
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT",
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256",
+        "DINOCULAR_STUDENT_WEIGHTS",
+    }
+)
+
+
 def _normalized_overrides(card: Mapping[str, Any]) -> list[str]:
     arm_specific = (
         "encoder=",
@@ -48,6 +72,24 @@ def _normalized_overrides(card: Mapping[str, Any]) -> list[str]:
         for value in card["overrides"]
         if not str(value).startswith(arm_specific)
     ]
+
+
+def _normalized_paired_card(card: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Remove only reviewed arm identity/material and rate-derived differences."""
+    normalized = copy.deepcopy(dict(card))
+    for field in _PAIRED_TOP_LEVEL_DIFFERENCES:
+        normalized.pop(field, None)
+    normalized["overrides"] = _normalized_overrides(card)
+    if "environment_variables" in normalized:
+        environment_variables = normalized["environment_variables"]
+        if not isinstance(environment_variables, Mapping):
+            raise HarnessError("paired card environment_variables must be a mapping")
+        normalized["environment_variables"] = {
+            str(key): value
+            for key, value in environment_variables.items()
+            if str(key) not in _PAIRED_ARM_ENVIRONMENT_VARIABLES
+        }
+    return normalized
 
 
 def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -242,30 +284,35 @@ def _paired_audit(
         for seed in LOCKED_SEEDS:
             group_cards = [by_axis[(environment, arm, seed)] for arm in LOCKED_ARMS]
             group_cells = [cells[(environment, arm, seed)] for arm in LOCKED_ARMS]
-            shared = {
-                "target_steps": [card["target_steps"] for card in group_cards],
-                "frameskip": [card["frameskip"] for card in group_cards],
-                "horizons": [card["horizons"] for card in group_cards],
-                "batch_size": [card["batch_size"] for card in group_cards],
-                "predictor_lr": [card["predictor_lr"] for card in group_cards],
-                "decoder": [card["decoder"] for card in group_cards],
-                "heldout": [card["heldout_loss_manifest"] for card in group_cards],
-                "initialization": [
-                    card["initialization_policy"] for card in group_cards
-                ],
-                "optimizer": [card["optimizer_policy"] for card in group_cards],
-                "schedule": [card["schedule_policy"] for card in group_cards],
-                "overrides": [_normalized_overrides(card) for card in group_cards],
-                "dataset_order": [cell["dataset_order_sha256"] for cell in group_cells],
-            }
-            differing = [
-                key
-                for key, values in shared.items()
-                if any(value != values[0] for value in values[1:])
+            normalized_cards = [
+                _normalized_paired_card(card) for card in group_cards
             ]
-            if differing:
+            normalized_bytes = [
+                canonical_json_bytes(card) for card in normalized_cards
+            ]
+            if any(value != normalized_bytes[0] for value in normalized_bytes[1:]):
+                all_fields = set().union(*(card.keys() for card in normalized_cards))
+                differing = sorted(
+                    field
+                    for field in all_fields
+                    if any(
+                        (field in card, card.get(field))
+                        != (
+                            field in normalized_cards[0],
+                            normalized_cards[0].get(field),
+                        )
+                        for card in normalized_cards[1:]
+                    )
+                )
                 raise HarnessError(
                     f"paired non-arm settings differ for {environment}/s{seed}: {differing}"
+                )
+            dataset_orders = [
+                cell["dataset_order_sha256"] for cell in group_cells
+            ]
+            if any(value != dataset_orders[0] for value in dataset_orders[1:]):
+                raise HarnessError(
+                    f"paired dataset order differs for {environment}/s{seed}"
                 )
             informative = by_axis[(environment, "dinocular", seed)]
             neutral = by_axis[(environment, "dinocular_zerodepth", seed)]
@@ -273,6 +320,8 @@ def _paired_audit(
                 informative.get("depth_inputs") != neutral.get("depth_inputs")
                 or informative.get("artifacts", {}).get("dinocular_student")
                 != neutral.get("artifacts", {}).get("dinocular_student")
+                or informative.get("environment_variables")
+                != neutral.get("environment_variables")
                 or informative.get("encoder_boundary") != "informative_depth_and_mask"
                 or neutral.get("encoder_boundary") != "manifest_neutral_depth_and_mask"
             ):

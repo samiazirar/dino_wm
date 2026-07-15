@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -453,6 +454,13 @@ def _paired_fixture():
                         "checkpoint_sha256": "9" * 64,
                     }
                 card = {
+                    "schema": "dino-wm.run-card.v1",
+                    "kind": "p3-training",
+                    "run_id": f"p3-{environment}-{arm}-s{seed}",
+                    "run_dir": f"/study/outputs/p3-training/{environment}-{arm}-s{seed}",
+                    "code_root": "/study/code/dino_wm",
+                    "source_commit": "f" * 40,
+                    "source_file_sha256": {"train.py": "e" * 64},
                     "environment": environment,
                     "arm": arm,
                     "seed": seed,
@@ -474,13 +482,54 @@ def _paired_fixture():
                     "schedule_policy": "fixed_learning_rates",
                     "overrides": [f"env={environment}", f"encoder={arm}"],
                     "depth_inputs": depth,
-                    "artifacts": {"dinocular_student": {"sha256": "9" * 64}},
+                    "artifacts": {
+                        "dinov2": {
+                            "path": "/study/models/dinov2.pth",
+                            "sha256": "4" * 64,
+                        },
+                        "dinocular_student": {
+                            "path": "/study/checkpoints/student.pth",
+                            "sha256": "9" * 64,
+                        },
+                    },
+                    "container": {
+                        "path": "/study/container.sif",
+                        "sha256": "c" * 64,
+                    },
+                    "strict_resume": True,
+                    "depends_on": [],
+                    "environment_variables": {
+                        "DINOV2_REPO": "/study/code/dinov2",
+                        "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+                    },
                     "encoder_boundary": {
                         "dino_pinned": "not_applicable",
                         "dinocular": "informative_depth_and_mask",
                         "dinocular_zerodepth": "manifest_neutral_depth_and_mask",
                     }[arm],
+                    "segment_sizing": {
+                        "derived_segment_steps": 100 - LOCKED_ARMS.index(arm),
+                        "measured_steps_per_second": 1.0 + LOCKED_ARMS.index(arm),
+                        "timing_source_commit": "f" * 40,
+                    },
+                    "segment_steps": 100 - LOCKED_ARMS.index(arm),
+                    "producer_decision": {
+                        "path": "/study/results/producer_decision.json",
+                        "sha256": "d" * 64,
+                        "winner": "da3_giant_video",
+                    },
+                    "config_sha256": str(LOCKED_ARMS.index(arm) + 1) * 64,
+                    "run_card_sha256": str(LOCKED_ARMS.index(arm) + 4) * 64,
                 }
+                if arm != "dino_pinned":
+                    card["environment_variables"].update(
+                        {
+                            "DINOCULAR_STUDENT_WEIGHTS": "/study/checkpoints/student.pth",
+                            "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/study/contracts/native.json",
+                            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "7" * 64,
+                            "DINOCULAR_CACHE_PRODUCER_SHA256": "1" * 64,
+                        }
+                    )
                 cards.append(card)
                 depth_fields = {
                     "depth_producer_sha256": None,
@@ -511,6 +560,14 @@ def test_paired_config_audit_and_inconclusive_propagation():
     changed = [dict(card) for card in cards]
     changed[1]["optimizer_policy"] = {"locked": False}
     with pytest.raises(HarnessError, match="non-arm settings differ"):
+        _paired_audit(changed, cells)
+
+
+def test_paired_config_audit_rejects_unallowlisted_container_drift():
+    cards, cells = _paired_fixture()
+    changed = copy.deepcopy(cards)
+    changed[1]["container"]["sha256"] = "0" * 64
+    with pytest.raises(HarnessError, match=r"non-arm settings differ.*container"):
         _paired_audit(changed, cells)
 
 
