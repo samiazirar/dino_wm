@@ -396,7 +396,14 @@ def _validation_row(percent: int, mean: float):
     }
 
 
-def test_validation_resume_coverage_plateau_boundary_and_inconclusive(tmp_path):
+def _plateau_rows(early: float, late: float):
+    return [
+        _validation_row(percent, late if percent >= 96 else early)
+        for percent in range(1, 101)
+    ]
+
+
+def test_validation_resume_coverage_and_inconclusive(tmp_path):
     path = tmp_path / "heldout_loss.jsonl"
     for percent in range(1, 101):
         mean = 1.02 if percent >= 96 else 1.0
@@ -425,21 +432,27 @@ def test_validation_resume_coverage_plateau_boundary_and_inconclusive(tmp_path):
             immutable_run_card_sha256="4" * 64,
             manifest_sha256="1" * 64,
         )
-    boundary = plateau_verdict(rows)
-    assert boundary["relative_absolute_change"] == pytest.approx(0.02)
-    assert boundary["plateaued"] is True
-    rows[-1] = dict(rows[-1])
-    rows[-1]["mean_loss"] = 1.03
-    rows[-1]["loss_numerator"] = 10.3
-    above = plateau_verdict(rows)
-    assert above["plateaued"] is False
-    assert comparison_verdict(boundary, above) == "optimization-inconclusive"
+    assert comparison_verdict(
+        {"plateaued": True}, {"plateaued": False}
+    ) == "optimization-inconclusive"
     nonfinite = _validation_row(1, 1.0)
     nonfinite["mean_loss"] = float("nan")
     bad_path = tmp_path / "bad.jsonl"
     with pytest.raises(P3CompletionError, match="finite JSON"):
         append_validation_record(bad_path, nonfinite, target_steps=100)
     assert not bad_path.exists()
+
+
+def test_plateau_exact_boundary_is_inclusive():
+    boundary = plateau_verdict(_plateau_rows(1.0, 1.02))
+    assert boundary["relative_absolute_change"] == 0.02
+    assert boundary["plateaued"] is True
+
+
+def test_plateau_just_above_boundary_is_rejected():
+    above = plateau_verdict(_plateau_rows(10.0, 10.200000000000001))
+    assert above["relative_absolute_change"] == 0.0200000000000001
+    assert above["plateaued"] is False
 
 
 def _receipt(**updates):

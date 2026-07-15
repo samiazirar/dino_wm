@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -1198,23 +1199,37 @@ def load_final_receipt(
 
 
 def plateau_verdict(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
-    by_percent = {int(row["percent"]): float(row["mean_loss"]) for row in rows}
+    by_percent = {}
+    for row in rows:
+        try:
+            mean = Decimal(canonical_json_bytes(row["mean_loss"]).decode("utf-8"))
+        except (InvalidOperation, KeyError) as exc:
+            raise P3CompletionError(
+                "plateau audit requires canonical numeric mean losses"
+            ) from exc
+        if not mean.is_finite():
+            raise P3CompletionError(
+                "plateau audit requires canonical numeric mean losses"
+            )
+        by_percent[int(row["percent"])] = mean
     if set(by_percent) != set(range(1, 101)):
         raise P3CompletionError("plateau audit requires exact 1..100 loss coverage")
-    early = sum(by_percent[percent] for percent in range(76, 81)) / 5.0
-    late = sum(by_percent[percent] for percent in range(96, 101)) / 5.0
-    if not math.isfinite(early) or not math.isfinite(late) or early <= 0.0:
+    early = sum(
+        (by_percent[percent] for percent in range(76, 81)), Decimal(0)
+    ) / Decimal(5)
+    late = sum(
+        (by_percent[percent] for percent in range(96, 101)), Decimal(0)
+    ) / Decimal(5)
+    if early <= Decimal(0):
         raise P3CompletionError("plateau audit requires a finite positive early mean")
     relative_change = abs(late - early) / early
-    plateaued = relative_change <= PLATEAU_THRESHOLD or math.isclose(
-        relative_change, PLATEAU_THRESHOLD, rel_tol=0.0, abs_tol=1e-15
-    )
+    threshold = Decimal("0.02")
     return {
-        "early_mean_76_80": early,
-        "late_mean_96_100": late,
-        "relative_absolute_change": relative_change,
+        "early_mean_76_80": float(early),
+        "late_mean_96_100": float(late),
+        "relative_absolute_change": float(relative_change),
         "threshold": PLATEAU_THRESHOLD,
-        "plateaued": plateaued,
+        "plateaued": relative_change <= threshold,
     }
 
 
