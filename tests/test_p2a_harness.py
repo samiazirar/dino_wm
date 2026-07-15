@@ -45,6 +45,7 @@ from tools.harness_common import (
     finalize_run_card,
     load_matrix,
     validate_spec,
+    validate_run_card,
     verify_evaluation_bindings,
     write_matrix,
 )
@@ -519,6 +520,8 @@ def _add_p3_completion_contract(card, environment, seed):
         "split_sha256": "b" * 64,
         "selection": "all_validation_examples",
         "entry_count": 1,
+        "target_steps": LOCKED_TARGETS[environment],
+        "rounding_rule": "ceil(target_steps*percent/100)",
     }
     card["initialization_policy"] = {
         "predictor": "fresh_seeded",
@@ -579,6 +582,36 @@ def _card(run_id, arm, environment, seed, kind="p3-training", gate_mode=None):
     if kind == "p3-training":
         _add_p3_completion_contract(card, environment, seed)
     return finalize_run_card(card)
+
+
+def test_heldout_entry_count_boolean_fails_card_and_materialization_record(tmp_path):
+    card = dict(_card("p3-pusht-dino_pinned-s1", "dino_pinned", "pusht", 1))
+    card["heldout_loss_manifest"] = dict(card["heldout_loss_manifest"])
+    card["heldout_loss_manifest"]["entry_count"] = True
+    with pytest.raises(HarnessError, match="held-out loss manifest"):
+        validate_run_card(finalize_run_card(card))
+
+    manifest = tmp_path / "heldout_pusht.jsonl"
+    manifest.write_text("{}\n", encoding="utf-8")
+    _write_json(
+        manifest.with_suffix(".meta.json"),
+        {
+            "schema": "dino-wm.p3-heldout-manifest.v1",
+            "environment": "pusht",
+            "selection": "all_validation_examples",
+            "source_commit": "f" * 40,
+            "manifest_sha256": sha256_file(manifest),
+            "entry_count": True,
+            "target_steps": LOCKED_TARGETS["pusht"],
+            "rounding_rule": "ceil(target_steps*percent/100)",
+            "data_manifest_sha256": "a" * 64,
+            "split_sha256": "b" * 64,
+        },
+    )
+    with pytest.raises(make_manifests.HarnessError, match="contract differs"):
+        make_manifests._heldout_manifest_record(
+            tmp_path, "pusht", "f" * 40, LOCKED_TARGETS["pusht"]
+        )
 
 
 def test_locked_36_cell_matrix_hashing_and_dry_run(tmp_path):

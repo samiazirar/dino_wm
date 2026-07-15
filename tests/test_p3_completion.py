@@ -10,6 +10,7 @@ import sys
 
 import pytest
 import torch
+import yaml
 
 import p3_completion
 from p3_completion import (
@@ -21,6 +22,7 @@ from p3_completion import (
     VALIDATION_RECORD_SCHEMA,
     append_training_record,
     append_validation_record,
+    canonical_first_heldout_manifest_key,
     comparison_verdict,
     load_checkpoint_history,
     load_final_receipt,
@@ -31,10 +33,13 @@ from p3_completion import (
     sha256_file,
     validate_checkpoint_evidence_bindings,
     validate_training_records,
+    validate_runtime_heldout_manifest,
     validate_validation_records,
     write_final_receipt,
 )
 from tools.collect_p3_completion import _paired_audit
+from tools.collect_p3_completion import _load_cell
+from eval_encoder_swap import EvaluationContractError, _verify_training_completion
 from tools.harness_common import (
     HarnessError,
     LOCKED_ARMS,
@@ -44,6 +49,7 @@ from tools.harness_common import (
     sha256_bytes,
 )
 from tools.submit_matrix import verify_evaluation_training_dependencies
+from tools import submit_p3_chain
 from training_resume import CHECKPOINT_SCHEMA, StepCheckpointManager
 
 
@@ -178,12 +184,27 @@ def test_heldout_manifest_is_all_validation_fixed_and_rejects_leakage(tmp_path):
         validation_entries=[_entry("rope", "shared", 2, 0)],
         data_manifest_path=data,
         source_commit="f" * 40,
+        target_steps=100,
         out_path=tmp_path / "heldout_rope.jsonl",
     )
     metadata = json.loads(Path(record["metadata_path"]).read_text())
     assert metadata["selection"] == "all_validation_examples"
     assert metadata["entry_count"] == 1
+    assert metadata["target_steps"] == 100
+    assert metadata["rounding_rule"] == "ceil(target_steps*percent/100)"
     assert record["sha256"] == sha256_file(record["path"])
+    assert (
+        canonical_first_heldout_manifest_key(record, target_steps=100)
+        == "rope/shared/000002/000000-000002-f1"
+    )
+    with pytest.raises(P3CompletionError, match="metadata differs"):
+        canonical_first_heldout_manifest_key(
+            dict(record, target_steps=101), target_steps=100
+        )
+    with pytest.raises(P3CompletionError, match="metadata differs"):
+        canonical_first_heldout_manifest_key(
+            dict(record, rounding_rule="floor"), target_steps=100
+        )
     with pytest.raises(P3CompletionError, match="episodes leak"):
         materialize_heldout_manifest(
             environment="rope",
@@ -191,6 +212,7 @@ def test_heldout_manifest_is_all_validation_fixed_and_rejects_leakage(tmp_path):
             validation_entries=[_entry("rope", "shared", 2, 0)],
             data_manifest_path=data,
             source_commit="f" * 40,
+            target_steps=100,
             out_path=tmp_path / "leaking.jsonl",
         )
 
@@ -328,6 +350,22 @@ def test_training_ledger_rejects_rehashed_epoch_cursor_and_geometry_drift(
         )
 
 
+def test_training_ledger_rejects_rehashed_boolean_loss(tmp_path):
+    ledger_path = tmp_path / "training_steps.jsonl"
+    append_training_record(ledger_path, _training_row(1), target_steps=100)
+    rows = copy.deepcopy(p3_completion.load_jsonl(ledger_path))
+    rows[0]["loss"] = True
+    _rehash_evidence_rows(rows)
+    with pytest.raises(P3CompletionError, match="nonfinite loss"):
+        validate_training_records(
+            rows,
+            source_commit="f" * 40,
+            immutable_run_card_sha256="a" * 64,
+            dataset_order_sha256="b" * 64,
+            target_steps=100,
+        )
+
+
 def test_complete_training_ledger_rejects_over_target_growth(tmp_path):
     path = tmp_path / "training_steps.jsonl"
     for step in range(1, 101):
@@ -342,9 +380,9 @@ def test_complete_training_ledger_rejects_over_target_growth(tmp_path):
     assert path.read_bytes() == ledger_bytes
     assert marker_path.read_bytes() == marker_bytes
     existing = json.loads(ledger_bytes.splitlines()[-1])
-    assert append_training_record(
-        path, _training_row(100), target_steps=100
-    ) == existing
+    assert (
+        append_training_record(path, _training_row(100), target_steps=100) == existing
+    )
 
 
 def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
@@ -370,7 +408,9 @@ def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
     assert marker["record_count"] == 10
     assert marker["next_step"] == 11
     assert marker["tail_record_sha256"] == records[-1]["record_sha256"]
-    assert marker["tail_offset_bytes"] + marker["tail_size_bytes"] == path.stat().st_size
+    assert (
+        marker["tail_offset_bytes"] + marker["tail_size_bytes"] == path.stat().st_size
+    )
     assert marker["ledger_size_bytes"] == path.stat().st_size
     assert len(path.read_text(encoding="utf-8").splitlines()) == 10
 
@@ -413,9 +453,7 @@ def test_training_tail_marker_recovers_only_from_full_validated_scan(
             raise RuntimeError("simulated crash before marker advance")
         return original_atomic_write(destination, value)
 
-    monkeypatch.setattr(
-        p3_completion, "atomic_write_json", crash_before_marker_advance
-    )
+    monkeypatch.setattr(p3_completion, "atomic_write_json", crash_before_marker_advance)
     with pytest.raises(RuntimeError, match="simulated crash"):
         append_training_record(path, _training_row(2), target_steps=100)
     monkeypatch.setattr(p3_completion, "atomic_write_json", original_atomic_write)
@@ -439,9 +477,7 @@ def test_training_tail_marker_recovers_only_from_full_validated_scan(
         "target_steps": 100,
     }
     with pytest.raises(P3CompletionError, match="record hash differs"):
-        p3_completion.initialize_training_tail_index(
-            path, invalid_rows, **rebuild_args
-        )
+        p3_completion.initialize_training_tail_index(path, invalid_rows, **rebuild_args)
     assert json.loads(marker_path.read_text(encoding="utf-8")) == stale_marker
 
     rebuilt = p3_completion.initialize_training_tail_index(path, rows, **rebuild_args)
@@ -494,9 +530,7 @@ def test_training_replay_uses_validated_direct_index(tmp_path, monkeypatch):
     guarded_rows = OnePassRows(rows)
     monkeypatch.setattr(p3_completion, "load_jsonl", lambda _path: guarded_rows)
 
-    assert append_training_record(
-        path, _training_row(2), target_steps=100
-    ) == rows[1]
+    assert append_training_record(path, _training_row(2), target_steps=100) == rows[1]
     assert guarded_rows.iterations == 1
 
 
@@ -618,9 +652,10 @@ def test_validation_resume_coverage_and_inconclusive(tmp_path):
             immutable_run_card_sha256="4" * 64,
             manifest_sha256="1" * 64,
         )
-    assert comparison_verdict(
-        {"plateaued": True}, {"plateaued": False}
-    ) == "optimization-inconclusive"
+    assert (
+        comparison_verdict({"plateaued": True}, {"plateaued": False})
+        == "optimization-inconclusive"
+    )
     nonfinite = _validation_row(1, 1.0)
     nonfinite["mean_loss"] = float("nan")
     bad_path = tmp_path / "bad.jsonl"
@@ -632,9 +667,7 @@ def test_validation_resume_coverage_and_inconclusive(tmp_path):
 def test_validation_ledger_rejects_rehashed_state_and_percent_order_drift(tmp_path):
     path = tmp_path / "heldout_loss.jsonl"
     for percent in range(1, 4):
-        append_validation_record(
-            path, _validation_row(percent, 1.0), target_steps=100
-        )
+        append_validation_record(path, _validation_row(percent, 1.0), target_steps=100)
     rows = p3_completion.load_jsonl(path)
 
     unrestored = copy.deepcopy(rows)
@@ -653,6 +686,34 @@ def test_validation_ledger_rejects_rehashed_state_and_percent_order_drift(tmp_pa
     with pytest.raises(P3CompletionError, match="canonical percent order"):
         validate_validation_records(
             reordered,
+            target_steps=100,
+            immutable_run_card_sha256="4" * 64,
+            manifest_sha256="1" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("global_step", True, "percent-to-step mapping"),
+        ("target_steps", 100.0, "target or rounding rule"),
+        ("target_steps", True, "target or rounding rule"),
+        ("rounding_rule", "round", "target or rounding rule"),
+        ("loss_numerator", True, "nonfinite, empty, or inconsistent"),
+        ("mean_loss", True, "nonfinite, empty, or inconsistent"),
+    ],
+)
+def test_validation_ledger_rejects_rehashed_type_and_contract_drift(
+    tmp_path, field, value, message
+):
+    path = tmp_path / "heldout_loss.jsonl"
+    append_validation_record(path, _validation_row(1, 1.0), target_steps=100)
+    rows = copy.deepcopy(p3_completion.load_jsonl(path))
+    rows[0][field] = value
+    _rehash_evidence_rows(rows)
+    with pytest.raises(P3CompletionError, match=message):
+        validate_validation_records(
+            rows,
             target_steps=100,
             immutable_run_card_sha256="4" * 64,
             manifest_sha256="1" * 64,
@@ -685,7 +746,16 @@ def _receipt(**updates):
         "container_sha256": "c" * 64,
         "target_steps": 100,
         "global_step": 100,
-        "sampler": {"next_step": 100},
+        "sampler": {
+            "dataset_size": 10,
+            "batch_size": 4,
+            "steps_per_epoch": 3,
+            "next_step": 100,
+            "completed_epochs": 33,
+            "next_batch_in_epoch": 1,
+            "next_sample_in_epoch": 4,
+            "dataset_order_sha256": "a" * 64,
+        },
         "checkpoint": "/tmp/step_000000100.pth",
         "checkpoint_sha256": "d" * 64,
         "checkpoint_history_record_sha256": "e" * 64,
@@ -732,6 +802,79 @@ def test_final_fresh_load_receipt_rejects_nonfinite_and_provenance_drift(tmp_pat
         write_final_receipt(tmp_path / "bad_receipt.json", bad)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("global_step", 100.0, "target or sampler"),
+        ("global_step", True, "target or sampler"),
+        ("validation_batch.manifest_key", "", "manifest key"),
+        ("validation_batch.manifest_key", 7, "manifest key"),
+        ("validation_batch.loss_numerator", True, "validation loss"),
+        ("validation_batch.mean_loss", True, "validation loss"),
+    ],
+)
+def test_final_receipt_rejects_canonical_type_edges(tmp_path, field, value, message):
+    receipt = _receipt()
+    if field.startswith("validation_batch."):
+        nested = field.split(".", 1)[1]
+        receipt["validation_batch"] = dict(receipt["validation_batch"])
+        receipt["validation_batch"][nested] = value
+    else:
+        receipt[field] = value
+    _write_json(tmp_path / "final_acceptance.json", receipt)
+    with pytest.raises(P3CompletionError, match=message):
+        load_final_receipt(tmp_path)
+
+
+def test_final_receipt_expected_map_binds_sampler_and_manifest_key(tmp_path):
+    receipt = _receipt()
+    write_final_receipt(tmp_path / "final_acceptance.json", receipt)
+    load_final_receipt(
+        tmp_path,
+        expected={
+            "sampler": receipt["sampler"],
+            "validation_batch.manifest_key": "first",
+        },
+    )
+    changed_sampler = copy.deepcopy(receipt["sampler"])
+    changed_sampler["dataset_size"] = 11
+    with pytest.raises(P3CompletionError, match="sampler"):
+        load_final_receipt(tmp_path, expected={"sampler": changed_sampler})
+    with pytest.raises(P3CompletionError, match="validation_batch.manifest_key"):
+        load_final_receipt(
+            tmp_path, expected={"validation_batch.manifest_key": "different"}
+        )
+
+
+def test_heldout_acceptance_rejects_boolean_entry_count(tmp_path):
+    data_manifest = tmp_path / "DATASET_MANIFEST.json"
+    _write_json(data_manifest, {"released": True})
+    record = materialize_heldout_manifest(
+        environment="rope",
+        training_entries=[_entry("rope", "shared", 1, 0)],
+        validation_entries=[_entry("rope", "shared", 2, 0)],
+        data_manifest_path=data_manifest,
+        source_commit="f" * 40,
+        target_steps=100,
+        out_path=tmp_path / "heldout_rope.jsonl",
+    )
+    with pytest.raises(P3CompletionError, match="metadata differs"):
+        canonical_first_heldout_manifest_key(
+            dict(record, entry_count=True), target_steps=100
+        )
+    training = [dict(_entry("rope", "shared", 1, 0), dataset_index=0)]
+    validation = [dict(_entry("rope", "shared", 2, 0), dataset_index=0)]
+    with pytest.raises(P3CompletionError, match="metadata differs from runtime"):
+        validate_runtime_heldout_manifest(
+            dict(record, entry_count=True),
+            environment="rope",
+            source_commit="f" * 40,
+            target_steps=100,
+            training_entries=training,
+            validation_entries=validation,
+        )
+
+
 def test_final_receipt_rejects_equal_training_and_acceptance_process_ids(tmp_path):
     with pytest.raises(P3CompletionError, match="must differ"):
         write_final_receipt(
@@ -743,7 +886,12 @@ def test_final_receipt_rejects_equal_training_and_acceptance_process_ids(tmp_pat
 def _paired_fixture():
     cards = []
     cells = {}
-    heldout = {"sha256": "5" * 64, "split_sha256": "6" * 64}
+    heldout = {
+        "sha256": "5" * 64,
+        "split_sha256": "6" * 64,
+        "target_steps": 100,
+        "rounding_rule": "ceil(target_steps*percent/100)",
+    }
     for environment in LOCKED_ENVS:
         for arm in LOCKED_ARMS:
             for seed in LOCKED_SEEDS:
@@ -877,6 +1025,216 @@ def test_paired_config_audit_rejects_unallowlisted_container_drift():
         _paired_audit(changed, cells)
 
 
+def _p4_acceptance_fixture(tmp_path):
+    run_dir = tmp_path / "training"
+    target = 100
+    run_card_sha256 = "a" * 64
+    sampler = copy.deepcopy(_receipt()["sampler"])
+    data_manifest = tmp_path / "DATASET_MANIFEST.json"
+    _write_json(data_manifest, {"released": True})
+    heldout = materialize_heldout_manifest(
+        environment="pusht",
+        training_entries=[_entry("pusht", "shared", 1, 0)],
+        validation_entries=[_entry("pusht", "shared", 2, 0)],
+        data_manifest_path=data_manifest,
+        source_commit="f" * 40,
+        target_steps=target,
+        out_path=tmp_path / "heldout_pusht.jsonl",
+    )
+    checkpoint = run_dir / "checkpoints" / "steps" / f"step_{target:09d}.pth"
+    checkpoint.parent.mkdir(parents=True)
+    torch.save(
+        {
+            "global_step": target,
+            "immutable_run_card_sha256": run_card_sha256,
+            "sampler": sampler,
+        },
+        checkpoint,
+    )
+    completion = {
+        "heldout_manifest_sha256": heldout["sha256"],
+        "data_manifest_sha256": heldout["data_manifest_sha256"],
+        "split_sha256": heldout["split_sha256"],
+        "training_ledger_sha256": "8" * 64,
+        "validation_ledger_sha256": "9" * 64,
+        "checkpoint_history_sha256": "0" * 64,
+    }
+    progress = {
+        "status": "TARGET_REACHED",
+        "global_step": target,
+        "target_steps": target,
+        "completed_segment_steps": target,
+        "last_step_loss": 1.0,
+        "source_commit": "f" * 40,
+        "immutable_run_card_sha256": run_card_sha256,
+        "training_process_id": 456,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "parameter_sha256": "1" * 64,
+        "optimizer_sha256": "2" * 64,
+        "scheduler_sha256": "3" * 64,
+        "sampler": sampler,
+        "p3_completion": completion,
+    }
+    _write_json(run_dir / "progress.json", progress)
+    validation_key = "pusht/shared/000002/000000-000002-f1"
+    receipt = _receipt(
+        checkpoint=str(checkpoint),
+        checkpoint_sha256=progress["checkpoint_sha256"],
+        manifest_sha256=heldout["sha256"],
+        data_manifest_sha256=heldout["data_manifest_sha256"],
+        split_sha256=heldout["split_sha256"],
+        validation_batch={
+            "manifest_key": validation_key,
+            "loss_numerator": 2.0,
+            "element_count": 2,
+            "mean_loss": 1.0,
+        },
+    )
+    receipt_path = run_dir / "final_acceptance.json"
+    receipt_sha256 = write_final_receipt(receipt_path, receipt)
+    training_card = {
+        "kind": "p3-training",
+        "run_card_sha256": run_card_sha256,
+        "config_sha256": "b" * 64,
+        "batch_size": 4,
+        "container": {"sha256": "c" * 64},
+        "heldout_loss_manifest": heldout,
+    }
+    training_card_path = tmp_path / "training.yaml"
+    training_card_path.write_text(
+        yaml.safe_dump(training_card, sort_keys=True), encoding="utf-8"
+    )
+    event = {
+        "job_id": "222",
+        "progress_status": "TARGET_REACHED",
+        "global_step": target,
+        "immutable_run_card_sha256": run_card_sha256,
+        "training_process_id": 456,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": progress["checkpoint_sha256"],
+        "final_acceptance_receipt": str(receipt_path),
+        "final_acceptance_receipt_sha256": receipt_sha256,
+        "final_acceptance_process_id": 123,
+    }
+    chain = {
+        "schema": "dino-wm.p3-slurm-chain.v1",
+        "status": "PASSED",
+        "run_dir": str(run_dir),
+        "target_steps": target,
+        "run_card_sha256": run_card_sha256,
+        "run_card": str(training_card_path),
+        "run_card_file_sha256": sha256_file(training_card_path),
+        "source_commit": "f" * 40,
+        "jobs": [{"job_id": "111"}, {"job_id": "222"}],
+        "events": [event],
+        "final_progress": progress,
+        "training_process_id": 456,
+        "final_acceptance_process_id": 123,
+        "final_acceptance_receipt": str(receipt_path),
+        "final_acceptance_receipt_sha256": receipt_sha256,
+    }
+    _write_json(run_dir / "chain.json", chain)
+    card = {
+        "kind": "p4-open-loop",
+        "run_id": "p4-pusht-dino_pinned-s1",
+        "run_dir": str(run_dir),
+        "training_run_id": "p3-pusht-dino_pinned-s1",
+        "training_run_dir": str(run_dir),
+        "training_run_card": {
+            "path": str(training_card_path),
+            "file_sha256": sha256_file(training_card_path),
+            "run_card_sha256": run_card_sha256,
+        },
+        "training_completion_receipt": {
+            "path": str(receipt_path),
+            "schema": FINAL_RECEIPT_SCHEMA,
+            "training_run_card_sha256": run_card_sha256,
+        },
+        "depends_on": ["p3-pusht-dino_pinned-s1"],
+        "target_steps": target,
+        "batch_size": 4,
+        "source_commit": "f" * 40,
+        "config_sha256": "b" * 64,
+        "container": {"sha256": "c" * 64},
+        "heldout_loss_manifest": heldout,
+        "run_card_sha256": run_card_sha256,
+    }
+    return card, training_card, progress, chain
+
+
+def _tamper_receipt_and_rebind_chain(run_dir, chain, field):
+    receipt_path = run_dir / "final_acceptance.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if field == "sampler":
+        receipt["sampler"]["dataset_size"] = 11
+    else:
+        receipt["validation_batch"]["manifest_key"] = "different/canonical/key"
+    receipt_sha256 = _write_json(receipt_path, receipt)
+    chain["events"][-1]["final_acceptance_receipt_sha256"] = receipt_sha256
+    chain["final_acceptance_receipt_sha256"] = receipt_sha256
+    _write_json(run_dir / "chain.json", chain)
+
+
+@pytest.mark.parametrize("field", ["sampler", "manifest_key"])
+@pytest.mark.parametrize("consumer", ["submit_matrix", "evaluator", "collector"])
+def test_receipt_consumers_reject_rehashed_sampler_or_manifest_key(
+    tmp_path, field, consumer
+):
+    card, training_card, _progress, chain = _p4_acceptance_fixture(tmp_path)
+    run_dir = Path(card["training_run_dir"])
+    _tamper_receipt_and_rebind_chain(run_dir, chain, field)
+    match = "sampler" if field == "sampler" else "validation_batch.manifest_key"
+    if consumer == "submit_matrix":
+        with pytest.raises(HarnessError, match=match):
+            verify_evaluation_training_dependencies(
+                [card], {"p3-pusht-dino_pinned-s1": "222"}
+            )
+    elif consumer == "evaluator":
+        with pytest.raises(EvaluationContractError, match=match):
+            _verify_training_completion(card, training_card, run_dir)
+    else:
+        with pytest.raises(HarnessError, match=match):
+            _load_cell(card)
+
+
+@pytest.mark.parametrize("field", ["sampler", "manifest_key"])
+def test_chain_acceptance_rejects_rehashed_sampler_or_manifest_key(
+    tmp_path, monkeypatch, field
+):
+    card, training_card, progress, chain = _p4_acceptance_fixture(tmp_path)
+    run_dir = Path(card["training_run_dir"])
+    _tamper_receipt_and_rebind_chain(run_dir, chain, field)
+    training_card_path = Path(card["training_run_card"]["path"])
+    chain_manifest = {
+        "schema": "dino-wm.p3-slurm-chain.v1",
+        "status": "SUBMITTED",
+        "run_dir": str(run_dir),
+        "target_steps": 100,
+        "source_commit": "f" * 40,
+        "code_root": str(Path(__file__).resolve().parents[1]),
+        "run_card": str(training_card_path),
+        "run_card_sha256": training_card["run_card_sha256"],
+        "run_card_kind": "p3-training",
+        "container": training_card["container"],
+        "events": [],
+        "jobs": [{"job_id": "222"}],
+    }
+    chain_path = run_dir / "chain.json"
+    _write_json(chain_path, chain_manifest)
+    _write_json(run_dir / "progress.json", progress)
+    monkeypatch.setattr(
+        submit_p3_chain.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: "f" * 40 + "\n",
+    )
+    match = "sampler" if field == "sampler" else "validation_batch.manifest_key"
+    with pytest.raises(RuntimeError, match=match):
+        submit_p3_chain.continue_chain(
+            type("Args", (), {"manifest": chain_path, "parent_job": "222"})()
+        )
+
+
 def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
     run_dir = tmp_path / "training"
     checkpoint = run_dir / "checkpoints" / "steps" / "step_000000100.pth"
@@ -884,6 +1242,17 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
     torch.save({"target": 100}, checkpoint)
     training_card = tmp_path / "training.yaml"
     training_card.write_text("immutable: true\n", encoding="utf-8")
+    data_manifest = tmp_path / "DATASET_MANIFEST.json"
+    _write_json(data_manifest, {"released": True})
+    heldout = materialize_heldout_manifest(
+        environment="pusht",
+        training_entries=[_entry("pusht", "shared", 1, 0)],
+        validation_entries=[_entry("pusht", "shared", 2, 0)],
+        data_manifest_path=data_manifest,
+        source_commit="f" * 40,
+        target_steps=100,
+        out_path=tmp_path / "heldout_pusht.jsonl",
+    )
     progress = {
         "status": "TARGET_REACHED",
         "global_step": 100,
@@ -896,18 +1265,29 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         "parameter_sha256": "1" * 64,
         "optimizer_sha256": "2" * 64,
         "scheduler_sha256": "3" * 64,
-        "sampler": {"next_step": 100, "dataset_order_sha256": "a" * 64},
+        "sampler": _receipt()["sampler"],
         "p3_completion": {
-            "heldout_manifest_sha256": "5" * 64,
-            "data_manifest_sha256": "6" * 64,
-            "split_sha256": "7" * 64,
+            "heldout_manifest_sha256": heldout["sha256"],
+            "data_manifest_sha256": heldout["data_manifest_sha256"],
+            "split_sha256": heldout["split_sha256"],
             "training_ledger_sha256": "8" * 64,
             "validation_ledger_sha256": "9" * 64,
             "checkpoint_history_sha256": "0" * 64,
         },
     }
     _write_json(run_dir / "progress.json", progress)
-    receipt = _receipt(checkpoint_sha256=progress["checkpoint_sha256"])
+    receipt = _receipt(
+        checkpoint_sha256=progress["checkpoint_sha256"],
+        manifest_sha256=heldout["sha256"],
+        data_manifest_sha256=heldout["data_manifest_sha256"],
+        split_sha256=heldout["split_sha256"],
+        validation_batch={
+            "manifest_key": "pusht/shared/000002/000000-000002-f1",
+            "loss_numerator": 2.0,
+            "element_count": 2,
+            "mean_loss": 1.0,
+        },
+    )
     receipt_path = run_dir / "final_acceptance.json"
     receipt_sha = write_final_receipt(receipt_path, receipt)
     event = {
@@ -957,9 +1337,11 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         },
         "depends_on": ["p3-pusht-dino_pinned-s1"],
         "target_steps": 100,
+        "batch_size": 4,
         "source_commit": "f" * 40,
         "config_sha256": "b" * 64,
         "container": {"sha256": "c" * 64},
+        "heldout_loss_manifest": heldout,
     }
     verify_evaluation_training_dependencies([card], {"p3-pusht-dino_pinned-s1": "222"})
 
@@ -975,6 +1357,10 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         checkpoint_sha256=progress["checkpoint_sha256"],
         process_id=456,
         training_process_id=456,
+        manifest_sha256=heldout["sha256"],
+        data_manifest_sha256=heldout["data_manifest_sha256"],
+        split_sha256=heldout["split_sha256"],
+        validation_batch=receipt["validation_batch"],
     )
     equal_pid_receipt_sha = _write_json(receipt_path, equal_pid_receipt)
     event["final_acceptance_process_id"] = 456
@@ -1045,6 +1431,8 @@ def test_fresh_trainer_process_loads_final_state_and_rejects_tampered_metadata(
                     "sha256": "5" * 64,
                     "data_manifest_sha256": "6" * 64,
                     "split_sha256": "7" * 64,
+                    "target_steps": 100,
+                    "rounding_rule": "ceil(target_steps*percent/100)",
                 },
             },
             indent=2,

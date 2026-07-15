@@ -21,8 +21,10 @@ if sys_path not in sys.path:
 
 from p3_completion import (  # noqa: E402
     P3CompletionError,
+    canonical_first_heldout_manifest_key,
     is_process_id,
     load_final_receipt,
+    validate_final_sampler,
 )
 
 try:
@@ -83,6 +85,14 @@ def verify_progress_evidence(manifest: dict, progress: dict) -> Path:
     sampler = progress.get("sampler")
     if not isinstance(sampler, dict) or sampler.get("next_step") != global_step:
         raise RuntimeError("Progress sampler cursor differs from the completed step")
+    try:
+        validate_final_sampler(
+            sampler,
+            target_steps=global_step,
+            dataset_order_sha256=str(sampler.get("dataset_order_sha256")),
+        )
+    except P3CompletionError as exc:
+        raise RuntimeError(str(exc)) from exc
     return checkpoint
 
 
@@ -267,6 +277,23 @@ def continue_chain(args: argparse.Namespace) -> None:
             completion = progress.get("p3_completion")
             if not isinstance(completion, dict):
                 raise RuntimeError("P3 target progress lacks completion evidence")
+            heldout = run_card.get("heldout_loss_manifest")
+            if not isinstance(heldout, dict) or any(
+                completion.get(completion_field) != heldout.get(card_field)
+                for completion_field, card_field in (
+                    ("heldout_manifest_sha256", "sha256"),
+                    ("data_manifest_sha256", "data_manifest_sha256"),
+                    ("split_sha256", "split_sha256"),
+                )
+            ):
+                raise RuntimeError("P3 completion held-out provenance differs")
+            try:
+                validation_manifest_key = canonical_first_heldout_manifest_key(
+                    heldout,
+                    target_steps=int(manifest["target_steps"]),
+                )
+            except (KeyError, P3CompletionError) as exc:
+                raise RuntimeError(str(exc)) from exc
             expected_receipt = {
                 "slurm_job_id": str(args.parent_job),
                 "source_commit": manifest["source_commit"],
@@ -280,19 +307,15 @@ def continue_chain(args: argparse.Namespace) -> None:
                 "parameter_sha256": progress["parameter_sha256"],
                 "optimizer_sha256": progress["optimizer_sha256"],
                 "scheduler_sha256": progress["scheduler_sha256"],
-                "manifest_sha256": completion["heldout_manifest_sha256"],
-                "data_manifest_sha256": completion["data_manifest_sha256"],
-                "split_sha256": completion["split_sha256"],
+                "manifest_sha256": heldout["sha256"],
+                "data_manifest_sha256": heldout["data_manifest_sha256"],
+                "split_sha256": heldout["split_sha256"],
                 "training_ledger_sha256": completion["training_ledger_sha256"],
-                "validation_ledger_sha256": completion[
-                    "validation_ledger_sha256"
-                ],
-                "checkpoint_history_sha256": completion[
-                    "checkpoint_history_sha256"
-                ],
-                "dataset_order_sha256": progress["sampler"][
-                    "dataset_order_sha256"
-                ],
+                "validation_ledger_sha256": completion["validation_ledger_sha256"],
+                "checkpoint_history_sha256": completion["checkpoint_history_sha256"],
+                "dataset_order_sha256": progress["sampler"]["dataset_order_sha256"],
+                "sampler": progress["sampler"],
+                "validation_batch.manifest_key": validation_manifest_key,
             }
             depth = run_card.get("depth_inputs")
             expected_receipt.update(
@@ -300,14 +323,10 @@ def continue_chain(args: argparse.Namespace) -> None:
                     "depth_producer_sha256": depth.get("producer_sha256")
                     if depth
                     else None,
-                    "depth_cache_manifest_sha256": depth.get(
-                        "cache_manifest_sha256"
-                    )
+                    "depth_cache_manifest_sha256": depth.get("cache_manifest_sha256")
                     if depth
                     else None,
-                    "depth_native_contract_sha256": depth.get(
-                        "native_contract_sha256"
-                    )
+                    "depth_native_contract_sha256": depth.get("native_contract_sha256")
                     if depth
                     else None,
                     "depth_validation_sha256": depth.get("validation_sha256")

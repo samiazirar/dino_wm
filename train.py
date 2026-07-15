@@ -329,6 +329,8 @@ class Trainer:
             "metadata_sha256": self.cfg.training.p3_heldout_metadata_sha256,
             "data_manifest_sha256": self.cfg.training.p3_data_manifest_sha256,
             "split_sha256": self.cfg.training.p3_split_sha256,
+            "target_steps": int(self.cfg.training.target_steps),
+            "rounding_rule": "ceil(target_steps*percent/100)",
         }
         if any(
             value is None or str(value).lower() in {"", "none", "null"}
@@ -346,11 +348,13 @@ class Trainer:
         validation_entries = runtime_slice_entries(
             self.datasets["valid"], environment=environment, partition="valid"
         )
+        required["entry_count"] = len(validation_entries)
         try:
             rows, indices, metadata = validate_runtime_heldout_manifest(
                 required,
                 environment=environment,
                 source_commit=self.source_commit,
+                target_steps=int(self.cfg.training.target_steps),
                 training_entries=training_entries,
                 validation_entries=validation_entries,
             )

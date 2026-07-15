@@ -116,6 +116,7 @@ def materialize(args: argparse.Namespace) -> None:
             validation_entries=validation,
             data_manifest_path=args.data_manifest,
             source_commit=source_commit,
+            target_steps=int(spec["environments"][environment]["target_steps"]),
             out_path=Path(outputs[environment]),
         )
     print(

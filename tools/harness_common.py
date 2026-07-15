@@ -563,6 +563,13 @@ def validate_run_card(card: Mapping[str, Any]) -> None:
         if (
             not isinstance(heldout, Mapping)
             or heldout.get("selection") != "all_validation_examples"
+            or not isinstance(heldout.get("target_steps"), int)
+            or isinstance(heldout.get("target_steps"), bool)
+            or heldout.get("target_steps") != card.get("target_steps")
+            or heldout.get("rounding_rule") != "ceil(target_steps*percent/100)"
+            or not isinstance(heldout.get("entry_count"), int)
+            or isinstance(heldout.get("entry_count"), bool)
+            or heldout.get("entry_count") <= 0
             or not all(
                 _is_lower_hex(heldout.get(field), 64)
                 for field in (
@@ -583,12 +590,16 @@ def validate_run_card(card: Mapping[str, Any]) -> None:
             "encoder": "frozen",
         }:
             raise HarnessError("P3/P4 initialization policy differs")
-        if card.get("optimizer_policy") != {
-            "predictor": "adamw",
-            "predictor_lr": 0.00005,
-            "action_proprio": "adamw",
-            "action_proprio_lr": 0.0005,
-        } or card.get("schedule_policy") != "fixed_learning_rates":
+        if (
+            card.get("optimizer_policy")
+            != {
+                "predictor": "adamw",
+                "predictor_lr": 0.00005,
+                "action_proprio": "adamw",
+                "action_proprio_lr": 0.0005,
+            }
+            or card.get("schedule_policy") != "fixed_learning_rates"
+        ):
             raise HarnessError("P3/P4 optimizer or schedule policy differs")
         expected_boundary = {
             "dino_pinned": "not_applicable",
@@ -668,10 +679,8 @@ def verify_evaluation_bindings(
         or training.get("overrides") != card.get("overrides")
         or training.get("depth_inputs") != card.get("depth_inputs")
         or training.get("environment_variables") != card.get("environment_variables")
-        or training.get("heldout_loss_manifest")
-        != card.get("heldout_loss_manifest")
-        or training.get("initialization_policy")
-        != card.get("initialization_policy")
+        or training.get("heldout_loss_manifest") != card.get("heldout_loss_manifest")
+        or training.get("initialization_policy") != card.get("initialization_policy")
         or training.get("optimizer_policy") != card.get("optimizer_policy")
         or training.get("schedule_policy") != card.get("schedule_policy")
         or training.get("encoder_boundary") != card.get("encoder_boundary")
@@ -679,12 +688,11 @@ def verify_evaluation_bindings(
         raise HarnessError("evaluation card is not exactly bound to its training card")
     if card.get("kind") == "p4-open-loop":
         completion = card["training_completion_receipt"]
-        if (
-            Path(str(completion.get("path"))).resolve()
-            != Path(str(training["run_dir"])).resolve() / "final_acceptance.json"
-            or completion.get("training_run_card_sha256")
-            != training.get("run_card_sha256")
-        ):
+        if Path(str(completion.get("path"))).resolve() != Path(
+            str(training["run_dir"])
+        ).resolve() / "final_acceptance.json" or completion.get(
+            "training_run_card_sha256"
+        ) != training.get("run_card_sha256"):
             raise HarnessError("P4 completion receipt reference differs from P3")
     return training, metadata
 

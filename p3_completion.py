@@ -19,6 +19,7 @@ HELDOUT_ENTRY_SCHEMA = "dino-wm.p3-heldout-example.v1"
 HELDOUT_METADATA_SCHEMA = "dino-wm.p3-heldout-manifest.v1"
 FINAL_RECEIPT_SCHEMA = "dino-wm.p3-final-acceptance.v1"
 PLATEAU_THRESHOLD = 0.02
+HELDOUT_ROUNDING_RULE = "ceil(target_steps*percent/100)"
 
 
 class P3CompletionError(RuntimeError):
@@ -66,6 +67,14 @@ def is_source_commit(value: Any) -> bool:
 
 def is_process_id(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def require_job_id(value: Any, label: str = "SLURM job ID") -> str:
@@ -169,6 +178,8 @@ def append_jsonl(path: str | Path, value: Mapping[str, Any]) -> None:
 
 
 def percent_step(target_steps: int, percent: int) -> int:
+    if not isinstance(target_steps, int) or isinstance(target_steps, bool):
+        raise P3CompletionError("target_steps must be an integer")
     if target_steps < 100:
         raise P3CompletionError(
             "target_steps must be at least 100 for unique integer-percent points"
@@ -463,13 +474,8 @@ def _validate_training_cursor(
         or not isinstance(steps_per_epoch, int)
         or isinstance(steps_per_epoch, bool)
         or steps_per_epoch != (dataset_size + batch_size - 1) // batch_size
-        or (
-            expected_dataset_size is not None
-            and dataset_size != expected_dataset_size
-        )
-        or (
-            expected_batch_size is not None and batch_size != expected_batch_size
-        )
+        or (expected_dataset_size is not None and dataset_size != expected_dataset_size)
+        or (expected_batch_size is not None and batch_size != expected_batch_size)
     ):
         raise P3CompletionError("training ledger dataset geometry differs")
     completed_epochs = step // steps_per_epoch
@@ -496,6 +502,24 @@ def _validate_training_cursor(
     ):
         raise P3CompletionError("training ledger epoch or sampler cursor differs")
     return dataset_size, batch_size, steps_per_epoch
+
+
+def validate_final_sampler(
+    sampler: Mapping[str, Any],
+    *,
+    target_steps: int,
+    dataset_order_sha256: str,
+    expected_dataset_size: int | None = None,
+    expected_batch_size: int | None = None,
+) -> None:
+    """Validate an exact terminal sampler cursor against immutable geometry."""
+    _validate_training_cursor(
+        {"sampler": sampler, "completed_epochs": sampler.get("completed_epochs")},
+        step=target_steps,
+        dataset_order_sha256=dataset_order_sha256,
+        expected_dataset_size=expected_dataset_size,
+        expected_batch_size=expected_batch_size,
+    )
 
 
 def validate_training_records(
@@ -548,19 +572,15 @@ def validate_training_records(
             or row.get("config_sha256") != config_sha256
         ):
             raise P3CompletionError("training ledger configuration provenance drift")
-        if not isinstance(row.get("loss"), (int, float)) or not math.isfinite(
-            float(row["loss"])
-        ):
+        if not is_finite_number(row.get("loss")):
             raise P3CompletionError("training ledger contains nonfinite loss")
         require_job_id(row.get("slurm_job_id"))
-        row_dataset_size, row_batch_size, _steps_per_epoch = (
-            _validate_training_cursor(
-                row,
-                step=step,
-                dataset_order_sha256=dataset_order_sha256,
-                expected_dataset_size=dataset_size,
-                expected_batch_size=batch_size,
-            )
+        row_dataset_size, row_batch_size, _steps_per_epoch = _validate_training_cursor(
+            row,
+            step=step,
+            dataset_order_sha256=dataset_order_sha256,
+            expected_dataset_size=dataset_size,
+            expected_batch_size=batch_size,
         )
         dataset_size = row_dataset_size
         batch_size = row_batch_size
@@ -621,15 +641,16 @@ def _training_tail_index_record(
         "tail_record_sha256": rows[-1]["record_sha256"] if rows else None,
         "tail_offset_bytes": tail_offset,
         "tail_size_bytes": tail_size,
-        "tail_line_sha256": sha256_bytes(tail_bytes) if tail_bytes is not None else None,
+        "tail_line_sha256": sha256_bytes(tail_bytes)
+        if tail_bytes is not None
+        else None,
         "source_commit": source_commit,
         "immutable_run_card_sha256": immutable_run_card_sha256,
         "dataset_order_sha256": dataset_order_sha256,
         "config_sha256": config_sha256,
         "dataset_size": int(dataset_size),
         "batch_size": int(batch_size),
-        "steps_per_epoch": (int(dataset_size) + int(batch_size) - 1)
-        // int(batch_size),
+        "steps_per_epoch": (int(dataset_size) + int(batch_size) - 1) // int(batch_size),
         "target_steps": int(target_steps),
     }
 
@@ -780,15 +801,14 @@ def _load_incremental_training_tail_index(
         with path.open("rb") as handle:
             handle.seek(tail_offset)
             tail_bytes = handle.read(tail_size)
-        if (
-            len(tail_bytes) != tail_size
-            or sha256_bytes(tail_bytes) != tail_line_sha256
-        ):
+        if len(tail_bytes) != tail_size or sha256_bytes(tail_bytes) != tail_line_sha256:
             raise P3CompletionError("training ledger tail bytes differ from its index")
         try:
             tail_row = json.loads(tail_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise P3CompletionError("training ledger indexed tail is invalid JSON") from exc
+            raise P3CompletionError(
+                "training ledger indexed tail is invalid JSON"
+            ) from exc
         if (
             not isinstance(tail_row, Mapping)
             or canonical_json_bytes(tail_row) + b"\n" != tail_bytes
@@ -857,9 +877,7 @@ def _validate_new_training_record(
         expected_dataset_size=provenance.get("dataset_size"),
         expected_batch_size=provenance.get("batch_size"),
     )
-    if not isinstance(value.get("loss"), (int, float)) or not math.isfinite(
-        float(value["loss"])
-    ):
+    if not is_finite_number(value.get("loss")):
         raise P3CompletionError("new training record contains nonfinite loss")
     require_job_id(value.get("slurm_job_id"))
     if value.get("sampler", {}).get("next_step") != step:
@@ -917,9 +935,7 @@ def append_training_record(
             batch_size=int(provenance["batch_size"]),
             target_steps=target_steps,
         )
-    index = _load_incremental_training_tail_index(
-        path, target_steps=target_steps
-    )
+    index = _load_incremental_training_tail_index(path, target_steps=target_steps)
     provenance = {
         field: index[field]
         for field in (
@@ -1064,10 +1080,12 @@ def materialize_heldout_manifest(
     validation_entries: Iterable[Mapping[str, Any]],
     data_manifest_path: str | Path,
     source_commit: str,
+    target_steps: int,
     out_path: str | Path,
 ) -> Mapping[str, Any]:
     if not is_source_commit(source_commit):
         raise P3CompletionError("held-out manifest source commit is invalid")
+    percent_step_map(target_steps)
     data_manifest_path = Path(data_manifest_path).resolve()
     if not data_manifest_path.is_file():
         raise P3CompletionError(f"data manifest is absent: {data_manifest_path}")
@@ -1112,7 +1130,8 @@ def materialize_heldout_manifest(
             canonical_json_bytes(sorted(valid_keys))
         ),
         "source_commit": source_commit,
-        "rounding_rule": "ceil(target_steps*percent/100)",
+        "target_steps": int(target_steps),
+        "rounding_rule": HELDOUT_ROUNDING_RULE,
     }
     metadata_path = out_path.with_suffix(".meta.json")
     immutable_write_text(
@@ -1127,6 +1146,9 @@ def materialize_heldout_manifest(
         "data_manifest_sha256": metadata["data_manifest_sha256"],
         "split_sha256": metadata["split_sha256"],
         "selection": metadata["selection"],
+        "entry_count": metadata["entry_count"],
+        "target_steps": metadata["target_steps"],
+        "rounding_rule": metadata["rounding_rule"],
     }
 
 
@@ -1135,6 +1157,7 @@ def validate_runtime_heldout_manifest(
     *,
     environment: str,
     source_commit: str,
+    target_steps: int,
     training_entries: Iterable[Mapping[str, Any]],
     validation_entries: Iterable[Mapping[str, Any]],
 ) -> tuple[list[Mapping[str, Any]], list[int], Mapping[str, Any]]:
@@ -1174,8 +1197,23 @@ def validate_runtime_heldout_manifest(
         or metadata.get("environment") != environment
         or metadata.get("selection") != "all_validation_examples"
         or metadata.get("source_commit") != source_commit
+        or not isinstance(metadata.get("target_steps"), int)
+        or isinstance(metadata.get("target_steps"), bool)
+        or metadata.get("target_steps") != target_steps
+        or metadata.get("rounding_rule") != HELDOUT_ROUNDING_RULE
+        or not isinstance(record.get("target_steps"), int)
+        or isinstance(record.get("target_steps"), bool)
+        or record.get("target_steps") != target_steps
+        or record.get("rounding_rule") != HELDOUT_ROUNDING_RULE
         or metadata.get("manifest_sha256") != record.get("sha256")
+        or not isinstance(metadata.get("entry_count"), int)
+        or isinstance(metadata.get("entry_count"), bool)
+        or metadata.get("entry_count") <= 0
         or metadata.get("entry_count") != len(valid)
+        or not isinstance(record.get("entry_count"), int)
+        or isinstance(record.get("entry_count"), bool)
+        or record.get("entry_count") <= 0
+        or record.get("entry_count") != len(valid)
         or metadata.get("split_sha256")
         != sha256_bytes(canonical_json_bytes(split_contract))
         or metadata.get("data_manifest_sha256") != record.get("data_manifest_sha256")
@@ -1187,6 +1225,54 @@ def validate_runtime_heldout_manifest(
     }
     indices = [index_by_key[str(row["key"])] for row in manifest_rows]
     return manifest_rows, indices, metadata
+
+
+def canonical_first_heldout_manifest_key(
+    record: Mapping[str, Any], *, target_steps: int
+) -> str:
+    """Hash-verify a held-out manifest and return its canonical first key."""
+    path = Path(str(record.get("path")))
+    metadata_path = Path(str(record.get("metadata_path")))
+    if (
+        not path.is_file()
+        or sha256_file(path) != record.get("sha256")
+        or not metadata_path.is_file()
+        or sha256_file(metadata_path) != record.get("metadata_sha256")
+    ):
+        raise P3CompletionError("held-out manifest or metadata hash differs")
+    rows = load_jsonl(path)
+    if not rows or any(row.get("schema") != HELDOUT_ENTRY_SCHEMA for row in rows):
+        raise P3CompletionError("held-out manifest entries are absent or invalid")
+    canonical_rows = _unique_entries(rows, "held-out manifest")
+    if [_manifest_entry(row) for row in rows] != canonical_rows:
+        raise P3CompletionError("held-out manifest entries are not in canonical order")
+    metadata = load_json(metadata_path)
+    if (
+        record.get("selection") != "all_validation_examples"
+        or not isinstance(record.get("target_steps"), int)
+        or isinstance(record.get("target_steps"), bool)
+        or record.get("target_steps") != target_steps
+        or record.get("rounding_rule") != HELDOUT_ROUNDING_RULE
+        or not isinstance(record.get("entry_count"), int)
+        or isinstance(record.get("entry_count"), bool)
+        or record.get("entry_count") <= 0
+        or record.get("entry_count") != len(rows)
+        or metadata.get("schema") != HELDOUT_METADATA_SCHEMA
+        or metadata.get("selection") != "all_validation_examples"
+        or metadata.get("manifest_sha256") != record.get("sha256")
+        or metadata.get("data_manifest_sha256") != record.get("data_manifest_sha256")
+        or metadata.get("split_sha256") != record.get("split_sha256")
+        or not isinstance(metadata.get("entry_count"), int)
+        or isinstance(metadata.get("entry_count"), bool)
+        or metadata.get("entry_count") <= 0
+        or metadata.get("entry_count") != len(rows)
+        or not isinstance(metadata.get("target_steps"), int)
+        or isinstance(metadata.get("target_steps"), bool)
+        or metadata.get("target_steps") != target_steps
+        or metadata.get("rounding_rule") != HELDOUT_ROUNDING_RULE
+    ):
+        raise P3CompletionError("held-out manifest acceptance metadata differs")
+    return str(rows[0]["key"])
 
 
 def _stable_validation_record(value: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1244,10 +1330,23 @@ def validate_validation_records(
             )
         seen.add(percent)
         expected_percent += 1
-        if row.get("global_step") != mapping[percent]:
+        global_step = row.get("global_step")
+        if (
+            not isinstance(global_step, int)
+            or isinstance(global_step, bool)
+            or global_step != mapping[percent]
+        ):
             raise P3CompletionError(
                 "held-out loss uses the wrong percent-to-step mapping"
             )
+        row_target = row.get("target_steps")
+        if (
+            not isinstance(row_target, int)
+            or isinstance(row_target, bool)
+            or row_target != target_steps
+            or row.get("rounding_rule") != HELDOUT_ROUNDING_RULE
+        ):
+            raise P3CompletionError("held-out loss target or rounding rule differs")
         if (
             row.get("immutable_run_card_sha256") != immutable_run_card_sha256
             or row.get("manifest_sha256") != manifest_sha256
@@ -1261,13 +1360,11 @@ def validate_validation_records(
         count = row.get("element_count")
         mean = row.get("mean_loss")
         if (
-            not isinstance(numerator, (int, float))
-            or not math.isfinite(float(numerator))
+            not is_finite_number(numerator)
             or not isinstance(count, int)
             or isinstance(count, bool)
             or count <= 0
-            or not isinstance(mean, (int, float))
-            or not math.isfinite(float(mean))
+            or not is_finite_number(mean)
             or not math.isclose(
                 float(mean), float(numerator) / count, rel_tol=1e-12, abs_tol=1e-15
             )
@@ -1368,11 +1465,14 @@ def validate_final_receipt(
         )
     require_job_id(receipt.get("slurm_job_id"))
     target = receipt.get("target_steps")
+    sampler = receipt.get("sampler")
     if (
         not isinstance(target, int)
         or isinstance(target, bool)
+        or not isinstance(receipt.get("global_step"), int)
+        or isinstance(receipt.get("global_step"), bool)
         or receipt.get("global_step") != target
-        or receipt.get("sampler", {}).get("next_step") != target
+        or not isinstance(sampler, Mapping)
     ):
         raise P3CompletionError("final acceptance target or sampler is not exact")
     for field in (
@@ -1414,29 +1514,41 @@ def validate_final_receipt(
         raise P3CompletionError("final acceptance has incomplete depth provenance")
     if not is_source_commit(receipt.get("source_commit")):
         raise P3CompletionError("final acceptance source commit is invalid")
+    validate_final_sampler(
+        sampler,
+        target_steps=target,
+        dataset_order_sha256=str(receipt["dataset_order_sha256"]),
+    )
     validation = receipt.get("validation_batch")
     if not isinstance(validation, Mapping):
         raise P3CompletionError("final acceptance validation batch is absent")
+    if not isinstance(validation.get("manifest_key"), str) or not validation.get(
+        "manifest_key"
+    ):
+        raise P3CompletionError("final acceptance validation manifest key is invalid")
     numerator = validation.get("loss_numerator")
     count = validation.get("element_count")
     mean = validation.get("mean_loss")
     if (
-        not isinstance(numerator, (int, float))
-        or not math.isfinite(float(numerator))
+        not is_finite_number(numerator)
         or not isinstance(count, int)
         or isinstance(count, bool)
         or count <= 0
-        or not isinstance(mean, (int, float))
-        or not math.isfinite(float(mean))
+        or not is_finite_number(mean)
         or not math.isclose(
             float(mean), float(numerator) / count, rel_tol=1e-12, abs_tol=1e-15
         )
     ):
         raise P3CompletionError("final acceptance validation loss is invalid")
     if expected is not None:
-        differing = [
-            key for key, value in expected.items() if receipt.get(key) != value
-        ]
+        differing = []
+        for key, value in expected.items():
+            if key == "validation_batch.manifest_key":
+                actual = validation.get("manifest_key")
+            else:
+                actual = receipt.get(key)
+            if actual != value:
+                differing.append(key)
         if differing:
             raise P3CompletionError(
                 f"final acceptance receipt differs: {sorted(differing)}"

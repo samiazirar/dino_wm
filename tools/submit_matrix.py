@@ -14,7 +14,13 @@ from typing import Any, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from p3_completion import P3CompletionError, is_process_id, load_final_receipt
+from p3_completion import (
+    P3CompletionError,
+    canonical_first_heldout_manifest_key,
+    is_process_id,
+    load_final_receipt,
+    validate_final_sampler,
+)
 
 if __package__:
     from .harness_common import (
@@ -299,22 +305,51 @@ def verify_evaluation_training_dependencies(
             or final_event.get("progress_status") != "TARGET_REACHED"
             or int(final_event.get("global_step", -1)) != target_steps
             or final_event.get("immutable_run_card_sha256") != expected_run_card_sha256
-            or final_event.get("training_process_id")
-            != progress["training_process_id"]
+            or final_event.get("training_process_id") != progress["training_process_id"]
             or Path(str(final_event.get("checkpoint"))).resolve() != checkpoint
             or final_event.get("checkpoint_sha256") != progress.get("checkpoint_sha256")
         ):
             raise HarnessError(f"training chain final event differs for {run_id}")
         if card.get("kind") == "p4-open-loop":
+            try:
+                validate_final_sampler(
+                    sampler,
+                    target_steps=target_steps,
+                    dataset_order_sha256=str(sampler.get("dataset_order_sha256")),
+                    expected_batch_size=int(card["batch_size"]),
+                )
+            except P3CompletionError as exc:
+                raise HarnessError(str(exc)) from exc
             completion_reference = card.get("training_completion_receipt")
             completion = progress.get("p3_completion")
             if not isinstance(completion_reference, Mapping) or not isinstance(
                 completion, Mapping
             ):
                 raise HarnessError(f"P4 lacks P3 completion evidence for {run_id}")
+            heldout = card.get("heldout_loss_manifest")
+            if not isinstance(heldout, Mapping) or any(
+                completion.get(completion_field) != heldout.get(card_field)
+                for completion_field, card_field in (
+                    ("heldout_manifest_sha256", "sha256"),
+                    ("data_manifest_sha256", "data_manifest_sha256"),
+                    ("split_sha256", "split_sha256"),
+                )
+            ):
+                raise HarnessError(
+                    f"P4 completion held-out provenance differs for {run_id}"
+                )
             expected_receipt_path = training_run_dir / "final_acceptance.json"
-            if Path(str(completion_reference.get("path"))).resolve() != expected_receipt_path:
+            if (
+                Path(str(completion_reference.get("path"))).resolve()
+                != expected_receipt_path
+            ):
                 raise HarnessError(f"P4 completion receipt path differs for {run_id}")
+            try:
+                validation_manifest_key = canonical_first_heldout_manifest_key(
+                    heldout, target_steps=target_steps
+                )
+            except (KeyError, P3CompletionError) as exc:
+                raise HarnessError(str(exc)) from exc
             expected_receipt = {
                 "slurm_job_id": tail_job_id,
                 "source_commit": card["source_commit"],
@@ -328,17 +363,15 @@ def verify_evaluation_training_dependencies(
                 "parameter_sha256": progress["parameter_sha256"],
                 "optimizer_sha256": progress["optimizer_sha256"],
                 "scheduler_sha256": progress["scheduler_sha256"],
-                "manifest_sha256": completion["heldout_manifest_sha256"],
-                "data_manifest_sha256": completion["data_manifest_sha256"],
-                "split_sha256": completion["split_sha256"],
+                "manifest_sha256": heldout["sha256"],
+                "data_manifest_sha256": heldout["data_manifest_sha256"],
+                "split_sha256": heldout["split_sha256"],
                 "training_ledger_sha256": completion["training_ledger_sha256"],
-                "validation_ledger_sha256": completion[
-                    "validation_ledger_sha256"
-                ],
-                "checkpoint_history_sha256": completion[
-                    "checkpoint_history_sha256"
-                ],
+                "validation_ledger_sha256": completion["validation_ledger_sha256"],
+                "checkpoint_history_sha256": completion["checkpoint_history_sha256"],
                 "dataset_order_sha256": sampler["dataset_order_sha256"],
+                "sampler": sampler,
+                "validation_batch.manifest_key": validation_manifest_key,
             }
             depth = card.get("depth_inputs")
             expected_receipt.update(
@@ -346,14 +379,10 @@ def verify_evaluation_training_dependencies(
                     "depth_producer_sha256": depth.get("producer_sha256")
                     if depth
                     else None,
-                    "depth_cache_manifest_sha256": depth.get(
-                        "cache_manifest_sha256"
-                    )
+                    "depth_cache_manifest_sha256": depth.get("cache_manifest_sha256")
                     if depth
                     else None,
-                    "depth_native_contract_sha256": depth.get(
-                        "native_contract_sha256"
-                    )
+                    "depth_native_contract_sha256": depth.get("native_contract_sha256")
                     if depth
                     else None,
                     "depth_validation_sha256": depth.get("validation_sha256")
@@ -372,17 +401,14 @@ def verify_evaluation_training_dependencies(
                 raise HarnessError(str(exc)) from exc
             if (
                 receipt_path != expected_receipt_path
-                or chain.get("training_process_id")
-                != progress["training_process_id"]
-                or chain.get("final_acceptance_process_id")
-                != receipt["process_id"]
+                or chain.get("training_process_id") != progress["training_process_id"]
+                or chain.get("final_acceptance_process_id") != receipt["process_id"]
                 or final_event.get("final_acceptance_process_id")
                 != receipt["process_id"]
                 or chain.get("final_acceptance_receipt") != str(receipt_path)
                 or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
                 or final_event.get("final_acceptance_receipt") != str(receipt_path)
-                or final_event.get("final_acceptance_receipt_sha256")
-                != receipt_sha256
+                or final_event.get("final_acceptance_receipt_sha256") != receipt_sha256
             ):
                 raise HarnessError(
                     f"P4 is not bound to the accepted P3 receipt for {run_id}"

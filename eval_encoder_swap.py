@@ -15,7 +15,13 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from p3_completion import P3CompletionError, is_process_id, load_final_receipt
+from p3_completion import (
+    P3CompletionError,
+    canonical_first_heldout_manifest_key,
+    is_process_id,
+    load_final_receipt,
+    validate_final_sampler,
+)
 
 from tools.harness_common import (
     HarnessError,
@@ -405,6 +411,23 @@ def _verify_training_completion(
             "training checkpoint belongs to a different run card"
         )
     if card.get("kind") == "p4-open-loop":
+        sampler = progress.get("sampler")
+        if (
+            not isinstance(sampler, Mapping)
+            or checkpoint_metadata.get("sampler") != sampler
+        ):
+            raise EvaluationContractError(
+                "training progress sampler differs from the final checkpoint"
+            )
+        try:
+            validate_final_sampler(
+                sampler,
+                target_steps=int(card["target_steps"]),
+                dataset_order_sha256=str(sampler.get("dataset_order_sha256")),
+                expected_batch_size=int(training_card["batch_size"]),
+            )
+        except P3CompletionError as exc:
+            raise EvaluationContractError(str(exc)) from exc
         chain = json.loads(
             (training_run_dir / "chain.json").read_text(encoding="utf-8")
         )
@@ -421,6 +444,23 @@ def _verify_training_completion(
             or not isinstance(completion, Mapping)
         ):
             raise EvaluationContractError("P3 chain has no accepted completion tail")
+        heldout = card.get("heldout_loss_manifest")
+        if not isinstance(heldout, Mapping) or any(
+            completion.get(completion_field) != heldout.get(card_field)
+            for completion_field, card_field in (
+                ("heldout_manifest_sha256", "sha256"),
+                ("data_manifest_sha256", "data_manifest_sha256"),
+                ("split_sha256", "split_sha256"),
+            )
+        ):
+            raise EvaluationContractError("P3 completion held-out provenance differs")
+        try:
+            validation_manifest_key = canonical_first_heldout_manifest_key(
+                heldout,
+                target_steps=int(card["target_steps"]),
+            )
+        except (KeyError, P3CompletionError) as exc:
+            raise EvaluationContractError(str(exc)) from exc
         expected = {
             "slurm_job_id": tail_job_id,
             "source_commit": card["source_commit"],
@@ -434,13 +474,15 @@ def _verify_training_completion(
             "parameter_sha256": progress["parameter_sha256"],
             "optimizer_sha256": progress["optimizer_sha256"],
             "scheduler_sha256": progress["scheduler_sha256"],
-            "manifest_sha256": completion["heldout_manifest_sha256"],
-            "data_manifest_sha256": completion["data_manifest_sha256"],
-            "split_sha256": completion["split_sha256"],
+            "manifest_sha256": heldout["sha256"],
+            "data_manifest_sha256": heldout["data_manifest_sha256"],
+            "split_sha256": heldout["split_sha256"],
             "training_ledger_sha256": completion["training_ledger_sha256"],
             "validation_ledger_sha256": completion["validation_ledger_sha256"],
             "checkpoint_history_sha256": completion["checkpoint_history_sha256"],
             "dataset_order_sha256": progress["sampler"]["dataset_order_sha256"],
+            "sampler": progress["sampler"],
+            "validation_batch.manifest_key": validation_manifest_key,
         }
         depth = card.get("depth_inputs")
         expected.update(
@@ -472,16 +514,16 @@ def _verify_training_completion(
         if (
             chain.get("training_process_id") != progress["training_process_id"]
             or chain.get("final_acceptance_process_id") != receipt["process_id"]
-            or final_event.get("training_process_id")
-            != progress["training_process_id"]
-            or final_event.get("final_acceptance_process_id")
-            != receipt["process_id"]
+            or final_event.get("training_process_id") != progress["training_process_id"]
+            or final_event.get("final_acceptance_process_id") != receipt["process_id"]
             or chain.get("final_acceptance_receipt") != str(receipt_path)
             or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
             or final_event.get("final_acceptance_receipt") != str(receipt_path)
             or final_event.get("final_acceptance_receipt_sha256") != receipt_sha256
         ):
-            raise EvaluationContractError("P4 checkpoint lacks accepted P3 receipt binding")
+            raise EvaluationContractError(
+                "P4 checkpoint lacks accepted P3 receipt binding"
+            )
     return progress, checkpoint_path
 
 

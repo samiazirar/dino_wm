@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from p3_completion import (  # noqa: E402
     P3CompletionError,
+    canonical_first_heldout_manifest_key,
     comparison_verdict,
     is_process_id,
     load_checkpoint_history,
@@ -23,6 +24,7 @@ from p3_completion import (  # noqa: E402
     plateau_verdict,
     sha256_file,
     validate_checkpoint_evidence_bindings,
+    validate_final_sampler,
     validate_training_records,
     validate_validation_records,
     verify_training_tail_index,
@@ -134,6 +136,30 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
     sampler = progress.get("sampler")
     if not isinstance(completion, Mapping) or not isinstance(sampler, Mapping):
         raise HarnessError(f"cell lacks completion/sampler evidence: {card['run_id']}")
+    heldout = card.get("heldout_loss_manifest")
+    if not isinstance(heldout, Mapping) or any(
+        completion.get(completion_field) != heldout.get(card_field)
+        for completion_field, card_field in (
+            ("heldout_manifest_sha256", "sha256"),
+            ("data_manifest_sha256", "data_manifest_sha256"),
+            ("split_sha256", "split_sha256"),
+        )
+    ):
+        raise HarnessError(
+            f"cell completion held-out provenance differs: {card['run_id']}"
+        )
+    try:
+        validate_final_sampler(
+            sampler,
+            target_steps=target,
+            dataset_order_sha256=str(sampler.get("dataset_order_sha256")),
+            expected_batch_size=int(card["batch_size"]),
+        )
+        validation_manifest_key = canonical_first_heldout_manifest_key(
+            heldout, target_steps=target
+        )
+    except P3CompletionError as exc:
+        raise HarnessError(str(exc)) from exc
     expected_receipt = {
         "slurm_job_id": tail_job,
         "source_commit": card["source_commit"],
@@ -147,17 +173,22 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         "parameter_sha256": progress["parameter_sha256"],
         "optimizer_sha256": progress["optimizer_sha256"],
         "scheduler_sha256": progress["scheduler_sha256"],
-        "manifest_sha256": completion["heldout_manifest_sha256"],
-        "data_manifest_sha256": completion["data_manifest_sha256"],
-        "split_sha256": completion["split_sha256"],
+        "manifest_sha256": heldout["sha256"],
+        "data_manifest_sha256": heldout["data_manifest_sha256"],
+        "split_sha256": heldout["split_sha256"],
         "training_ledger_sha256": completion["training_ledger_sha256"],
         "validation_ledger_sha256": completion["validation_ledger_sha256"],
         "checkpoint_history_sha256": completion["checkpoint_history_sha256"],
         "dataset_order_sha256": sampler["dataset_order_sha256"],
+        "sampler": sampler,
+        "validation_batch.manifest_key": validation_manifest_key,
     }
-    receipt, receipt_path, receipt_sha256 = load_final_receipt(
-        run_dir, expected=expected_receipt
-    )
+    try:
+        receipt, receipt_path, receipt_sha256 = load_final_receipt(
+            run_dir, expected=expected_receipt
+        )
+    except P3CompletionError as exc:
+        raise HarnessError(str(exc)) from exc
     event = chain.get("events", [])[-1]
     if (
         event.get("job_id") != tail_job
@@ -313,12 +344,8 @@ def _paired_audit(
         for seed in LOCKED_SEEDS:
             group_cards = [by_axis[(environment, arm, seed)] for arm in LOCKED_ARMS]
             group_cells = [cells[(environment, arm, seed)] for arm in LOCKED_ARMS]
-            normalized_cards = [
-                _normalized_paired_card(card) for card in group_cards
-            ]
-            normalized_bytes = [
-                canonical_json_bytes(card) for card in normalized_cards
-            ]
+            normalized_cards = [_normalized_paired_card(card) for card in group_cards]
+            normalized_bytes = [canonical_json_bytes(card) for card in normalized_cards]
             if any(value != normalized_bytes[0] for value in normalized_bytes[1:]):
                 all_fields = set().union(*(card.keys() for card in normalized_cards))
                 differing = sorted(
@@ -336,9 +363,7 @@ def _paired_audit(
                 raise HarnessError(
                     f"paired non-arm settings differ for {environment}/s{seed}: {differing}"
                 )
-            dataset_orders = [
-                cell["dataset_order_sha256"] for cell in group_cells
-            ]
+            dataset_orders = [cell["dataset_order_sha256"] for cell in group_cells]
             if any(value != dataset_orders[0] for value in dataset_orders[1:]):
                 raise HarnessError(
                     f"paired dataset order differs for {environment}/s{seed}"

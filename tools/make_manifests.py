@@ -332,20 +332,37 @@ def _heldout_manifest_record(
     directory: Path,
     environment: str,
     source_commit: str,
+    target_steps: int,
 ) -> Mapping[str, Any]:
     path = directory / f"heldout_{environment}.jsonl"
     metadata_path = path.with_suffix(".meta.json")
     if not path.is_file() or not metadata_path.is_file():
         raise HarnessError(f"P3 held-out loss manifest is absent for {environment}")
     metadata = load_json(metadata_path)
+    try:
+        rows = [
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessError(
+            f"P3 held-out manifest is invalid for {environment}"
+        ) from exc
+    if not rows or any(not isinstance(row, Mapping) for row in rows):
+        raise HarnessError(f"P3 held-out manifest is invalid for {environment}")
     if (
         metadata.get("schema") != "dino-wm.p3-heldout-manifest.v1"
         or metadata.get("environment") != environment
         or metadata.get("selection") != "all_validation_examples"
         or metadata.get("source_commit") != source_commit
+        or not isinstance(metadata.get("target_steps"), int)
+        or isinstance(metadata.get("target_steps"), bool)
+        or metadata.get("target_steps") != target_steps
+        or metadata.get("rounding_rule") != "ceil(target_steps*percent/100)"
         or metadata.get("manifest_sha256") != sha256_file(path)
         or not isinstance(metadata.get("entry_count"), int)
+        or isinstance(metadata.get("entry_count"), bool)
         or metadata.get("entry_count", 0) <= 0
+        or metadata.get("entry_count") != len(rows)
         or len(str(metadata.get("data_manifest_sha256"))) != 64
         or len(str(metadata.get("split_sha256"))) != 64
     ):
@@ -361,6 +378,8 @@ def _heldout_manifest_record(
         "split_sha256": metadata["split_sha256"],
         "selection": "all_validation_examples",
         "entry_count": metadata["entry_count"],
+        "target_steps": metadata["target_steps"],
+        "rounding_rule": metadata["rounding_rule"],
     }
 
 
@@ -385,7 +404,10 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
     winner = _load_winner(args.producer_decision, spec)
     heldout = {
         environment: _heldout_manifest_record(
-            args.heldout_manifests_dir, environment, evidence["source_commit"]
+            args.heldout_manifests_dir,
+            environment,
+            evidence["source_commit"],
+            LOCKED_TARGETS[environment],
         )
         for environment in LOCKED_ENVS
     }
@@ -530,9 +552,7 @@ def make_open_loop(args: argparse.Namespace) -> Mapping[str, Any]:
                 card["initialization_policy"] = copy.deepcopy(
                     p3_card["initialization_policy"]
                 )
-                card["optimizer_policy"] = copy.deepcopy(
-                    p3_card["optimizer_policy"]
-                )
+                card["optimizer_policy"] = copy.deepcopy(p3_card["optimizer_policy"])
                 card["schedule_policy"] = p3_card["schedule_policy"]
                 card["encoder_boundary"] = p3_card["encoder_boundary"]
                 card["training_completion_receipt"] = {
