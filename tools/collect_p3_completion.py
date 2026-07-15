@@ -41,7 +41,6 @@ from tools.harness_common import (  # noqa: E402
 _PAIRED_TOP_LEVEL_DIFFERENCES = frozenset(
     {
         "arm",
-        "config_sha256",
         "depth_inputs",
         "encoder_boundary",
         "run_card_sha256",
@@ -76,10 +75,17 @@ def _normalized_overrides(card: Mapping[str, Any]) -> list[str]:
 
 def _normalized_paired_card(card: Mapping[str, Any]) -> Mapping[str, Any]:
     """Remove only reviewed arm identity/material and rate-derived differences."""
+    overrides = [str(value) for value in card["overrides"]]
+    if card.get("config_sha256") != sha256_bytes(canonical_json_bytes(overrides)):
+        raise HarnessError("paired card config_sha256 differs from its overrides")
     normalized = copy.deepcopy(dict(card))
     for field in _PAIRED_TOP_LEVEL_DIFFERENCES:
         normalized.pop(field, None)
-    normalized["overrides"] = _normalized_overrides(card)
+    normalized_overrides = _normalized_overrides(card)
+    normalized["overrides"] = normalized_overrides
+    normalized["config_sha256"] = sha256_bytes(
+        canonical_json_bytes(normalized_overrides)
+    )
     if "environment_variables" in normalized:
         environment_variables = normalized["environment_variables"]
         if not isinstance(environment_variables, Mapping):

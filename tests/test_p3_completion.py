@@ -31,7 +31,14 @@ from p3_completion import (
     write_final_receipt,
 )
 from tools.collect_p3_completion import _paired_audit
-from tools.harness_common import HarnessError, LOCKED_ARMS, LOCKED_ENVS, LOCKED_SEEDS
+from tools.harness_common import (
+    HarnessError,
+    LOCKED_ARMS,
+    LOCKED_ENVS,
+    LOCKED_SEEDS,
+    canonical_json_bytes,
+    sha256_bytes,
+)
 from tools.submit_matrix import verify_evaluation_training_dependencies
 from training_resume import CHECKPOINT_SCHEMA, StepCheckpointManager
 
@@ -518,7 +525,6 @@ def _paired_fixture():
                         "sha256": "d" * 64,
                         "winner": "da3_giant_video",
                     },
-                    "config_sha256": str(LOCKED_ARMS.index(arm) + 1) * 64,
                     "run_card_sha256": str(LOCKED_ARMS.index(arm) + 4) * 64,
                 }
                 if arm != "dino_pinned":
@@ -530,6 +536,9 @@ def _paired_fixture():
                             "DINOCULAR_CACHE_PRODUCER_SHA256": "1" * 64,
                         }
                     )
+                card["config_sha256"] = sha256_bytes(
+                    canonical_json_bytes(card["overrides"])
+                )
                 cards.append(card)
                 depth_fields = {
                     "depth_producer_sha256": None,
