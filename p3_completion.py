@@ -13,7 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 CHECKPOINT_HISTORY_SCHEMA = "dino-wm.step-checkpoint-history.v1"
 TRAINING_RECORD_SCHEMA = "dino-wm.p3-training-step.v1"
-TRAINING_TAIL_INDEX_SCHEMA = "dino-wm.p3-training-tail-index.v1"
+TRAINING_TAIL_INDEX_SCHEMA = "dino-wm.p3-training-tail-index.v2"
 VALIDATION_RECORD_SCHEMA = "dino-wm.p3-heldout-loss.v1"
 HELDOUT_ENTRY_SCHEMA = "dino-wm.p3-heldout-example.v1"
 HELDOUT_METADATA_SCHEMA = "dino-wm.p3-heldout-manifest.v1"
@@ -74,6 +74,15 @@ def require_job_id(value: Any, label: str = "SLURM job ID") -> str:
     return value
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_write_json(path: str | Path, value: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +93,7 @@ def atomic_write_json(path: str | Path, value: Any) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+    _fsync_directory(path.parent)
 
 
 def immutable_write_text(path: str | Path, text: str) -> None:
@@ -155,6 +165,7 @@ def append_jsonl(path: str | Path, value: Mapping[str, Any]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    _fsync_directory(path.parent)
 
 
 def percent_step(target_steps: int, percent: int) -> int:
@@ -491,12 +502,28 @@ def _training_tail_index_record(
     target_steps: int,
 ) -> Mapping[str, Any]:
     size = path.stat().st_size if path.exists() else 0
+    tail_bytes = canonical_json_bytes(rows[-1]) + b"\n" if rows else None
+    tail_size = len(tail_bytes) if tail_bytes is not None else None
+    tail_offset = size - tail_size if tail_size is not None else None
+    if tail_bytes is not None:
+        if tail_offset is None or tail_offset < 0:
+            raise P3CompletionError("training ledger is shorter than its tail record")
+        with path.open("rb") as handle:
+            handle.seek(tail_offset)
+            if handle.read(tail_size) != tail_bytes:
+                raise P3CompletionError(
+                    "training ledger tail bytes are not canonical or differ"
+                )
     return {
         "schema": TRAINING_TAIL_INDEX_SCHEMA,
         "ledger_path": str(path.resolve()),
         "ledger_size_bytes": size,
+        "record_count": len(rows),
         "next_step": len(rows) + 1,
         "tail_record_sha256": rows[-1]["record_sha256"] if rows else None,
+        "tail_offset_bytes": tail_offset,
+        "tail_size_bytes": tail_size,
+        "tail_line_sha256": sha256_bytes(tail_bytes) if tail_bytes is not None else None,
         "source_commit": source_commit,
         "immutable_run_card_sha256": immutable_run_card_sha256,
         "dataset_order_sha256": dataset_order_sha256,
@@ -515,8 +542,15 @@ def initialize_training_tail_index(
     config_sha256: str,
     target_steps: int,
 ) -> Mapping[str, Any]:
-    """Atomically rebuild the O(1) append marker after a validated full scan."""
+    """Full-validate a scanned ledger, then atomically rebuild its O(1) marker."""
     path = Path(path)
+    validate_training_records(
+        rows,
+        source_commit=source_commit,
+        immutable_run_card_sha256=immutable_run_card_sha256,
+        dataset_order_sha256=dataset_order_sha256,
+        target_steps=target_steps,
+    )
     if rows and rows[0].get("config_sha256") != config_sha256:
         raise P3CompletionError("training tail index configuration drift")
     record = _training_tail_index_record(
@@ -566,8 +600,12 @@ def _load_incremental_training_tail_index(
 ) -> Mapping[str, Any]:
     index = load_json(training_tail_index_path(path))
     next_step = index.get("next_step")
+    record_count = index.get("record_count")
     ledger_size = index.get("ledger_size_bytes")
     tail = index.get("tail_record_sha256")
+    tail_offset = index.get("tail_offset_bytes")
+    tail_size = index.get("tail_size_bytes")
+    tail_line_sha256 = index.get("tail_line_sha256")
     if (
         index.get("schema") != TRAINING_TAIL_INDEX_SCHEMA
         or index.get("ledger_path") != str(path.resolve())
@@ -575,12 +613,31 @@ def _load_incremental_training_tail_index(
         or not isinstance(next_step, int)
         or isinstance(next_step, bool)
         or not 1 <= next_step <= int(target_steps) + 1
+        or not isinstance(record_count, int)
+        or isinstance(record_count, bool)
+        or record_count != next_step - 1
         or not isinstance(ledger_size, int)
         or isinstance(ledger_size, bool)
         or ledger_size < 0
         or (tail is not None and not is_sha256(tail))
-        or (next_step == 1) != (tail is None)
-        or (next_step == 1) != (ledger_size == 0)
+        or (tail_line_sha256 is not None and not is_sha256(tail_line_sha256))
+        or (record_count == 0) != (tail is None)
+        or (record_count == 0) != (tail_offset is None)
+        or (record_count == 0) != (tail_size is None)
+        or (record_count == 0) != (tail_line_sha256 is None)
+        or (record_count == 0) != (ledger_size == 0)
+        or (
+            record_count > 0
+            and (
+                not isinstance(tail_offset, int)
+                or isinstance(tail_offset, bool)
+                or tail_offset < 0
+                or not isinstance(tail_size, int)
+                or isinstance(tail_size, bool)
+                or tail_size <= 0
+                or tail_offset + tail_size != ledger_size
+            )
+        )
         or not is_source_commit(index.get("source_commit"))
         or not all(
             is_sha256(index.get(field))
@@ -595,6 +652,37 @@ def _load_incremental_training_tail_index(
     actual_size = path.stat().st_size if path.exists() else 0
     if actual_size != ledger_size:
         raise P3CompletionError("training ledger size differs from its tail index")
+    if record_count > 0:
+        with path.open("rb") as handle:
+            handle.seek(tail_offset)
+            tail_bytes = handle.read(tail_size)
+        if (
+            len(tail_bytes) != tail_size
+            or sha256_bytes(tail_bytes) != tail_line_sha256
+        ):
+            raise P3CompletionError("training ledger tail bytes differ from its index")
+        try:
+            tail_row = json.loads(tail_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise P3CompletionError("training ledger indexed tail is invalid JSON") from exc
+        if (
+            not isinstance(tail_row, Mapping)
+            or canonical_json_bytes(tail_row) + b"\n" != tail_bytes
+            or tail_row.get("global_step") != record_count
+            or tail_row.get("record_sha256") != tail
+            or tail_row.get("record_sha256") != _record_digest(tail_row)
+        ):
+            raise P3CompletionError("training ledger indexed tail record differs")
+        for field in (
+            "source_commit",
+            "immutable_run_card_sha256",
+            "dataset_order_sha256",
+            "config_sha256",
+        ):
+            if tail_row.get(field) != index.get(field):
+                raise P3CompletionError(
+                    "training ledger tail has immutable provenance drift"
+                )
     return index
 
 
@@ -731,10 +819,19 @@ def append_training_record(
     record["previous_record_sha256"] = index["tail_record_sha256"]
     record["record_sha256"] = _record_digest(record)
     append_jsonl(path, record)
+    previous_size = int(index["ledger_size_bytes"])
+    tail_bytes = canonical_json_bytes(record) + b"\n"
+    ledger_size = path.stat().st_size
+    if ledger_size != previous_size + len(tail_bytes):
+        raise P3CompletionError("training ledger append size differs")
     updated_index = dict(index)
-    updated_index["ledger_size_bytes"] = path.stat().st_size
+    updated_index["ledger_size_bytes"] = ledger_size
+    updated_index["record_count"] = step
     updated_index["next_step"] = step + 1
     updated_index["tail_record_sha256"] = record["record_sha256"]
+    updated_index["tail_offset_bytes"] = previous_size
+    updated_index["tail_size_bytes"] = len(tail_bytes)
+    updated_index["tail_line_sha256"] = sha256_bytes(tail_bytes)
     atomic_write_json(index_path, updated_index)
     return record
 

@@ -267,6 +267,7 @@ def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
     tmp_path, monkeypatch
 ):
     path = tmp_path / "training_steps.jsonl"
+    records = [append_training_record(path, _training_row(1), target_steps=100)]
 
     def unexpected_full_scan(*_args, **_kwargs):
         raise AssertionError("normal consecutive append performed a full scan")
@@ -275,17 +276,116 @@ def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
     monkeypatch.setattr(
         p3_completion, "validate_training_records", unexpected_full_scan
     )
-    records = [
+    records.extend(
         append_training_record(path, _training_row(step), target_steps=100)
-        for step in range(1, 11)
-    ]
+        for step in range(2, 11)
+    )
     marker = json.loads(
         (tmp_path / "training_steps.tail.json").read_text(encoding="utf-8")
     )
+    assert marker["record_count"] == 10
     assert marker["next_step"] == 11
     assert marker["tail_record_sha256"] == records[-1]["record_sha256"]
+    assert marker["tail_offset_bytes"] + marker["tail_size_bytes"] == path.stat().st_size
     assert marker["ledger_size_bytes"] == path.stat().st_size
     assert len(path.read_text(encoding="utf-8").splitlines()) == 10
+
+
+def test_training_append_fsyncs_ledger_before_marker_advance(tmp_path, monkeypatch):
+    path = tmp_path / "training_steps.jsonl"
+    marker_path = p3_completion.training_tail_index_path(path)
+    append_training_record(path, _training_row(1), target_steps=100)
+    events = []
+    original_fsync = p3_completion.os.fsync
+    original_replace = p3_completion.os.replace
+
+    def tracked_fsync(descriptor):
+        events.append("fsync")
+        return original_fsync(descriptor)
+
+    def tracked_replace(source, destination):
+        events.append(("replace", Path(destination).name))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(p3_completion.os, "fsync", tracked_fsync)
+    monkeypatch.setattr(p3_completion.os, "replace", tracked_replace)
+    append_training_record(path, _training_row(2), target_steps=100)
+
+    marker_replace = events.index(("replace", marker_path.name))
+    assert events[:marker_replace] == ["fsync", "fsync", "fsync"]
+    assert events[marker_replace + 1 :] == ["fsync"]
+
+
+def test_training_tail_marker_recovers_only_from_full_validated_scan(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "training_steps.jsonl"
+    marker_path = p3_completion.training_tail_index_path(path)
+    append_training_record(path, _training_row(1), target_steps=100)
+    original_atomic_write = p3_completion.atomic_write_json
+
+    def crash_before_marker_advance(destination, value):
+        if Path(destination) == marker_path:
+            raise RuntimeError("simulated crash before marker advance")
+        return original_atomic_write(destination, value)
+
+    monkeypatch.setattr(
+        p3_completion, "atomic_write_json", crash_before_marker_advance
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        append_training_record(path, _training_row(2), target_steps=100)
+    monkeypatch.setattr(p3_completion, "atomic_write_json", original_atomic_write)
+
+    stale_marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert stale_marker["record_count"] == 1
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+    with pytest.raises(P3CompletionError, match="size differs"):
+        append_training_record(path, _training_row(3), target_steps=100)
+
+    rows = p3_completion.load_jsonl(path)
+    invalid_rows = copy.deepcopy(rows)
+    invalid_rows[-1]["loss"] = 99.0
+    rebuild_args = {
+        "source_commit": "f" * 40,
+        "immutable_run_card_sha256": "a" * 64,
+        "dataset_order_sha256": "b" * 64,
+        "config_sha256": "c" * 64,
+        "target_steps": 100,
+    }
+    with pytest.raises(P3CompletionError, match="record hash differs"):
+        p3_completion.initialize_training_tail_index(
+            path, invalid_rows, **rebuild_args
+        )
+    assert json.loads(marker_path.read_text(encoding="utf-8")) == stale_marker
+
+    rebuilt = p3_completion.initialize_training_tail_index(path, rows, **rebuild_args)
+    assert rebuilt["record_count"] == 2
+    assert rebuilt["next_step"] == 3
+    append_training_record(path, _training_row(3), target_steps=100)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"record_count": 1, "next_step": 2}, "indexed tail record differs"),
+        ({"record_count": 3, "next_step": 4}, "indexed tail record differs"),
+        ({"tail_record_sha256": "0" * 64}, "indexed tail record differs"),
+        ({"source_commit": "0" * 40}, "immutable provenance drift"),
+    ],
+)
+def test_training_tail_marker_rejects_stale_ahead_tail_and_provenance(
+    tmp_path, updates, message
+):
+    path = tmp_path / "training_steps.jsonl"
+    append_training_record(path, _training_row(1), target_steps=100)
+    append_training_record(path, _training_row(2), target_steps=100)
+    marker_path = p3_completion.training_tail_index_path(path)
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker.update(updates)
+    p3_completion.atomic_write_json(marker_path, marker)
+
+    with pytest.raises(P3CompletionError, match=message):
+        append_training_record(path, _training_row(3), target_steps=100)
 
 
 def test_training_replay_uses_validated_direct_index(tmp_path, monkeypatch):
