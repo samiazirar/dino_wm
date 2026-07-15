@@ -40,6 +40,7 @@ from training_resume import (
     parameter_sha256,
     restore_rng_state,
 )
+from training_timing import StrictTimingWindow
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -451,6 +452,11 @@ class Trainer:
             "resume_from",
             "checkpoint_every_steps",
             "test_signal_after_step",
+            "timing_output",
+            "timing_run_card",
+            "timing_warmup_steps",
+            "timing_measured_steps",
+            "timing_projection_target_steps",
         ]:
             training.pop(key, None)
         return config
@@ -696,26 +702,44 @@ class Trainer:
         started = time.perf_counter()
         checkpoint_every = int(self.cfg.training.checkpoint_every_steps)
         test_signal_step = self.cfg.training.test_signal_after_step
-        for data in tqdm(
-            iterator,
-            total=len(sampler),
-            desc=f"Steps {segment_start + 1}-{segment_stop}",
-        ):
-            if self._stop_requested:
-                break
-            self.last_step_loss = self._train_one_step(data)
-            self.global_step += 1
-            self.epoch = self.global_step // sampler.steps_per_epoch
+        timing = StrictTimingWindow.from_trainer(
+            self,
+            sampler=sampler,
+            segment_start=segment_start,
+            segment_stop=segment_stop,
+            checkpoint_every=checkpoint_every,
+        )
+        try:
+            for data in tqdm(
+                iterator,
+                total=len(sampler),
+                desc=f"Steps {segment_start + 1}-{segment_stop}",
+            ):
+                if self._stop_requested:
+                    break
+                batch_samples = int(data[1].shape[0])
+                self.last_step_loss = self._train_one_step(data)
+                self.global_step += 1
+                self.epoch = self.global_step // sampler.steps_per_epoch
+                if timing is not None:
+                    timing.after_step(
+                        completed_step=self.global_step,
+                        batch_samples=batch_samples,
+                    )
 
-            if test_signal_step is not None and self.global_step == int(test_signal_step):
-                os.kill(os.getpid(), signal.SIGUSR1)
-            checkpoint_due = (
-                checkpoint_every > 0 and self.global_step % checkpoint_every == 0
-            )
-            if checkpoint_due or self._stop_requested:
-                self.save_step_checkpoint()
-            if self._stop_requested:
-                break
+                if test_signal_step is not None and self.global_step == int(test_signal_step):
+                    os.kill(os.getpid(), signal.SIGUSR1)
+                checkpoint_due = (
+                    checkpoint_every > 0 and self.global_step % checkpoint_every == 0
+                )
+                if checkpoint_due or self._stop_requested:
+                    self.save_step_checkpoint()
+                if self._stop_requested:
+                    break
+        except BaseException as error:
+            if timing is not None:
+                timing.abort(error)
+            raise
 
         self.save_step_checkpoint()
         if self.global_step == target_steps:
@@ -734,6 +758,8 @@ class Trainer:
             segment_stop,
             time.perf_counter() - started,
         )
+        if timing is not None:
+            timing.finalize(self, sampler=sampler, status=status)
 
     def monitor_jobs(self, lock):
         """

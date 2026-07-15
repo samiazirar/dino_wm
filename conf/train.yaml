@@ -40,6 +40,13 @@ training:
   checkpoint_every_steps: 1000
   strict_determinism: false
   test_signal_after_step: null
+  # Optional fixed-step timing window around the production step loop. The
+  # warmup and measured intervals are absolute optimizer-step counts.
+  timing_output: null
+  timing_run_card: null
+  timing_warmup_steps: null
+  timing_measured_steps: null
+  timing_projection_target_steps: null
   batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
