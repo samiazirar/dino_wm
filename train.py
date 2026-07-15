@@ -111,6 +111,15 @@ class Trainer:
                 "Deterministic step resume currently requires exactly one process. "
                 "P3 cells are specified as one A100 per cell."
             )
+        if (
+            self.step_mode
+            and self.strict_determinism
+            and int(self.cfg.env.num_workers) != 0
+        ):
+            raise RuntimeError(
+                "Strict step resume requires env.num_workers=0 so Python, NumPy, "
+                "and Torch RNG state lives only in the checkpointed training process"
+            )
 
         OmegaConf.set_struct(cfg, False)
         cfg.effective_batch_size = cfg.training.batch_size

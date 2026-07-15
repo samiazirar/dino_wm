@@ -20,6 +20,7 @@ DEFAULT_OVERRIDES = [
     "training.predictor_lr=5e-5",
     "training.strict_determinism=true",
     "training.resume_from=auto",
+    "env.num_workers=0",
     "frameskip=5",
     "num_hist=3",
     "num_pred=1",
