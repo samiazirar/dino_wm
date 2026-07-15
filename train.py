@@ -1,4 +1,6 @@
 import os
+import signal
+import subprocess
 import time
 import hydra
 import torch
@@ -22,6 +24,22 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
+from training_resume import (
+    CHECKPOINT_SCHEMA,
+    PROGRESS_SCHEMA,
+    SerializableConstantScheduler,
+    StepBatchSampler,
+    StepCheckpointManager,
+    atomic_write_json,
+    capture_rng_state,
+    configure_strict_determinism,
+    dataset_order_sha256,
+    exact_key_check,
+    json_sha256,
+    nested_state_sha256,
+    parameter_sha256,
+    restore_rng_state,
+)
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -39,6 +57,9 @@ def target_epoch_range(completed_epoch: int, target_total_epochs: int):
 class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.step_mode = cfg.training.target_steps is not None
+        self.strict_determinism = bool(cfg.training.strict_determinism)
+        configure_strict_determinism(self.strict_determinism)
         with open_dict(cfg):
             cfg["saved_folder"] = os.getcwd()
             log.info(f"Model saved dir: {cfg['saved_folder']}")
@@ -78,11 +99,18 @@ class Trainer:
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
+        self.global_step = 0
+        self.last_step_loss = None
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
             f"Batch_size: {cfg.training.batch_size} num_processes: {self.accelerator.num_processes}."
         )
+        if self.step_mode and self.accelerator.num_processes != 1:
+            raise RuntimeError(
+                "Deterministic step resume currently requires exactly one process. "
+                "P3 cells are specified as one A100 per cell."
+            )
 
         OmegaConf.set_struct(cfg, False)
         cfg.effective_batch_size = cfg.training.batch_size
@@ -132,22 +160,28 @@ class Trainer:
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
 
+        phases = ["valid"] if self.step_mode else ["train", "valid"]
         self.dataloaders = {
-            x: torch.utils.data.DataLoader(
-                self.datasets[x],
+            phase: torch.utils.data.DataLoader(
+                self.datasets[phase],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False, # already shuffled in TrajSlicerDataset
                 num_workers=self.cfg.env.num_workers,
                 collate_fn=None,
             )
-            for x in ["train", "valid"]
+            for phase in phases
         }
 
         log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
-        self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
-            self.dataloaders["train"], self.dataloaders["valid"]
-        )
+        if self.step_mode:
+            self.dataloaders["valid"] = self.accelerator.prepare(
+                self.dataloaders["valid"]
+            )
+        else:
+            self.dataloaders["train"], self.dataloaders["valid"] = self.accelerator.prepare(
+                self.dataloaders["train"], self.dataloaders["valid"]
+            )
 
         self.encoder = None
         self.action_encoder = None
@@ -180,6 +214,16 @@ class Trainer:
 
         self.init_models()
         self.init_optimizers()
+        self.init_schedulers()
+
+        self._resume_rng_state = None
+        self._stop_requested = False
+        self._stop_signal = None
+        self._last_saved_step = None
+        self._last_checkpoint_path = None
+        self._last_checkpoint_sha256 = None
+        if self.step_mode:
+            self._initialize_step_resume()
 
         self.epoch_log = OrderedDict()
 
@@ -214,7 +258,7 @@ class Trainer:
 
     def init_models(self):
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
-        if model_ckpt.exists():
+        if not self.step_mode and model_ckpt.exists():
             self.load_ckpt(model_ckpt)
             log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
 
@@ -350,6 +394,338 @@ class Trainer:
             )
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
 
+    def _model_components(self):
+        components = {
+            "encoder": self.encoder,
+            "action_encoder": self.action_encoder,
+            "proprio_encoder": self.proprio_encoder,
+        }
+        if self.predictor is not None:
+            components["predictor"] = self.predictor
+        if self.decoder is not None:
+            components["decoder"] = self.decoder
+        return {
+            name: self.accelerator.unwrap_model(component)
+            for name, component in components.items()
+        }
+
+    def _optimizers(self):
+        optimizers = {"encoder": self.encoder_optimizer}
+        if self.cfg.has_predictor:
+            optimizers["predictor"] = self.predictor_optimizer
+            optimizers["action_encoder"] = self.action_encoder_optimizer
+        if self.cfg.has_decoder:
+            optimizers["decoder"] = self.decoder_optimizer
+        return optimizers
+
+    def init_schedulers(self):
+        self.schedulers = {
+            name: SerializableConstantScheduler(optimizer)
+            for name, optimizer in self._optimizers().items()
+        }
+
+    def _semantic_resume_config(self):
+        config = OmegaConf.to_container(self.cfg, resolve=True)
+        for key in [
+            "hydra",
+            "ckpt_base_path",
+            "saved_folder",
+            "wandb_run_id",
+            "effective_batch_size",
+            "gpu_batch_size",
+        ]:
+            config.pop(key, None)
+        training = config["training"]
+        for key in [
+            "target_steps",
+            "segment_steps",
+            "resume_from",
+            "checkpoint_every_steps",
+            "test_signal_after_step",
+        ]:
+            training.pop(key, None)
+        return config
+
+    def _sampler_state(self):
+        sampler = StepBatchSampler(
+            dataset_size=len(self.datasets["train"]),
+            batch_size=int(self.cfg.gpu_batch_size),
+            start_step=self.global_step,
+            stop_step=self.global_step,
+        )
+        state = sampler.state_dict(self.global_step)
+        state["dataset_order_sha256"] = self.dataset_order_sha256
+        return state
+
+    def _initialize_step_resume(self):
+        if int(self.cfg.training.target_steps) <= 0:
+            raise ValueError("training.target_steps must be positive")
+        if self.cfg.training.segment_steps is not None and int(
+            self.cfg.training.segment_steps
+        ) <= 0:
+            raise ValueError("training.segment_steps must be positive when set")
+        if int(self.cfg.training.checkpoint_every_steps) < 0:
+            raise ValueError("training.checkpoint_every_steps must be non-negative")
+
+        self.dataset_order_sha256 = dataset_order_sha256(self.datasets["train"])
+        self.resume_config_sha256 = json_sha256(self._semantic_resume_config())
+        self.source_commit = subprocess.check_output(
+            ["git", "-C", self.base_path, "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.checkpoint_manager = StepCheckpointManager(
+            Path(self.cfg.saved_folder) / "checkpoints" / "steps"
+        )
+        requested = self.cfg.training.resume_from
+        checkpoint_path, checkpoint_digest = self.checkpoint_manager.resolve(requested)
+        if checkpoint_path is not None:
+            self._load_step_checkpoint(checkpoint_path, checkpoint_digest)
+        self._install_signal_handlers()
+
+    def _install_signal_handlers(self):
+        def request_checkpoint(signum, _frame):
+            self._stop_requested = True
+            try:
+                self._stop_signal = signal.Signals(signum).name
+            except ValueError:
+                self._stop_signal = str(signum)
+
+        signal.signal(signal.SIGUSR1, request_checkpoint)
+        signal.signal(signal.SIGTERM, request_checkpoint)
+
+    def _load_step_checkpoint(self, path, digest):
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
+            raise RuntimeError(f"Unknown step checkpoint schema in {path}")
+        if checkpoint.get("source_commit") != self.source_commit:
+            raise RuntimeError(
+                "Source commit differs between checkpoint and resume: "
+                f"{checkpoint.get('source_commit')} versus {self.source_commit}"
+            )
+        if checkpoint.get("resume_config_sha256") != self.resume_config_sha256:
+            raise RuntimeError("Semantic training configuration differs from checkpoint")
+        if checkpoint.get("dataset_order_sha256") != self.dataset_order_sha256:
+            raise RuntimeError("Dataset order differs from checkpoint")
+
+        components = self._model_components()
+        exact_key_check("model component", components, checkpoint["models"])
+        for name, component in components.items():
+            component.load_state_dict(checkpoint["models"][name], strict=True)
+
+        optimizers = self._optimizers()
+        exact_key_check("optimizer", optimizers, checkpoint["optimizers"])
+        for name, optimizer in optimizers.items():
+            optimizer.load_state_dict(checkpoint["optimizers"][name])
+
+        exact_key_check("scheduler", self.schedulers, checkpoint["schedulers"])
+        for name, scheduler in self.schedulers.items():
+            scheduler.load_state_dict(checkpoint["schedulers"][name])
+
+        self.global_step = int(checkpoint["global_step"])
+        self.epoch = int(checkpoint["completed_epochs"])
+        self.last_step_loss = checkpoint.get("last_step_loss")
+        expected_sampler = self._sampler_state()
+        if checkpoint["sampler"] != expected_sampler:
+            raise RuntimeError(
+                f"Sampler cursor differs: {checkpoint['sampler']} versus {expected_sampler}"
+            )
+        current_parameter_hash = parameter_sha256(components)
+        if current_parameter_hash != checkpoint["parameter_sha256"]:
+            raise RuntimeError("Model parameter hash changed while loading checkpoint")
+        self._resume_rng_state = checkpoint["rng"]
+        self._last_saved_step = self.global_step
+        self._last_checkpoint_path = Path(path)
+        self._last_checkpoint_sha256 = digest
+        log.info(
+            "Resuming at optimizer step %d from %s", self.global_step, path
+        )
+
+    def save_step_checkpoint(self):
+        if self._last_saved_step == self.global_step:
+            return self._last_checkpoint_path, self._last_checkpoint_sha256
+        components = self._model_components()
+        optimizers = self._optimizers()
+        optimizer_states = {
+            name: optimizer.state_dict() for name, optimizer in optimizers.items()
+        }
+        scheduler_states = {
+            name: scheduler.state_dict() for name, scheduler in self.schedulers.items()
+        }
+        payload = {
+            "schema": CHECKPOINT_SCHEMA,
+            "source_commit": self.source_commit,
+            "resume_config_sha256": self.resume_config_sha256,
+            "dataset_order_sha256": self.dataset_order_sha256,
+            "global_step": self.global_step,
+            "completed_epochs": self.global_step
+            // self._sampler_state()["steps_per_epoch"],
+            "last_step_loss": self.last_step_loss,
+            "models": {
+                name: component.state_dict() for name, component in components.items()
+            },
+            "optimizers": optimizer_states,
+            "schedulers": scheduler_states,
+            "sampler": self._sampler_state(),
+            "rng": capture_rng_state(),
+            "parameter_sha256": parameter_sha256(components),
+            "optimizer_sha256": nested_state_sha256(optimizer_states),
+            "scheduler_sha256": nested_state_sha256(scheduler_states),
+        }
+        path, digest = self.checkpoint_manager.save(payload, self.global_step)
+        self._last_saved_step = self.global_step
+        self._last_checkpoint_path = path
+        self._last_checkpoint_sha256 = digest
+        log.info("Saved deterministic step checkpoint %s", path)
+        return path, digest
+
+    def _write_step_progress(self, status, segment_start, segment_stop, elapsed_seconds):
+        components = self._model_components()
+        progress = {
+            "schema": PROGRESS_SCHEMA,
+            "status": status,
+            "source_commit": self.source_commit,
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+            "global_step": self.global_step,
+            "target_steps": int(self.cfg.training.target_steps),
+            "segment_start_step": segment_start,
+            "segment_stop_step": segment_stop,
+            "completed_segment_steps": self.global_step - segment_start,
+            "completed_epochs": self.epoch,
+            "last_step_loss": self.last_step_loss,
+            "parameter_sha256": parameter_sha256(components),
+            "optimizer_sha256": nested_state_sha256(
+                {
+                    name: optimizer.state_dict()
+                    for name, optimizer in self._optimizers().items()
+                }
+            ),
+            "scheduler_sha256": nested_state_sha256(
+                {
+                    name: scheduler.state_dict()
+                    for name, scheduler in self.schedulers.items()
+                }
+            ),
+            "sampler": self._sampler_state(),
+            "checkpoint": str(self._last_checkpoint_path),
+            "checkpoint_sha256": self._last_checkpoint_sha256,
+            "stop_signal": self._stop_signal,
+            "elapsed_seconds": elapsed_seconds,
+        }
+        atomic_write_json(Path(self.cfg.saved_folder) / "progress.json", progress)
+        print(
+            "STEP_PROGRESS "
+            f"status={status} step={self.global_step} "
+            f"loss={self.last_step_loss} hash={progress['parameter_sha256']}"
+        )
+
+    def _train_one_step(self, data):
+        obs, act, _state = data
+        self.model.train()
+        self.encoder_optimizer.zero_grad()
+        if self.cfg.has_decoder:
+            self.decoder_optimizer.zero_grad()
+        if self.cfg.has_predictor:
+            self.predictor_optimizer.zero_grad()
+            self.action_encoder_optimizer.zero_grad()
+
+        _z_out, _visual_out, _visual_reconstructed, loss, _loss_components = self.model(
+            obs, act
+        )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Nonfinite loss at optimizer step {self.global_step}: {loss.item()}"
+            )
+        self.accelerator.backward(loss)
+
+        if self.model.train_encoder:
+            self.encoder_optimizer.step()
+            self.schedulers["encoder"].step()
+        if self.cfg.has_decoder and self.model.train_decoder:
+            self.decoder_optimizer.step()
+            self.schedulers["decoder"].step()
+        if self.cfg.has_predictor and self.model.train_predictor:
+            self.predictor_optimizer.step()
+            self.action_encoder_optimizer.step()
+            self.schedulers["predictor"].step()
+            self.schedulers["action_encoder"].step()
+
+        gathered_loss = self.accelerator.gather_for_metrics(loss.detach()).mean()
+        return float(gathered_loss.cpu().item())
+
+    def run_steps(self):
+        target_steps = int(self.cfg.training.target_steps)
+        if self.global_step > target_steps:
+            raise RuntimeError(
+                f"Checkpoint step {self.global_step} exceeds target {target_steps}"
+            )
+        segment_start = self.global_step
+        configured_segment = self.cfg.training.segment_steps
+        segment_stop = target_steps
+        if configured_segment is not None:
+            segment_stop = min(
+                target_steps, segment_start + int(configured_segment)
+            )
+        sampler = StepBatchSampler(
+            dataset_size=len(self.datasets["train"]),
+            batch_size=int(self.cfg.gpu_batch_size),
+            start_step=segment_start,
+            stop_step=segment_stop,
+        )
+        generator = torch.Generator().manual_seed(int(self.cfg.training.seed))
+        loader = torch.utils.data.DataLoader(
+            self.datasets["train"],
+            batch_sampler=sampler,
+            num_workers=int(self.cfg.env.num_workers),
+            collate_fn=None,
+            generator=generator,
+        )
+        loader = self.accelerator.prepare(loader)
+        iterator = iter(loader)
+        if self._resume_rng_state is not None:
+            restore_rng_state(self._resume_rng_state)
+            self._resume_rng_state = None
+
+        started = time.perf_counter()
+        checkpoint_every = int(self.cfg.training.checkpoint_every_steps)
+        test_signal_step = self.cfg.training.test_signal_after_step
+        for data in tqdm(
+            iterator,
+            total=len(sampler),
+            desc=f"Steps {segment_start + 1}-{segment_stop}",
+        ):
+            if self._stop_requested:
+                break
+            self.last_step_loss = self._train_one_step(data)
+            self.global_step += 1
+            self.epoch = self.global_step // sampler.steps_per_epoch
+
+            if test_signal_step is not None and self.global_step == int(test_signal_step):
+                os.kill(os.getpid(), signal.SIGUSR1)
+            checkpoint_due = (
+                checkpoint_every > 0 and self.global_step % checkpoint_every == 0
+            )
+            if checkpoint_due or self._stop_requested:
+                self.save_step_checkpoint()
+            if self._stop_requested:
+                break
+
+        self.save_step_checkpoint()
+        if self.global_step == target_steps:
+            status = "TARGET_REACHED"
+        elif self._stop_requested:
+            status = "SIGNAL_CHECKPOINTED"
+        elif self.global_step == segment_stop:
+            status = "SEGMENT_COMPLETE"
+        else:
+            raise RuntimeError(
+                f"Step loader stopped at {self.global_step}, expected {segment_stop}"
+            )
+        self._write_step_progress(
+            status,
+            segment_start,
+            segment_stop,
+            time.perf_counter() - started,
+        )
+
     def monitor_jobs(self, lock):
         """
         check planning eval jobs' status and update logs
@@ -371,6 +747,9 @@ class Trainer:
             time.sleep(1)
 
     def run(self):
+        if self.step_mode:
+            self.run_steps()
+            return
         if self.accelerator.is_main_process:
             executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()

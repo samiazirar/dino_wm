@@ -32,6 +32,14 @@ hydra:
 training:
   seed: 0
   epochs: 100
+  # Non-null target_steps enables deterministic step-level training. The
+  # segment controls are excluded from the semantic checkpoint fingerprint.
+  target_steps: null
+  segment_steps: null
+  resume_from: null
+  checkpoint_every_steps: 1000
+  strict_determinism: false
+  test_signal_after_step: null
   batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
