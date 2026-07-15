@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -14,6 +13,7 @@ from torch import nn
 import yaml
 import zstandard
 
+import training_timing
 from datasets.depth_cache import DepthCacheError, DepthCacheReader
 from depth_contract import (
     DepthContractError,
@@ -37,7 +37,6 @@ from tools.harness_common import (
     derive_segment_sizing,
     finalize_run_card,
     load_matrix,
-    sha256_file as harness_sha256_file,
     validate_spec,
     verify_evaluation_bindings,
     write_matrix,
@@ -55,9 +54,13 @@ class TinyBackbone(nn.Module):
         self.depth = nn.Conv2d(1, 8, 1)
 
     def forward_features(self, rgb, depth):
-        value = torch.nn.functional.adaptive_avg_pool2d(
-            self.rgb(rgb) + self.depth(depth), (1, 1)
-        ).flatten(2).transpose(1, 2)
+        value = (
+            torch.nn.functional.adaptive_avg_pool2d(
+                self.rgb(rgb) + self.depth(depth), (1, 1)
+            )
+            .flatten(2)
+            .transpose(1, 2)
+        )
         return {"x_norm_patchtokens": value, "x_norm_clstoken": value[:, 0]}
 
 
@@ -74,7 +77,9 @@ def tiny_backend(monkeypatch):
 
 
 def _write_json(path: Path, value) -> str:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return sha256_file(path)
 
 
@@ -221,7 +226,9 @@ def test_cache_wire_to_checkpoint_native_identity_and_calibrated_denormalization
     )
     normalized_wire = torch.full((1, 1, 32, 32), 0.5)
     prepared, _ = calibrated.prepare_depth_encoder_input(normalized_wire, mask)
-    torch.testing.assert_close(prepared, torch.full_like(prepared, 11.0), rtol=0, atol=0)
+    torch.testing.assert_close(
+        prepared, torch.full_like(prepared, 11.0), rtol=0, atol=0
+    )
 
 
 def test_zero_boundary_and_missing_affine_fail_closed(tmp_path, tiny_backend):
@@ -235,7 +242,9 @@ def test_zero_boundary_and_missing_affine_fail_closed(tmp_path, tiny_backend):
     )
     depth = torch.rand(2, 1, 32, 32)
     prepared, mask = zero.prepare_depth_encoder_input(depth, torch.ones_like(depth))
-    torch.testing.assert_close(prepared, torch.full_like(prepared, -2.0), rtol=0, atol=0)
+    torch.testing.assert_close(
+        prepared, torch.full_like(prepared, -2.0), rtol=0, atol=0
+    )
     torch.testing.assert_close(mask, torch.zeros_like(mask), rtol=0, atol=0)
     observed = []
     remove = zero.register_encoder_boundary_hook(
@@ -323,7 +332,8 @@ def _make_cache(tmp_path: Path):
         for frame, scalar in enumerate((2.0, 3.0)):
             value = np.full((224, 224), scalar, dtype="<f2")
             transaction.put(
-                f"valid/00000/{frame:06d}".encode(), compressor.compress(value.tobytes())
+                f"valid/00000/{frame:06d}".encode(),
+                compressor.compress(value.tobytes()),
             )
     database.sync(True)
     database.close()
@@ -424,7 +434,9 @@ def test_cache_alignment_physical_keys_shapes_and_hashes(tmp_path):
 def test_real_student_configs_are_identical_except_neutral_switch():
     root = Path(__file__).resolve().parents[1]
     informative = yaml.safe_load((root / "conf/encoder/dinocular.yaml").read_text())
-    neutral = yaml.safe_load((root / "conf/encoder/dinocular_zerodepth.yaml").read_text())
+    neutral = yaml.safe_load(
+        (root / "conf/encoder/dinocular_zerodepth.yaml").read_text()
+    )
     assert informative.pop("neutralize_depth_at_encoder_input") is False
     assert neutral.pop("neutralize_depth_at_encoder_input") is True
     assert informative == neutral
@@ -590,12 +602,8 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
                             "checkpoint_sha256": "5" * 64,
                         },
                     )
-                card["segment_sizing"] = _sizing(
-                    arm, environment, card["target_steps"]
-                )
-                card["segment_steps"] = card["segment_sizing"][
-                    "derived_segment_steps"
-                ]
+                card["segment_sizing"] = _sizing(arm, environment, card["target_steps"])
+                card["segment_steps"] = card["segment_sizing"]["derived_segment_steps"]
                 p3_cards.append(make_manifests._finish_card(spec, card))
     p3_matrix_path = tmp_path / "p3.yaml"
     p3_matrix = write_matrix(
@@ -683,9 +691,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
                 "checkpoint_sha256": "5" * 64,
             },
         )
-        card["segment_sizing"] = _sizing(
-            "dinocular", "pusht", card["target_steps"]
-        )
+        card["segment_sizing"] = _sizing("dinocular", "pusht", card["target_steps"])
         card["segment_steps"] = card["segment_sizing"]["derived_segment_steps"]
         card["producer_pilot"] = {
             "producer": producer,
@@ -709,9 +715,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
         )
     )
     evaluation_matrix, evaluation_cards = load_matrix(p2a_eval_path)
-    evaluation_refs = {
-        item["run_id"]: item for item in evaluation_matrix["cards"]
-    }
+    evaluation_refs = {item["run_id"]: item for item in evaluation_matrix["cards"]}
     assert len(evaluation_cards) == 2
     assert len({card["fixed_manifest"]["sha256"] for card in evaluation_cards}) == 1
     for evaluation_card in evaluation_cards:
@@ -772,15 +776,11 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
         "immutable_run_card_sha256": training_card["run_card_sha256"],
     }
     _write_json(completion_dir / "progress.json", progress)
-    _verify_training_completion(
-        evaluation_cards[0], training_card, completion_dir
-    )
+    _verify_training_completion(evaluation_cards[0], training_card, completion_dir)
     progress["immutable_run_card_sha256"] = "0" * 64
     _write_json(completion_dir / "progress.json", progress)
     with pytest.raises(EvaluationContractError, match="different run card"):
-        _verify_training_completion(
-            evaluation_cards[0], training_card, completion_dir
-        )
+        _verify_training_completion(evaluation_cards[0], training_card, completion_dir)
 
 
 def test_p2_cli_locks_and_actual_gate_modes(tmp_path):
@@ -820,15 +820,188 @@ def test_p2_cli_locks_and_actual_gate_modes(tmp_path):
         "--frameskips",
         "pusht=5,wall=5,rope=1,granular=1",
     ]
-    result = json.loads(subprocess.run(base, check=True, capture_output=True, text=True).stdout)
+    result = json.loads(
+        subprocess.run(base, check=True, capture_output=True, text=True).stdout
+    )
     assert result["job_count"] == 12
-    failed = subprocess.run(base[:-1] + ["pusht=5,wall=5,rope=5,granular=5"], capture_output=True, text=True)
+    failed = subprocess.run(
+        base[:-1] + ["pusht=5,wall=5,rope=5,granular=5"], capture_output=True, text=True
+    )
     assert failed.returncode == 2
 
 
-def test_twelve_card_timing_collector_emits_submit_consumable_rates(tmp_path):
+TIMING_WINDOWS = {
+    "pusht": 1_981_721,
+    "wall": 70_848,
+    "rope": 17_100,
+    "granular": 17_100,
+}
+TIMING_PRODUCER_SHA256 = "d" * 64
+TIMING_NATIVE_SHA256 = "e" * 64
+
+
+def test_timing_runtime_binds_immutable_card_and_dinocular_identities(
+    tmp_path, monkeypatch
+):
+    class ReleasedDataset:
+        @staticmethod
+        def __len__():
+            return TIMING_WINDOWS["pusht"]
+
+    code_root = tmp_path / "code"
+    code_root.mkdir()
+    train_path = code_root / "train.py"
+    resume_path = code_root / "training_resume.py"
+    wrapper_path = code_root / "p3_step_segment.sbatch"
+    for path, text in (
+        (train_path, "train\n"),
+        (resume_path, "resume\n"),
+        (wrapper_path, "wrapper\n"),
+    ):
+        path.write_text(text, encoding="utf-8")
+    dinov2_path = tmp_path / "dinov2.pth"
+    student_path = tmp_path / "student.pth"
+    native_path = tmp_path / "native.json"
+    dinov2_path.write_bytes(b"dino")
+    student_path.write_bytes(b"student")
+    native_path.write_text("{}\n", encoding="utf-8")
+    output_path = tmp_path / "timing_result.json"
+    runtime_path = tmp_path / "timing_runtime_card.yaml"
+    immutable_path = tmp_path / "immutable.yaml"
+    source_hashes = {
+        "train.py": sha256_file(train_path),
+        "training_resume.py": sha256_file(resume_path),
+        "training_timing.py": sha256_file(Path(training_timing.__file__)),
+        "tools/p3_step_segment.sbatch": sha256_file(wrapper_path),
+    }
+    producer_sha256 = "a" * 64
+    immutable = finalize_run_card(
+        {
+            "schema": RUN_CARD_SCHEMA,
+            "kind": "p2-timing",
+            "gate_mode": "timing",
+            "run_id": "p2-timing-dinocular-pusht-s1",
+            "run_dir": str(tmp_path),
+            "source_commit": "f" * 40,
+            "source_file_sha256": source_hashes,
+            "artifacts": {
+                "dinov2": {
+                    "path": str(dinov2_path),
+                    "sha256": sha256_file(dinov2_path),
+                },
+                "dinocular_student": {
+                    "path": str(student_path),
+                    "sha256": sha256_file(student_path),
+                },
+            },
+            "container": {"path": "/tmp/test.sif", "sha256": "b" * 64},
+            "depth_inputs": {
+                "native_contract_path": str(native_path),
+                "native_contract_sha256": sha256_file(native_path),
+                "producer_sha256": producer_sha256,
+                "checkpoint_sha256": sha256_file(student_path),
+            },
+            "environment": "pusht",
+            "arm": "dinocular",
+            "seed": 1,
+            "target_steps": 220,
+            "segment_steps": 220,
+            "frameskip": 5,
+            "batch_size": 32,
+            "decoder": False,
+            "timing": {"fixed_steps": 200, "warmup_steps": 20},
+        }
+    )
+    immutable_path.write_text(
+        yaml.safe_dump(immutable, sort_keys=False), encoding="utf-8"
+    )
+    for key, value in {
+        "STRICT_P2_ENV": "pusht",
+        "STRICT_P2_ARM": "dinocular",
+        "STRICT_P2_CONTAINER": "/tmp/test.sif",
+        "STRICT_P2_CONTAINER_SHA256": "b" * 64,
+        "STRICT_P2_SLURM_WRAPPER": str(wrapper_path),
+        "STRICT_P2_IMMUTABLE_RUN_CARD": str(immutable_path),
+        "STRICT_P2_IMMUTABLE_RUN_CARD_SHA256": immutable["run_card_sha256"],
+        "DINOV2_VITS14_WEIGHTS": str(dinov2_path),
+        "DINOCULAR_STUDENT_WEIGHTS": str(student_path),
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT": str(native_path),
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": sha256_file(native_path),
+        "DINOCULAR_CACHE_PRODUCER_SHA256": producer_sha256,
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(training_timing.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(training_timing.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(
+        training_timing.torch.cuda,
+        "get_device_name",
+        lambda _device: "NVIDIA A100-SXM4-80GB",
+    )
+    monkeypatch.setattr(training_timing.NvidiaSmiMonitor, "start", lambda _self: None)
+    cfg = training_timing.OmegaConf.create(
+        {
+            "training": {
+                "timing_output": str(output_path),
+                "timing_run_card": str(runtime_path),
+                "timing_warmup_steps": 20,
+                "timing_measured_steps": 200,
+                "timing_projection_target_steps": LOCKED_TARGETS["pusht"],
+                "strict_determinism": True,
+                "target_steps": 220,
+                "batch_size": 32,
+                "resume_from": None,
+                "test_signal_after_step": None,
+            },
+            "env": {"name": "pusht", "num_workers": 0},
+            "encoder": {"name": "dinocular"},
+            "frameskip": 5,
+        }
+    )
+    trainer = SimpleNamespace(
+        cfg=cfg,
+        accelerator=SimpleNamespace(num_processes=1),
+        global_step=0,
+        device="cuda:0",
+        datasets={"train": ReleasedDataset()},
+        base_path=code_root,
+        source_commit="f" * 40,
+        dataset_order_sha256="c" * 64,
+        resume_config_sha256="d" * 64,
+    )
+    sampler = SimpleNamespace(steps_per_epoch=(TIMING_WINDOWS["pusht"] + 31) // 32)
+    window = training_timing.StrictTimingWindow(
+        trainer,
+        sampler=sampler,
+        segment_start=0,
+        segment_stop=220,
+        checkpoint_every=0,
+    )
+    runtime = yaml.safe_load(runtime_path.read_text())
+    assert runtime["claim"] == "strict production-path dinocular single-A100 timing"
+    assert runtime["immutable_run_card"] == window.immutable_run_card
+    assert runtime["artifacts"]["dinocular_identity"] == {
+        "student": immutable["artifacts"]["dinocular_student"],
+        "native_depth_contract": {
+            "path": str(native_path),
+            "sha256": sha256_file(native_path),
+        },
+        "selected_producer_sha256": producer_sha256,
+    }
+    monkeypatch.setenv("DINOCULAR_CACHE_PRODUCER_SHA256", "0" * 64)
+    with pytest.raises(RuntimeError, match="student, native contract, or producer"):
+        training_timing.StrictTimingWindow(
+            trainer,
+            sampler=sampler,
+            segment_start=0,
+            segment_stop=220,
+            checkpoint_every=0,
+        )
+
+
+def _timing_collector_fixture(tmp_path):
     cards = []
     results_root = tmp_path / "timing-results"
+    artifact_root = "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm"
     for arm in LOCKED_ARMS:
         for environment in LOCKED_ENVS:
             run_id = f"p2-timing-{arm}-{environment}-s1"
@@ -844,76 +1017,186 @@ def test_twelve_card_timing_collector_emits_submit_consumable_rates(tmp_path):
             card["target_steps"] = 220
             card["segment_steps"] = 220
             card["timing"] = {"fixed_steps": 200, "warmup_steps": 20}
+            card["artifacts"] = {
+                "dinov2": {
+                    "path": f"{artifact_root}/models/dinov2_vits14_pretrain.pth",
+                    "sha256": "b" * 64,
+                },
+                "dinocular_student": {
+                    "path": f"{artifact_root}/checkpoints/student.pth",
+                    "sha256": "c" * 64,
+                },
+            }
+            if arm != "dino_pinned":
+                card["depth_inputs"] = {
+                    "native_contract_path": f"{artifact_root}/manifests/native.json",
+                    "native_contract_sha256": TIMING_NATIVE_SHA256,
+                    "producer_sha256": TIMING_PRODUCER_SHA256,
+                    "checkpoint_sha256": "c" * 64,
+                }
             card = finalize_run_card(card)
             cards.append(card)
-            run_dir = results_root / run_id
-            run_dir.mkdir(parents=True)
-            result_path = run_dir / "timing_result.json"
-            _write_json(
-                result_path,
-                {
-                    "schema": "dino-wm.strict-p2-timing.v1",
-                    "status": "MEASURED_PASS",
-                    "arm": arm,
-                    "environment": environment,
-                    "warmup_steps_excluded": 20,
-                    "measured_steps": 200,
-                    "global_batch_size": 32,
-                    "frame_skip": card["frameskip"],
-                    "projection_target_steps": LOCKED_TARGETS[environment],
-                    "steps_per_second": 1.25,
-                    "samples_per_second": 40.0,
-                    "measured_seconds": 160.0,
-                    "final_loss": 1.0,
-                    "peak_torch_reserved_mib": 1024.0,
-                    "train_windows": 1000,
-                },
-            )
-            runtime_path = run_dir / "timing_runtime_card.yaml"
-            runtime_path.write_text(
-                yaml.safe_dump(
-                    {
-                        "status": "PASSED",
-                        "arm": arm,
-                        "environment": environment,
-                        "protocol": {
-                            "global_batch_size": 32,
-                            "num_workers": 0,
-                            "frame_skip": card["frameskip"],
-                            "warmup_steps_excluded": 20,
-                            "measured_optimizer_steps": 200,
-                            "projection_target_steps": LOCKED_TARGETS[environment],
-                        },
-                        "artifacts": {
-                            "source_commit": card["source_commit"],
-                            "container_sha256": card["container"]["sha256"],
-                        },
-                    },
-                    sort_keys=False,
-                ),
-                encoding="utf-8",
-            )
-            _write_json(
-                run_dir / "timing_gate.json",
-                {
-                    "schema": "dino-wm-p2-timing-gate-v1",
-                    "state": "PASS",
-                    "run_id": run_id,
-                    "result_path": str(result_path),
-                    "result_sha256": sha256_file(result_path),
-                    "runtime_card_path": str(runtime_path),
-                    "runtime_card_sha256": sha256_file(runtime_path),
-                },
-            )
     matrix_path = tmp_path / "timing.yaml"
-    write_matrix(
+    matrix = write_matrix(
         matrix_path,
         kind="p2-timing",
         cards=cards,
         source_commit="f" * 40,
     )
+    references = {item["run_id"]: item for item in matrix["cards"]}
+    for card in cards:
+        arm = card["arm"]
+        environment = card["environment"]
+        run_id = card["run_id"]
+        run_dir = results_root / run_id
+        run_dir.mkdir(parents=True)
+        result_path = run_dir / "timing_result.json"
+        reference = references[run_id]
+        immutable = {
+            "path": str(Path(reference["path"]).resolve()),
+            "file_sha256": reference["file_sha256"],
+            "run_card_sha256": reference["run_card_sha256"],
+            "run_id": run_id,
+        }
+        dinocular_identity = None
+        if arm != "dino_pinned":
+            dinocular_identity = {
+                "student": card["artifacts"]["dinocular_student"],
+                "native_depth_contract": {
+                    "path": card["depth_inputs"]["native_contract_path"],
+                    "sha256": card["depth_inputs"]["native_contract_sha256"],
+                },
+                "selected_producer_sha256": card["depth_inputs"]["producer_sha256"],
+            }
+        artifacts = {
+            "source_commit": card["source_commit"],
+            "container_sha256": card["container"]["sha256"],
+            "dinov2_weights_path": card["artifacts"]["dinov2"]["path"],
+            "dinov2_weights_sha256": card["artifacts"]["dinov2"]["sha256"],
+            "dinocular_identity": dinocular_identity,
+        }
+        windows = TIMING_WINDOWS[environment]
+        steps_per_epoch = (windows + 31) // 32
+        _write_json(
+            result_path,
+            {
+                "schema": "dino-wm.strict-p2-timing.v1",
+                "status": "MEASURED_PASS",
+                "arm": arm,
+                "environment": environment,
+                "measurement_claim": f"strict production-path {arm} single-A100 timing",
+                "projection_status": "PROJECTED_FROM_MEASURED_ARM_SPECIFIC_RATE",
+                "assumption_tags": [],
+                "immutable_run_card": immutable,
+                "slurm_job_id": "12345",
+                "gpu": "NVIDIA A100-SXM4-80GB",
+                "gpu_count": 1,
+                "artifacts": artifacts,
+                "strict_settings": {
+                    "deterministic_algorithms": True,
+                    "cudnn_benchmark": False,
+                    "cudnn_deterministic": True,
+                    "cuda_matmul_allow_tf32": False,
+                    "cudnn_allow_tf32": False,
+                    "cublas_workspace_config": ":4096:8",
+                    "processes": 1,
+                    "num_workers": 0,
+                },
+                "config": {
+                    "training": {
+                        "seed": 1,
+                        "predictor_lr": 0.00005,
+                        "strict_determinism": True,
+                        "target_steps": 220,
+                        "segment_steps": 220,
+                        "checkpoint_every_steps": 0,
+                        "resume_from": None,
+                        "batch_size": 32,
+                        "timing_warmup_steps": 20,
+                        "timing_measured_steps": 200,
+                        "timing_projection_target_steps": LOCKED_TARGETS[environment],
+                    },
+                    "env": {"num_workers": 0},
+                    "model": {
+                        "train_encoder": False,
+                        "train_predictor": True,
+                        "train_decoder": False,
+                    },
+                    "frameskip": card["frameskip"],
+                    "has_decoder": False,
+                },
+                "warmup_steps_excluded": 20,
+                "measured_steps": 200,
+                "measured_samples": 6400,
+                "global_batch_size": 32,
+                "frame_skip": card["frameskip"],
+                "projection_target_steps": LOCKED_TARGETS[environment],
+                "steps_per_second": 1.25,
+                "samples_per_second": 40.0,
+                "measured_seconds": 160.0,
+                "final_loss": 1.0,
+                "peak_torch_reserved_mib": 1024.0,
+                "train_windows": windows,
+                "steps_per_epoch": steps_per_epoch,
+                "sampler_state_after_window": {
+                    "dataset_size": windows,
+                    "batch_size": 32,
+                    "steps_per_epoch": steps_per_epoch,
+                    "next_step": 220,
+                },
+            },
+        )
+        runtime_path = run_dir / "timing_runtime_card.yaml"
+        runtime_path.write_text(
+            yaml.safe_dump(
+                {
+                    "schema": "dino-wm.strict-p2-run-card.v1",
+                    "status": "PASSED",
+                    "arm": arm,
+                    "environment": environment,
+                    "claim": f"strict production-path {arm} single-A100 timing",
+                    "measurement_status": "MEASURED_ARM_SPECIFIC_AFTER_COMPLETION",
+                    "immutable_run_card": immutable,
+                    "protocol": {
+                        "processes": 1,
+                        "global_batch_size": 32,
+                        "num_workers": 0,
+                        "frame_skip": card["frameskip"],
+                        "warmup_steps_excluded": 20,
+                        "measured_optimizer_steps": 200,
+                        "projection_target_steps": LOCKED_TARGETS[environment],
+                        "checkpointing_in_measured_window": False,
+                        "evaluation_in_measured_window": False,
+                        "profiler_in_measured_window": False,
+                    },
+                    "artifacts": artifacts,
+                    "projection": {
+                        "target_steps": LOCKED_TARGETS[environment],
+                        "status": "PROJECTED_FROM_MEASURED_ARM_SPECIFIC_RATE",
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        _write_json(
+            run_dir / "timing_gate.json",
+            {
+                "schema": "dino-wm-p2-timing-gate-v1",
+                "state": "PASS",
+                "run_id": run_id,
+                "result_path": str(result_path),
+                "result_sha256": sha256_file(result_path),
+                "runtime_card_path": str(runtime_path),
+                "runtime_card_sha256": sha256_file(runtime_path),
+            },
+        )
     summary_path = tmp_path / "timing_summary.json"
-    subprocess.run(
+    return matrix_path, results_root, summary_path
+
+
+def _run_timing_collector(matrix_path, results_root, summary_path, *, check=True):
+    return subprocess.run(
         [
             "python3",
             str(Path(__file__).resolve().parents[1] / "tools/collect_p2_timing.py"),
@@ -924,24 +1207,67 @@ def test_twelve_card_timing_collector_emits_submit_consumable_rates(tmp_path):
             "--out",
             str(summary_path),
         ],
-        check=True,
+        check=check,
         capture_output=True,
         text=True,
     )
+
+
+def _run_timing_gate(matrix_path, results_root, run_id, *, check=True):
+    matrix = yaml.safe_load(matrix_path.read_text())
+    run_card = next(
+        item["path"] for item in matrix["cards"] if item["run_id"] == run_id
+    )
+    return subprocess.run(
+        [
+            "python3",
+            str(Path(__file__).resolve().parents[1] / "tools/p2_harness_gate.py"),
+            "timing",
+            "--run-card",
+            run_card,
+            "--run-dir",
+            str(results_root / run_id),
+        ],
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _rewrite_timing_result(results_root, run_id, path, value):
+    result_path = results_root / run_id / "timing_result.json"
+    result = json.loads(result_path.read_text())
+    target = result
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    _write_json(result_path, result)
+    gate_path = results_root / run_id / "timing_gate.json"
+    gate = json.loads(gate_path.read_text())
+    gate["result_sha256"] = sha256_file(result_path)
+    _write_json(gate_path, gate)
+
+
+def test_twelve_card_timing_collector_emits_submit_consumable_rates(tmp_path):
+    matrix_path, results_root, summary_path = _timing_collector_fixture(tmp_path)
+    for arm in LOCKED_ARMS:
+        for environment in LOCKED_ENVS:
+            _run_timing_gate(
+                matrix_path,
+                results_root,
+                f"p2-timing-{arm}-{environment}-s1",
+            )
+    _run_timing_collector(matrix_path, results_root, summary_path)
     summary = json.loads(summary_path.read_text())
     assert summary["state"] == "PASS"
     assert set(summary["rates"]) == {
-        f"{arm}/{environment}"
-        for arm in LOCKED_ARMS
-        for environment in LOCKED_ENVS
+        f"{arm}/{environment}" for arm in LOCKED_ARMS for environment in LOCKED_ENVS
     }
     assert all(
         record["optimizer_steps_per_second"] == 1.25
         for record in summary["rates"].values()
     )
-    training_card = _card(
-        "p3-pusht-dinocular-s1", "dinocular", "pusht", 1
-    )
+    training_card = _card("p3-pusht-dinocular-s1", "dinocular", "pusht", 1)
     training_card = dict(training_card)
     training_card["segment_sizing"] = derive_segment_sizing(
         summary_path=summary_path,
@@ -958,6 +1284,113 @@ def test_twelve_card_timing_collector_emits_submit_consumable_rates(tmp_path):
         "derived_segment_steps"
     ]
     _validate_rates(summary_path, [training_card], 8.0)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("train_windows",), 1_981_721.0, "must be integer 1981721"),
+        (("measured_samples",), 6399, "must be integer 6400"),
+        (("gpu_count",), 2, "must be integer 1"),
+        (("gpu",), "NVIDIA H100 80GB HBM3", "one scheduled A100"),
+        (
+            ("strict_settings", "deterministic_algorithms"),
+            False,
+            "strict deterministic runtime settings differ",
+        ),
+        (
+            ("strict_settings", "cuda_matmul_allow_tf32"),
+            True,
+            "strict deterministic runtime settings differ",
+        ),
+        (
+            ("strict_settings", "cudnn_allow_tf32"),
+            True,
+            "strict deterministic runtime settings differ",
+        ),
+        (
+            ("strict_settings", "cublas_workspace_config"),
+            ":16:8",
+            "strict deterministic runtime settings differ",
+        ),
+        (
+            ("strict_settings", "processes"),
+            2,
+            "strict deterministic runtime settings differ",
+        ),
+        (
+            ("strict_settings", "num_workers"),
+            1,
+            "strict deterministic runtime settings differ",
+        ),
+    ],
+)
+def test_timing_collector_rejects_mismatched_counts_and_runtime_settings(
+    tmp_path, path, value, message
+):
+    matrix_path, results_root, summary_path = _timing_collector_fixture(tmp_path)
+    _rewrite_timing_result(
+        results_root,
+        "p2-timing-dino_pinned-pusht-s1",
+        path,
+        value,
+    )
+    completed = _run_timing_collector(
+        matrix_path, results_root, summary_path, check=False
+    )
+    assert completed.returncode == 2
+    assert message in completed.stderr
+
+
+def test_timing_collector_rejects_run_card_and_dinocular_identity_drift(tmp_path):
+    matrix_path, results_root, summary_path = _timing_collector_fixture(tmp_path)
+    run_id = "p2-timing-dinocular-pusht-s1"
+    result_path = results_root / run_id / "timing_result.json"
+    runtime_path = results_root / run_id / "timing_runtime_card.yaml"
+    result = json.loads(result_path.read_text())
+    runtime = yaml.safe_load(runtime_path.read_text())
+    result["immutable_run_card"]["run_card_sha256"] = "0" * 64
+    runtime["immutable_run_card"]["run_card_sha256"] = "0" * 64
+    _write_json(result_path, result)
+    runtime_path.write_text(yaml.safe_dump(runtime, sort_keys=False), encoding="utf-8")
+    gate_path = results_root / run_id / "timing_gate.json"
+    gate = json.loads(gate_path.read_text())
+    gate["result_sha256"] = sha256_file(result_path)
+    gate["runtime_card_sha256"] = sha256_file(runtime_path)
+    _write_json(gate_path, gate)
+    completed = _run_timing_collector(
+        matrix_path, results_root, summary_path, check=False
+    )
+    assert completed.returncode == 2
+    assert "not bound to the exact run card" in completed.stderr
+
+    result["immutable_run_card"]["run_card_sha256"] = next(
+        item["run_card_sha256"]
+        for item in yaml.safe_load(matrix_path.read_text())["cards"]
+        if item["run_id"] == run_id
+    )
+    runtime["immutable_run_card"] = result["immutable_run_card"]
+    result["artifacts"]["dinocular_identity"]["selected_producer_sha256"] = "1" * 64
+    runtime["artifacts"] = result["artifacts"]
+    _write_json(result_path, result)
+    runtime_path.write_text(yaml.safe_dump(runtime, sort_keys=False), encoding="utf-8")
+    gate["result_sha256"] = sha256_file(result_path)
+    gate["runtime_card_sha256"] = sha256_file(runtime_path)
+    _write_json(gate_path, gate)
+    completed = _run_timing_collector(
+        matrix_path, results_root, summary_path, check=False
+    )
+    assert completed.returncode == 2
+    assert "student/native-contract/producer identity differs" in completed.stderr
+
+
+def test_timing_gate_rejects_truncating_float_train_windows(tmp_path):
+    matrix_path, results_root, _summary_path = _timing_collector_fixture(tmp_path)
+    run_id = "p2-timing-dino_pinned-pusht-s1"
+    _rewrite_timing_result(results_root, run_id, ("train_windows",), 1_981_721.0)
+    completed = _run_timing_gate(matrix_path, results_root, run_id, check=False)
+    assert completed.returncode == 2
+    assert "must be integer 1981721" in completed.stderr
 
 
 def test_pusht_segment_budget_rejects_26000_and_derives_safe_chunk(tmp_path):
@@ -1041,9 +1474,7 @@ def test_p4_collector_rejects_manifest_hash_key_or_horizon_mismatch():
         ("manifest_keys", ["wall/valid/00000/000001"], "exact keys"),
         ("horizons", {"1": {}, "5": {}}, "horizon set"),
     ):
-        changed = {
-            key: [dict(row) for row in rows] for key, rows in groups.items()
-        }
+        changed = {key: [dict(row) for row in rows] for key, rows in groups.items()}
         changed[("wall", "dinocular", 2)][0][field] = value
         with pytest.raises(CollectionError, match=message):
             _validate_open_loop_coverage(changed)

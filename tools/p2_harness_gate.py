@@ -16,7 +16,20 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from harness_common import HarnessError, sha256_file, validate_run_card  # noqa: E402
+from harness_common import (  # noqa: E402
+    HarnessError,
+    LOCKED_TARGETS,
+    sha256_file,
+    validate_run_card,
+)
+from collect_p2_timing import (  # noqa: E402
+    MEASURED_SAMPLES,
+    PROJECTION_STATUS,
+    RELEASED_TRAIN_WINDOWS,
+    _require_exact_int,
+    _require_runtime_bindings,
+    _require_strict_configuration,
+)
 
 
 def _load(path: Path, mode: str) -> Mapping[str, Any]:
@@ -102,7 +115,9 @@ def geometry(args: argparse.Namespace) -> None:
         or progress.get("global_step") != 1
         or not math.isfinite(float(progress.get("last_step_loss")))
     ):
-        raise HarnessError("geometry optimizer/checkpoint gate did not reach one finite step")
+        raise HarnessError(
+            "geometry optimizer/checkpoint gate did not reach one finite step"
+        )
     checkpoint = Path(progress["checkpoint"])
     if not checkpoint.is_file() or sha256_file(checkpoint) != progress.get(
         "checkpoint_sha256"
@@ -111,9 +126,7 @@ def geometry(args: argparse.Namespace) -> None:
     cfg, model, _trajectory_dataset = _load_eval_model(args.run_dir, checkpoint, "cuda")
     raw_encoder = model.encoder
     expected_geometry = (
-        (196, 384, 196)
-        if card["arm"] == "dino_pinned"
-        else (49, 512, 224)
+        (196, 384, 196) if card["arm"] == "dino_pinned" else (49, 512, 224)
     )
     actual_geometry = (
         int(raw_encoder.num_patches),
@@ -128,14 +141,18 @@ def geometry(args: argparse.Namespace) -> None:
         expected_neutral = card["arm"] == "dinocular_zerodepth"
         if bool(raw_encoder.neutralize_depth_at_encoder_input) != expected_neutral:
             raise HarnessError("DINOcular neutral-boundary switch differs from arm")
-        if raw_encoder.input_metadata["checkpoint_sha256"] != card["artifacts"][
-            "dinocular_student"
-        ]["sha256"]:
+        if (
+            raw_encoder.input_metadata["checkpoint_sha256"]
+            != card["artifacts"]["dinocular_student"]["sha256"]
+        ):
             raise HarnessError("DINOcular checkpoint metadata differs from run card")
-        if raw_encoder.input_metadata["native_depth_contract_sha256"] != card[
-            "depth_inputs"
-        ]["native_contract_sha256"]:
-            raise HarnessError("DINOcular native contract metadata differs from run card")
+        if (
+            raw_encoder.input_metadata["native_depth_contract_sha256"]
+            != card["depth_inputs"]["native_contract_sha256"]
+        ):
+            raise HarnessError(
+                "DINOcular native contract metadata differs from run card"
+            )
 
     datasets, _traj = hydra.utils.call(
         cfg.env.dataset,
@@ -177,9 +194,8 @@ def geometry(args: argparse.Namespace) -> None:
                 {key: value[:, : int(cfg.num_hist)] for key, value in obs.items()},
                 act[:, : int(cfg.num_hist)],
             )
-            cem_actions = None
             if card["environment"] in {"rope", "granular"}:
-                cem_actions = _run_cem_horizon_five(
+                _run_cem_horizon_five(
                     model,
                     obs,
                     num_hist=int(cfg.num_hist),
@@ -205,8 +221,12 @@ def geometry(args: argparse.Namespace) -> None:
     try:
         reset_value = planning_env.reset()
         action_value = planning_env.action_space.sample()
-        raw_action_dim = int(__import__("numpy").asarray(action_value).reshape(-1).shape[0])
-        expected_raw_action_dim = 4 if card["environment"] in {"rope", "granular"} else 2
+        raw_action_dim = int(
+            __import__("numpy").asarray(action_value).reshape(-1).shape[0]
+        )
+        expected_raw_action_dim = (
+            4 if card["environment"] in {"rope", "granular"} else 2
+        )
         if raw_action_dim != expected_raw_action_dim:
             raise HarnessError(
                 f"planning raw action dimension differs: {raw_action_dim} versus {expected_raw_action_dim}"
@@ -223,9 +243,13 @@ def geometry(args: argparse.Namespace) -> None:
             if rendered is None:
                 raise HarnessError("deformable planning render returned no frame")
         else:
-            reset_obs = reset_value[0] if isinstance(reset_value, tuple) else reset_value
+            reset_obs = (
+                reset_value[0] if isinstance(reset_value, tuple) else reset_value
+            )
             if not isinstance(reset_obs, Mapping) or "visual" not in reset_obs:
-                raise HarnessError("Wall planning reset did not render a visual observation")
+                raise HarnessError(
+                    "Wall planning reset did not render a visual observation"
+                )
     finally:
         planning_env.close()
 
@@ -256,7 +280,10 @@ def timing(args: argparse.Namespace) -> None:
     runtime_card_path = args.run_dir / "timing_runtime_card.yaml"
     result = json.loads(result_path.read_text(encoding="utf-8"))
     runtime_card = yaml.safe_load(runtime_card_path.read_text(encoding="utf-8"))
+    if not isinstance(runtime_card, Mapping):
+        raise HarnessError("strict timing runtime card is not an object")
     expected = card["timing"]
+    protocol = runtime_card.get("protocol")
     if (
         result.get("schema") != "dino-wm.strict-p2-timing.v1"
         or result.get("status") != "MEASURED_PASS"
@@ -266,9 +293,75 @@ def timing(args: argparse.Namespace) -> None:
         or result.get("measured_steps") != expected["fixed_steps"]
         or result.get("global_batch_size") != 32
         or result.get("frame_skip") != card["frameskip"]
+        or result.get("projection_target_steps")
+        != LOCKED_TARGETS[str(card["environment"])]
+        or result.get("projection_status") != PROJECTION_STATUS
+        or result.get("measurement_claim")
+        != f"strict production-path {card['arm']} single-A100 timing"
+        or result.get("assumption_tags") != []
+        or runtime_card.get("schema") != "dino-wm.strict-p2-run-card.v1"
         or runtime_card.get("status") != "PASSED"
+        or runtime_card.get("claim")
+        != f"strict production-path {card['arm']} single-A100 timing"
+        or runtime_card.get("measurement_status")
+        != "MEASURED_ARM_SPECIFIC_AFTER_COMPLETION"
+        or runtime_card.get("projection", {}).get("status") != PROJECTION_STATUS
+        or runtime_card.get("projection", {}).get("target_steps")
+        != LOCKED_TARGETS[str(card["environment"])]
+        or not isinstance(protocol, Mapping)
+        or protocol.get("processes") != 1
+        or protocol.get("num_workers") != 0
+        or protocol.get("global_batch_size") != 32
+        or protocol.get("frame_skip") != card["frameskip"]
+        or protocol.get("warmup_steps_excluded") != expected["warmup_steps"]
+        or protocol.get("measured_optimizer_steps") != expected["fixed_steps"]
+        or protocol.get("projection_target_steps")
+        != LOCKED_TARGETS[str(card["environment"])]
+        or protocol.get("checkpointing_in_measured_window") is not False
+        or protocol.get("evaluation_in_measured_window") is not False
+        or protocol.get("profiler_in_measured_window") is not False
     ):
         raise HarnessError("strict timing output differs from the immutable P2 card")
+    reference = {
+        "path": str(args.run_card.resolve()),
+        "file_sha256": sha256_file(args.run_card),
+        "run_card_sha256": card["run_card_sha256"],
+    }
+    _require_runtime_bindings(
+        card=card,
+        reference=reference,
+        result=result,
+        runtime=runtime_card,
+    )
+    _require_strict_configuration(result, runtime_card, card)
+    _require_exact_int(
+        result.get("measured_samples"),
+        MEASURED_SAMPLES,
+        f"{card['run_id']}.measured_samples",
+    )
+    _require_exact_int(result.get("gpu_count"), 1, f"{card['run_id']}.gpu_count")
+    if "A100" not in str(result.get("gpu")) or not result.get("slurm_job_id"):
+        raise HarnessError("strict timing did not record one scheduled A100")
+    windows = RELEASED_TRAIN_WINDOWS[str(card["environment"])]
+    steps_per_epoch = math.ceil(windows / 32)
+    _require_exact_int(
+        result.get("train_windows"), windows, f"{card['run_id']}.train_windows"
+    )
+    _require_exact_int(
+        result.get("steps_per_epoch"),
+        steps_per_epoch,
+        f"{card['run_id']}.steps_per_epoch",
+    )
+    sampler = result.get("sampler_state_after_window")
+    if not isinstance(sampler, Mapping):
+        raise HarnessError("strict timing sampler state is absent")
+    for key, value in {
+        "dataset_size": windows,
+        "batch_size": 32,
+        "steps_per_epoch": steps_per_epoch,
+        "next_step": 220,
+    }.items():
+        _require_exact_int(sampler.get(key), value, f"{card['run_id']}.sampler.{key}")
     for key in (
         "steps_per_second",
         "samples_per_second",
@@ -279,6 +372,19 @@ def timing(args: argparse.Namespace) -> None:
         value = result.get(key)
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
             raise HarnessError(f"strict timing result {key} is nonfinite")
+    measured_seconds = float(result["measured_seconds"])
+    measured_rate = float(result["steps_per_second"])
+    sample_rate = float(result["samples_per_second"])
+    if (
+        measured_seconds <= 0
+        or measured_rate <= 0
+        or sample_rate <= 0
+        or not math.isclose(measured_rate, 200.0 / measured_seconds, rel_tol=1e-12)
+        or not math.isclose(
+            sample_rate, MEASURED_SAMPLES / measured_seconds, rel_tol=1e-12
+        )
+    ):
+        raise HarnessError("strict timing rates differ from measured counts")
     gate = {
         "schema": "dino-wm-p2-timing-gate-v1",
         "state": "PASS",

@@ -21,6 +21,23 @@ from training_resume import atomic_write_json, file_sha256, json_sha256
 
 TIMING_SCHEMA = "dino-wm.strict-p2-timing.v1"
 RUN_CARD_SCHEMA = "dino-wm.strict-p2-run-card.v1"
+IMMUTABLE_RUN_CARD_SCHEMA = "dino-wm-run-card-v1"
+DINOCULAR_ARMS = frozenset({"dinocular", "dinocular_zerodepth"})
+LOCKED_ARMS = frozenset({"dino_pinned", *DINOCULAR_ARMS})
+LOCKED_FRAMESKIPS = {"pusht": 5, "wall": 5, "rope": 1, "granular": 1}
+LOCKED_PROJECTION_TARGETS = {
+    "pusht": 123_858,
+    "wall": 143_910,
+    "rope": 53_500,
+    "granular": 53_500,
+}
+RELEASED_TRAIN_WINDOWS = {
+    "pusht": 1_981_721,
+    "wall": 70_848,
+    "rope": 17_100,
+    "granular": 17_100,
+}
+ARM_SPECIFIC_PROJECTION_STATUS = "PROJECTED_FROM_MEASURED_ARM_SPECIFIC_RATE"
 
 
 def _atomic_write_yaml(path: Path, value: Mapping[str, Any]) -> None:
@@ -50,6 +67,14 @@ def _file_hash_from_environment(name: str) -> str | None:
         return None
     candidate = Path(path)
     return file_sha256(candidate) if candidate.is_file() else None
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 class NvidiaSmiMonitor:
@@ -139,22 +164,26 @@ class StrictTimingWindow:
         self.run_card_path = Path(str(run_card))
         self.warmup_steps = int(cfg.training.timing_warmup_steps)
         self.measured_steps = int(cfg.training.timing_measured_steps)
-        self.projection_target_steps = int(
-            cfg.training.timing_projection_target_steps
-        )
+        self.projection_target_steps = int(cfg.training.timing_projection_target_steps)
         self.required_steps = self.warmup_steps + self.measured_steps
         if self.warmup_steps <= 0 or self.measured_steps <= 0:
             raise ValueError("timing warmup and measured steps must be positive")
         if self.projection_target_steps <= 0:
             raise ValueError("timing projection target must be positive")
         if not bool(cfg.training.strict_determinism):
-            raise RuntimeError("strict timing requires training.strict_determinism=true")
+            raise RuntimeError(
+                "strict timing requires training.strict_determinism=true"
+            )
         if int(cfg.env.num_workers) != 0:
             raise RuntimeError("strict timing requires env.num_workers=0")
         if trainer.accelerator.num_processes != 1:
             raise RuntimeError("strict timing requires exactly one process")
         if not torch.cuda.is_available():
             raise RuntimeError("strict timing requires CUDA")
+        if torch.cuda.device_count() != 1:
+            raise RuntimeError("strict timing requires exactly one visible GPU")
+        if "A100" not in torch.cuda.get_device_name(trainer.device):
+            raise RuntimeError("strict timing requires one A100 GPU")
         if segment_start != 0 or trainer.global_step != 0:
             raise RuntimeError("strict timing must start from optimizer step zero")
         if segment_stop != self.required_steps:
@@ -173,8 +202,34 @@ class StrictTimingWindow:
             raise RuntimeError("strict timing does not permit a test signal")
 
         self.device = trainer.device
+        self.environment = os.environ.get("STRICT_P2_ENV") or str(cfg.env.name)
+        self.arm = os.environ.get("STRICT_P2_ARM") or str(cfg.encoder.name)
+        if (
+            self.arm not in LOCKED_ARMS
+            or self.environment not in RELEASED_TRAIN_WINDOWS
+        ):
+            raise RuntimeError("strict timing arm or environment is not locked")
+        if int(cfg.training.batch_size) != 32:
+            raise RuntimeError("strict timing requires global batch size 32")
+        if int(cfg.frameskip) != LOCKED_FRAMESKIPS[self.environment]:
+            raise RuntimeError("strict timing frame skip differs from the locked card")
+        if self.projection_target_steps != LOCKED_PROJECTION_TARGETS[self.environment]:
+            raise RuntimeError(
+                "strict timing projection target differs from the released target"
+            )
         self.train_windows = len(trainer.datasets["train"])
+        expected_windows = RELEASED_TRAIN_WINDOWS[self.environment]
+        if self.train_windows != expected_windows:
+            raise RuntimeError(
+                "strict timing released train-window count differs: "
+                f"{self.train_windows} versus {expected_windows}"
+            )
         self.steps_per_epoch = int(sampler.steps_per_epoch)
+        expected_steps_per_epoch = math.ceil(self.train_windows / 32)
+        if self.steps_per_epoch != expected_steps_per_epoch:
+            raise RuntimeError(
+                "timing sampler epoch size differs from released windows"
+            )
         if self.steps_per_epoch < self.required_steps:
             raise RuntimeError("timing interval must fit within the first epoch")
         self.measured_samples = 0
@@ -182,20 +237,100 @@ class StrictTimingWindow:
         self.measured_end: float | None = None
         self.peak_allocated_mib: float | None = None
         self.peak_reserved_mib: float | None = None
-        self.monitor = NvidiaSmiMonitor()
-        self.monitor.start()
         self.config = OmegaConf.to_container(cfg, resolve=True)
         self.config_sha256 = json_sha256(self.config)
-        self.environment = os.environ.get("STRICT_P2_ENV") or str(cfg.env.name)
-        self.arm = os.environ.get("STRICT_P2_ARM") or str(cfg.encoder.name)
+        self.immutable_card, self.immutable_run_card = self._load_immutable_card(
+            trainer
+        )
         self.artifacts = self._artifacts(trainer)
+        self.monitor = NvidiaSmiMonitor()
+        self.monitor.start()
         self._card = self._initial_card(trainer)
         _atomic_write_yaml(self.run_card_path, self._card)
+
+    def _load_immutable_card(
+        self, trainer: Any
+    ) -> tuple[Mapping[str, Any], dict[str, Any]]:
+        raw_path = os.environ.get("STRICT_P2_IMMUTABLE_RUN_CARD")
+        expected_digest = os.environ.get("STRICT_P2_IMMUTABLE_RUN_CARD_SHA256")
+        if not raw_path or not _is_sha256(expected_digest):
+            raise RuntimeError(
+                "strict timing requires an immutable run-card path and content hash"
+            )
+        path = Path(raw_path).resolve()
+        if not path.is_file():
+            raise RuntimeError(f"immutable timing run card is missing: {path}")
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(value, Mapping):
+            raise RuntimeError("immutable timing run card is not an object")
+        card = dict(value)
+        embedded_digest = card.get("run_card_sha256")
+        digest_value = dict(card)
+        digest_value.pop("run_card_sha256", None)
+        computed_digest = json_sha256(digest_value)
+        if embedded_digest != expected_digest or computed_digest != expected_digest:
+            raise RuntimeError("immutable timing run-card content hash differs")
+        timing = card.get("timing")
+        if (
+            card.get("schema") != IMMUTABLE_RUN_CARD_SCHEMA
+            or card.get("kind") != "p2-timing"
+            or card.get("gate_mode") != "timing"
+            or card.get("arm") != self.arm
+            or card.get("environment") != self.environment
+            or card.get("source_commit") != trainer.source_commit
+            or card.get("batch_size") != 32
+            or card.get("frameskip") != LOCKED_FRAMESKIPS[self.environment]
+            or card.get("target_steps") != self.required_steps
+            or card.get("segment_steps") != self.required_steps
+            or timing
+            != {
+                "fixed_steps": self.measured_steps,
+                "warmup_steps": self.warmup_steps,
+            }
+            or Path(str(card.get("run_dir"))).resolve()
+            != self.output_path.parent.resolve()
+        ):
+            raise RuntimeError(
+                "runtime timing configuration differs from the immutable P2 card"
+            )
+        return card, {
+            "path": str(path),
+            "file_sha256": file_sha256(path),
+            "run_card_sha256": expected_digest,
+            "run_id": card.get("run_id"),
+        }
+
+    def _verified_file_identity(
+        self, record: Any, environment_name: str, label: str
+    ) -> dict[str, str]:
+        if not isinstance(record, Mapping):
+            raise RuntimeError(f"immutable timing card has no {label} record")
+        expected_path = record.get("path")
+        expected_digest = record.get("sha256")
+        runtime_path = os.environ.get(environment_name)
+        if (
+            not runtime_path
+            or runtime_path != expected_path
+            or not _is_sha256(expected_digest)
+        ):
+            raise RuntimeError(f"runtime {label} identity differs from immutable card")
+        path = Path(runtime_path)
+        if not path.is_file() or file_sha256(path) != expected_digest:
+            raise RuntimeError(f"runtime {label} file hash differs from immutable card")
+        return {"path": runtime_path, "sha256": str(expected_digest)}
 
     def _artifacts(self, trainer: Any) -> dict[str, Any]:
         code_root = str(trainer.base_path)
         timing_path = Path(__file__).resolve()
-        return {
+        card_artifacts = self.immutable_card.get("artifacts")
+        if not isinstance(card_artifacts, Mapping):
+            raise RuntimeError("immutable timing card has no artifact records")
+        dinov2 = self._verified_file_identity(
+            card_artifacts.get("dinov2"),
+            "DINOV2_VITS14_WEIGHTS",
+            "DINOv2 weights",
+        )
+        artifacts = {
             "source_commit": trainer.source_commit,
             "source_base_commit": os.environ.get("STRICT_P2_BASE_COMMIT"),
             "train_py_sha256": file_sha256(Path(code_root) / "train.py"),
@@ -209,23 +344,80 @@ class StrictTimingWindow:
             "container_path": os.environ.get("STRICT_P2_CONTAINER"),
             "container_sha256": os.environ.get("STRICT_P2_CONTAINER_SHA256"),
             "dinov2_repo_commit": _git_commit(os.environ.get("DINOV2_REPO")),
-            "dinov2_weights_path": os.environ.get("DINOV2_VITS14_WEIGHTS"),
-            "dinov2_weights_sha256": os.environ.get(
-                "DINOV2_VITS14_WEIGHTS_SHA256"
-            ),
+            "dinov2_weights_path": dinov2["path"],
+            "dinov2_weights_sha256": dinov2["sha256"],
             "dataset_order_sha256": trainer.dataset_order_sha256,
             "semantic_config_sha256": trainer.resume_config_sha256,
             "resolved_config_sha256": self.config_sha256,
         }
+        source_hashes = self.immutable_card.get("source_file_sha256")
+        expected_source_hashes = {
+            "train_py_sha256": "train.py",
+            "training_resume_py_sha256": "training_resume.py",
+            "training_timing_py_sha256": "training_timing.py",
+            "slurm_wrapper_sha256": "tools/p3_step_segment.sbatch",
+        }
+        if not isinstance(source_hashes, Mapping) or any(
+            artifacts[field] != source_hashes.get(relative)
+            for field, relative in expected_source_hashes.items()
+        ):
+            raise RuntimeError(
+                "runtime timing source hashes differ from immutable card"
+            )
+        container = self.immutable_card.get("container")
+        if (
+            not isinstance(container, Mapping)
+            or artifacts["container_path"] != container.get("path")
+            or artifacts["container_sha256"] != container.get("sha256")
+        ):
+            raise RuntimeError("runtime timing container differs from immutable card")
+        if self.arm in DINOCULAR_ARMS:
+            student = self._verified_file_identity(
+                card_artifacts.get("dinocular_student"),
+                "DINOCULAR_STUDENT_WEIGHTS",
+                "DINOcular student",
+            )
+            depth_inputs = self.immutable_card.get("depth_inputs")
+            if not isinstance(depth_inputs, Mapping):
+                raise RuntimeError("DINOcular timing card has no depth-input record")
+            native = self._verified_file_identity(
+                {
+                    "path": depth_inputs.get("native_contract_path"),
+                    "sha256": depth_inputs.get("native_contract_sha256"),
+                },
+                "DINOCULAR_NATIVE_DEPTH_CONTRACT",
+                "DINOcular native contract",
+            )
+            selected_producer = os.environ.get("DINOCULAR_CACHE_PRODUCER_SHA256")
+            if (
+                not _is_sha256(selected_producer)
+                or selected_producer != depth_inputs.get("producer_sha256")
+                or os.environ.get("DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256")
+                != native["sha256"]
+                or depth_inputs.get("checkpoint_sha256") != student["sha256"]
+            ):
+                raise RuntimeError(
+                    "DINOcular student, native contract, or producer identity differs"
+                )
+            artifacts["dinocular_identity"] = {
+                "student": student,
+                "native_depth_contract": native,
+                "selected_producer_sha256": selected_producer,
+            }
+        else:
+            artifacts["dinocular_identity"] = None
+        return artifacts
 
     def _initial_card(self, trainer: Any) -> dict[str, Any]:
+        claim = f"strict production-path {self.arm} single-A100 timing"
         return {
             "schema": RUN_CARD_SCHEMA,
             "status": "RUNNING",
-            "claim": "strict production-path DINOv2 single-A100 timing",
-            "measurement_status": "MEASURED after completion; projections labeled separately",
+            "claim": claim,
+            "measurement_status": "MEASURED_ARM_SPECIFIC_AFTER_COMPLETION",
             "environment": self.environment,
             "arm": self.arm,
+            "immutable_run_card": self.immutable_run_card,
             "slurm": {
                 "job_id": os.environ.get("SLURM_JOB_ID"),
                 "job_name": os.environ.get("SLURM_JOB_NAME"),
@@ -268,9 +460,7 @@ class StrictTimingWindow:
             self.peak_allocated_mib = (
                 torch.cuda.max_memory_allocated(self.device) / 2**20
             )
-            self.peak_reserved_mib = (
-                torch.cuda.max_memory_reserved(self.device) / 2**20
-            )
+            self.peak_reserved_mib = torch.cuda.max_memory_reserved(self.device) / 2**20
             self.monitor.stop()
 
     def abort(self, error: BaseException) -> None:
@@ -287,6 +477,12 @@ class StrictTimingWindow:
             raise RuntimeError("timing window did not complete")
         if self.measured_samples <= 0 or trainer.last_step_loss is None:
             raise RuntimeError("timing result is missing samples or final loss")
+        expected_samples = self.measured_steps * 32
+        if self.measured_samples != expected_samples:
+            raise RuntimeError(
+                "timing measured sample count differs: "
+                f"{self.measured_samples} versus {expected_samples}"
+            )
         if not math.isfinite(float(trainer.last_step_loss)):
             raise FloatingPointError("timing final loss is nonfinite")
         measured_seconds = self.measured_end - self.measured_start
@@ -298,6 +494,9 @@ class StrictTimingWindow:
             "status": "MEASURED_PASS",
             "arm": self.arm,
             "environment": self.environment,
+            "measurement_claim": self._card["claim"],
+            "projection_status": ARM_SPECIFIC_PROJECTION_STATUS,
+            "immutable_run_card": self.immutable_run_card,
             "host": socket.gethostname(),
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
             "python": platform.python_version(),
@@ -313,9 +512,7 @@ class StrictTimingWindow:
                 "cudnn_deterministic": torch.backends.cudnn.deterministic,
                 "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
                 "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
-                "cublas_workspace_config": os.environ.get(
-                    "CUBLAS_WORKSPACE_CONFIG"
-                ),
+                "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
                 "processes": trainer.accelerator.num_processes,
                 "num_workers": int(trainer.cfg.env.num_workers),
             },
@@ -369,7 +566,7 @@ class StrictTimingWindow:
             "target_steps": self.projection_target_steps,
             "wall_seconds": projection_seconds,
             "wall_hours": projection_seconds / 3600.0,
-            "status": "PROJECTED_FROM_MEASURED_DINOV2_RATE",
+            "status": ARM_SPECIFIC_PROJECTION_STATUS,
         }
         self._card["result_sha256"] = file_sha256(self.output_path)
         _atomic_write_yaml(self.run_card_path, self._card)
