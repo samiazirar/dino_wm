@@ -14,11 +14,6 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from datasets.deformable_env_dset import (  # noqa: E402
-    load_deformable_dset_slice_train_val,
-)
-from datasets.pusht_dset import load_pusht_slice_train_val  # noqa: E402
-from datasets.wall_dset import load_wall_slice_train_val  # noqa: E402
 from p3_completion import (  # noqa: E402
     P3CompletionError,
     materialize_heldout_manifest,
@@ -34,6 +29,10 @@ from tools.harness_common import (  # noqa: E402
 def _datasets(
     environment: str, data_root: Path, spec: Mapping[str, Any]
 ) -> Mapping[str, Any]:
+    from datasets.deformable_env_dset import load_deformable_dset_slice_train_val
+    from datasets.pusht_dset import load_pusht_slice_train_val
+    from datasets.wall_dset import load_wall_slice_train_val
+
     record = spec["environments"][environment]
     common = {
         "n_rollout": None,
