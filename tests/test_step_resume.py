@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from train import Trainer
+from tools.submit_p3_chain import verify_progress_evidence
 from training_resume import (
     CHECKPOINT_SCHEMA,
     SerializableConstantScheduler,
@@ -125,8 +126,27 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
         progress["checkpoint"], map_location="cpu", weights_only=False
     )
     assert progress["checkpoint_sha256"] == file_sha256(Path(progress["checkpoint"]))
+    manifest = {
+        "run_dir": str(tmp_path),
+        "run_card_sha256": immutable_run_card_sha256,
+    }
+    assert (
+        verify_progress_evidence(manifest, progress)
+        == Path(progress["checkpoint"]).resolve()
+    )
     assert final_checkpoint["immutable_run_card_sha256"] == immutable_run_card_sha256
     assert final_checkpoint["global_step"] == expected_stop
+
+    changed_progress = dict(progress)
+    changed_progress["immutable_run_card_sha256"] = "d" * 64
+    with pytest.raises(
+        RuntimeError, match="Progress differs from the immutable run card"
+    ):
+        verify_progress_evidence(manifest, changed_progress)
+    changed_progress = dict(progress)
+    changed_progress["checkpoint_sha256"] = "e" * 64
+    with pytest.raises(RuntimeError, match="checkpoint SHA-256 differs"):
+        verify_progress_evidence(manifest, changed_progress)
 
     trainer.immutable_run_card_sha256 = "d" * 64
     with pytest.raises(RuntimeError, match="Immutable run card differs"):

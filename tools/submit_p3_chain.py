@@ -14,7 +14,10 @@ from typing import Any
 
 import yaml
 
-from harness_common import validate_run_card
+try:
+    from .harness_common import validate_run_card
+except ImportError:
+    from harness_common import validate_run_card
 
 
 SCHEMA = "dino-wm.p3-slurm-chain.v1"
@@ -40,6 +43,34 @@ def load_manifest(path: Path) -> dict:
     if manifest.get("schema") != SCHEMA:
         raise RuntimeError(f"Unknown chain manifest schema: {path}")
     return manifest
+
+
+def verify_progress_evidence(manifest: dict, progress: dict) -> Path:
+    expected_run_card_sha256 = manifest.get("run_card_sha256")
+    if (
+        not isinstance(expected_run_card_sha256, str)
+        or len(expected_run_card_sha256) != 64
+        or progress.get("immutable_run_card_sha256") != expected_run_card_sha256
+    ):
+        raise RuntimeError("Progress differs from the immutable run card")
+    global_step = int(progress["global_step"])
+    checkpoint = Path(str(progress.get("checkpoint"))).resolve()
+    expected_directory = Path(manifest["run_dir"]).resolve() / "checkpoints" / "steps"
+    expected_name = f"step_{global_step:09d}.pth"
+    if checkpoint.parent != expected_directory or checkpoint.name != expected_name:
+        raise RuntimeError("Progress checkpoint path differs from the completed step")
+    if not checkpoint.is_file():
+        raise RuntimeError(f"Progress checkpoint is missing: {checkpoint}")
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as handle:
+        for block in iter(lambda: handle.read(16 << 20), b""):
+            digest.update(block)
+    if digest.hexdigest() != progress.get("checkpoint_sha256"):
+        raise RuntimeError("Progress checkpoint SHA-256 differs from the saved file")
+    sampler = progress.get("sampler")
+    if not isinstance(sampler, dict) or sampler.get("next_step") != global_step:
+        raise RuntimeError("Progress sampler cursor differs from the completed step")
+    return checkpoint
 
 
 def submit_job(manifest_path: Path, manifest: dict, dependency: str | None) -> str:
@@ -108,7 +139,10 @@ def start(args: argparse.Namespace) -> None:
             "run-card file SHA-256 differs from the immutable matrix reference"
         )
     run_card = yaml.safe_load(run_card_path.read_text(encoding="utf-8"))
-    if not isinstance(run_card, dict) or run_card.get("run_card_sha256") != args.run_card_sha256:
+    if (
+        not isinstance(run_card, dict)
+        or run_card.get("run_card_sha256") != args.run_card_sha256
+    ):
         raise RuntimeError("run-card content SHA-256 differs from the matrix reference")
     validate_run_card(run_card)
     if (
@@ -138,7 +172,9 @@ def start(args: argparse.Namespace) -> None:
         "partition": args.partition,
         "time_limit": args.time_limit,
         "job_name": args.job_name,
-        "sbatch_script": str((code_root / "tools" / "p3_step_segment.sbatch").resolve()),
+        "sbatch_script": str(
+            (code_root / "tools" / "p3_step_segment.sbatch").resolve()
+        ),
         "code_root": str(code_root),
         "overrides": overrides,
         "run_card": str(run_card_path),
@@ -175,12 +211,18 @@ def continue_chain(args: argparse.Namespace) -> None:
         progress = json.load(handle)
     if int(progress["target_steps"]) != int(manifest["target_steps"]):
         raise RuntimeError("Progress target differs from chain target")
-    if progress.get("source_commit") != subprocess.check_output(
-        ["git", "-C", manifest["code_root"], "rev-parse", "HEAD"], text=True
-    ).strip():
+    if (
+        progress.get("source_commit")
+        != subprocess.check_output(
+            ["git", "-C", manifest["code_root"], "rev-parse", "HEAD"], text=True
+        ).strip()
+    ):
         raise RuntimeError("Progress source commit differs from current branch")
+    checkpoint = verify_progress_evidence(manifest, progress)
 
-    prior = [event for event in manifest["events"] if event["job_id"] == args.parent_job]
+    prior = [
+        event for event in manifest["events"] if event["job_id"] == args.parent_job
+    ]
     if prior:
         event = prior[-1]
         if event.get("child_job_id"):
@@ -197,6 +239,8 @@ def continue_chain(args: argparse.Namespace) -> None:
         "completed_segment_steps": int(progress["completed_segment_steps"]),
         "last_step_loss": progress["last_step_loss"],
         "parameter_sha256": progress["parameter_sha256"],
+        "immutable_run_card_sha256": progress["immutable_run_card_sha256"],
+        "checkpoint": str(checkpoint),
         "checkpoint_sha256": progress["checkpoint_sha256"],
     }
     if int(progress["global_step"]) == int(manifest["target_steps"]):
@@ -268,7 +312,10 @@ def verify(args: argparse.Namespace) -> None:
         raise RuntimeError("live source tree is dirty; refusing chain execution")
     for relative, expected in manifest.get("source_file_sha256", {}).items():
         path = code_root / relative
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        if (
+            not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
+        ):
             raise RuntimeError(f"live source file hash differs: {relative}")
     records = {
         **manifest.get("artifacts", {}),
