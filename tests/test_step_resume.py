@@ -1,24 +1,145 @@
+import json
+from pathlib import Path
 import random
+from types import SimpleNamespace
 
 import numpy as np
+from omegaconf import OmegaConf
+import pytest
 import torch
 
+from train import Trainer
 from training_resume import (
     CHECKPOINT_SCHEMA,
     SerializableConstantScheduler,
     StepBatchSampler,
     StepCheckpointManager,
     capture_rng_state,
+    file_sha256,
     parameter_sha256,
     restore_rng_state,
 )
 
 
+class TinyStepDataset(torch.utils.data.Dataset):
+    def __len__(self):
+        return 10
+
+    def __getitem__(self, index):
+        return torch.tensor([index]), torch.tensor([0.0]), torch.tensor([index])
+
+
+@pytest.mark.parametrize(
+    (
+        "start_step",
+        "segment_steps",
+        "checkpoint_every",
+        "expected_saves",
+        "expected_status",
+        "expected_stop",
+    ),
+    [
+        (0, 4, 0, [3, 4], "SEGMENT_COMPLETE", 4),
+        (0, 7, 5, [3, 5, 6, 7], "TARGET_REACHED", 7),
+        (2, 3, 0, [3, 5], "SEGMENT_COMPLETE", 5),
+    ],
+)
+def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
+    tmp_path,
+    start_step,
+    segment_steps,
+    checkpoint_every,
+    expected_saves,
+    expected_status,
+    expected_stop,
+):
+    immutable_run_card_sha256 = "a" * 64
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    scheduler = SerializableConstantScheduler(optimizer)
+    trainer = object.__new__(Trainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "saved_folder": str(tmp_path),
+            "gpu_batch_size": 4,
+            "training": {
+                "target_steps": 7,
+                "segment_steps": segment_steps,
+                "checkpoint_every_steps": checkpoint_every,
+                "test_signal_after_step": None,
+                "timing_output": None,
+                "seed": 1,
+            },
+            "env": {"num_workers": 0},
+        }
+    )
+    trainer.datasets = {"train": TinyStepDataset()}
+    trainer.accelerator = SimpleNamespace(prepare=lambda loader: loader)
+    trainer.global_step = start_step
+    trainer.epoch = start_step // 3
+    trainer.last_step_loss = None
+    trainer._resume_rng_state = None
+    trainer._stop_requested = False
+    trainer._stop_signal = None
+    trainer._last_saved_step = None
+    trainer._last_checkpoint_path = None
+    trainer._last_checkpoint_sha256 = None
+    trainer.source_commit = "f" * 40
+    trainer.resume_config_sha256 = "b" * 64
+    trainer.immutable_run_card_sha256 = immutable_run_card_sha256
+    trainer.dataset_order_sha256 = "c" * 64
+    trainer.checkpoint_manager = StepCheckpointManager(
+        tmp_path / "checkpoints" / "steps"
+    )
+    trainer.schedulers = {"model": scheduler}
+    trainer._model_components = lambda: {"model": model}
+    trainer._optimizers = lambda: {"model": optimizer}
+    trainer._train_one_step = lambda _data: float(trainer.global_step + 1)
+
+    saved_payloads = []
+
+    def save_and_record():
+        previous_step = trainer._last_saved_step
+        path, digest = Trainer.save_step_checkpoint(trainer)
+        if trainer._last_saved_step != previous_step:
+            assert file_sha256(path) == digest
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            assert payload["immutable_run_card_sha256"] == immutable_run_card_sha256
+            assert payload["global_step"] == trainer.global_step
+            assert payload["sampler"]["next_step"] == trainer.global_step
+            saved_payloads.append(payload)
+        return path, digest
+
+    trainer.save_step_checkpoint = save_and_record
+    Trainer.run_steps(trainer)
+
+    assert [payload["global_step"] for payload in saved_payloads] == expected_saves
+    progress = json.loads((tmp_path / "progress.json").read_text())
+    assert progress["status"] == expected_status
+    assert progress["global_step"] == expected_stop
+    assert progress["segment_start_step"] == start_step
+    assert progress["segment_stop_step"] == expected_stop
+    assert progress["completed_segment_steps"] == segment_steps
+    assert progress["immutable_run_card_sha256"] == immutable_run_card_sha256
+    final_checkpoint = torch.load(
+        progress["checkpoint"], map_location="cpu", weights_only=False
+    )
+    assert progress["checkpoint_sha256"] == file_sha256(Path(progress["checkpoint"]))
+    assert final_checkpoint["immutable_run_card_sha256"] == immutable_run_card_sha256
+    assert final_checkpoint["global_step"] == expected_stop
+
+    trainer.immutable_run_card_sha256 = "d" * 64
+    with pytest.raises(RuntimeError, match="Immutable run card differs"):
+        Trainer._load_step_checkpoint(
+            trainer,
+            trainer._last_checkpoint_path,
+            trainer._last_checkpoint_sha256,
+        )
+
+
 def test_step_sampler_split_matches_straight():
     straight = list(StepBatchSampler(10, 4, 0, 7))
-    split = list(StepBatchSampler(10, 4, 0, 4)) + list(
-        StepBatchSampler(10, 4, 4, 7)
-    )
+    split = list(StepBatchSampler(10, 4, 0, 4)) + list(StepBatchSampler(10, 4, 4, 7))
     assert straight == split
     assert straight == [
         [0, 1, 2, 3],

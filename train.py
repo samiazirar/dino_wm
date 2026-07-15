@@ -747,7 +747,8 @@ class Trainer:
                 checkpoint_due = (
                     checkpoint_every > 0 and self.global_step % checkpoint_every == 0
                 )
-                if checkpoint_due or self._stop_requested:
+                epoch_complete = self.global_step % sampler.steps_per_epoch == 0
+                if checkpoint_due or epoch_complete or self._stop_requested:
                     self.save_step_checkpoint()
                 if self._stop_requested:
                     break
