@@ -484,6 +484,17 @@ class Trainer:
 
         self.dataset_order_sha256 = dataset_order_sha256(self.datasets["train"])
         self.resume_config_sha256 = json_sha256(self._semantic_resume_config())
+        self.immutable_run_card_sha256 = os.environ.get(
+            "STRICT_P2_IMMUTABLE_RUN_CARD_SHA256"
+        )
+        if self.immutable_run_card_sha256 is not None and (
+            len(self.immutable_run_card_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.immutable_run_card_sha256
+            )
+        ):
+            raise RuntimeError("immutable run-card SHA-256 environment is invalid")
         self.source_commit = subprocess.check_output(
             ["git", "-C", self.base_path, "rev-parse", "HEAD"], text=True
         ).strip()
@@ -518,6 +529,8 @@ class Trainer:
             )
         if checkpoint.get("resume_config_sha256") != self.resume_config_sha256:
             raise RuntimeError("Semantic training configuration differs from checkpoint")
+        if checkpoint.get("immutable_run_card_sha256") != self.immutable_run_card_sha256:
+            raise RuntimeError("Immutable run card differs from checkpoint")
         if checkpoint.get("dataset_order_sha256") != self.dataset_order_sha256:
             raise RuntimeError("Dataset order differs from checkpoint")
 
@@ -569,6 +582,7 @@ class Trainer:
             "schema": CHECKPOINT_SCHEMA,
             "source_commit": self.source_commit,
             "resume_config_sha256": self.resume_config_sha256,
+            "immutable_run_card_sha256": self.immutable_run_card_sha256,
             "dataset_order_sha256": self.dataset_order_sha256,
             "global_step": self.global_step,
             "completed_epochs": self.global_step
@@ -598,6 +612,7 @@ class Trainer:
             "schema": PROGRESS_SCHEMA,
             "status": status,
             "source_commit": self.source_commit,
+            "immutable_run_card_sha256": self.immutable_run_card_sha256,
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
             "global_step": self.global_step,
             "target_steps": int(self.cfg.training.target_steps),

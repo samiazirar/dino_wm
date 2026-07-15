@@ -1,0 +1,120 @@
+schema: dino-wm-study-spec-v1
+study_root: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm
+code_root: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/code/dino_wm
+container:
+  path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/containers/dinocular-wm-p0-20260714.sif
+  sha256: 6992ca7aa544434f80cfb375523ae96a1e41656078b5c2d7e89128288c2aecae
+contracts_index: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/depth_contracts.yaml
+producer_decision: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/results/p2a/producer_decision.json
+materialize_from_clean_head: true
+arms:
+  - id: dino_pinned
+    encoder_config: dino_pinned
+    requires_depth: false
+  - id: dinocular
+    encoder_config: dinocular
+    requires_depth: true
+  - id: dinocular_zerodepth
+    encoder_config: dinocular_zerodepth
+    requires_depth: true
+environments:
+  pusht:
+    hydra_env: pusht
+    object_name: null
+    target_steps: 123858
+    frameskip: 5
+    num_hist: 3
+    horizons: [1, 5, 10, 25]
+  wall:
+    hydra_env: wall
+    object_name: null
+    target_steps: 143910
+    frameskip: 5
+    num_hist: 1
+    horizons: [1, 5, 10]
+  rope:
+    hydra_env: deformable_env
+    object_name: rope
+    target_steps: 53500
+    frameskip: 1
+    num_hist: 1
+    horizons: [1, 2, 3]
+  granular:
+    hydra_env: deformable_env
+    object_name: granular
+    target_steps: 53500
+    frameskip: 1
+    num_hist: 1
+    horizons: [1, 2, 3]
+seeds: [1, 2, 3]
+shared_protocol:
+  batch_size: 32
+  predictor_lr: 0.00005
+  num_pred: 1
+  decoder: false
+  train_encoder: false
+  train_predictor: true
+  strict_determinism: true
+  num_workers: 0
+  checkpoint_every_steps: 1000
+  plan_during_training: false
+segment_sizing:
+  max_productive_hours: 8.0
+  safety_margin_fraction: 0.2
+  quantum_steps: 1000
+p2:
+  geometry_minutes: 30
+  timing_minutes: 50
+  fixed_steps: 200
+  warmup_steps: 20
+p2a:
+  environment: pusht
+  seed: 1
+  encoder: dinocular
+  target_steps: 123858
+  producers: [da3_giant_video, mapanything_recovered_framewise]
+  decision_horizons: [5, 10]
+  tie_tolerance: 0.000001
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260714
+artifacts:
+  dinov2:
+    path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/models/dinov2_vits14_pretrain.pth
+    sha256: b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9
+  dinocular_student:
+    path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/checkpoints/dinov2_depthembed_dropout_fullpr.pth
+    sha256: decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc
+source_hash_files:
+  - train.py
+  - training_resume.py
+  - depth_contract.py
+  - datasets/depth_cache.py
+  - datasets/pusht_dset.py
+  - datasets/wall_dset.py
+  - datasets/deformable_env_dset.py
+  - models/dinocular.py
+  - models/dinocular_backbone.py
+  - models/dino.py
+  - models/visual_world_model.py
+  - models/vit.py
+  - models/proprio.py
+  - eval_encoder_swap.py
+  - conf/train.yaml
+  - conf/study_matrix.yaml
+  - conf/encoder/dino_pinned.yaml
+  - conf/encoder/dinocular.yaml
+  - conf/encoder/dinocular_zerodepth.yaml
+  - conf/env/pusht.yaml
+  - conf/env/wall.yaml
+  - conf/env/deformable_env.yaml
+  - tools/make_manifests.py
+  - tools/submit_matrix.py
+  - tools/collect_runs.py
+  - tools/collect_p2_timing.py
+  - tools/harness_common.py
+  - tools/p2_harness_gate.py
+  - tools/run_matrix_card.py
+  - tools/matrix_job.sbatch
+  - tools/submit_p3_chain.py
+  - tools/p3_step_segment.sbatch
+  - training_timing.py

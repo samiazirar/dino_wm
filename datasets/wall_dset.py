@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, get_train_val_sliced, TrajSlicerDataset
+from .depth_cache import DepthCacheReader, require_complete_depth_arguments
 decord.bridge.set_bridge("torch")
 
 # precomputed dataset stats
@@ -20,10 +21,12 @@ class WallDataset(TrajDataset):
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
         action_scale=1.0,
+        depth_reader: Optional[DepthCacheReader] = None,
     ):  
         self.data_path = Path(data_path)
         self.transform = transform
         self.normalize_action = normalize_action
+        self.depth_reader = depth_reader
         print("Loading wall dataset...")
         states = torch.load(self.data_path / "states.pth")
         self.states = states
@@ -91,6 +94,12 @@ class WallDataset(TrajDataset):
         if self.transform:
             image = self.transform(image)
         obs = {"visual": image,"proprio": proprio}
+        if self.depth_reader is not None:
+            depth, validity = self.depth_reader.read(
+                split=None, episode=idx, frames=frames
+            )
+            obs["depth"] = depth
+            obs["depth_validity_mask"] = validity
         return obs, act, state, {'fix_door_location': door_location[0], 'fix_wall_location': wall_location[0]}
 
     def __getitem__(self, idx):
@@ -115,14 +124,51 @@ def load_wall_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    depth_cache_dir=None,
+    depth_cache_manifest_sha256=None,
+    depth_validation_path=None,
+    depth_validation_sha256=None,
+    native_depth_contract_path=None,
+    native_depth_contract_sha256=None,
+    depth_cache_producer_sha256=None,
+    depth_checkpoint_sha256=None,
 ):  
+    depth_values = {
+        "depth_cache_dir": depth_cache_dir,
+        "depth_cache_manifest_sha256": depth_cache_manifest_sha256,
+        "depth_validation_path": depth_validation_path,
+        "depth_validation_sha256": depth_validation_sha256,
+        "native_depth_contract_path": native_depth_contract_path,
+        "native_depth_contract_sha256": native_depth_contract_sha256,
+        "depth_cache_producer_sha256": depth_cache_producer_sha256,
+        "depth_checkpoint_sha256": depth_checkpoint_sha256,
+    }
+    depth_reader = None
+    if require_complete_depth_arguments(**depth_values):
+        depth_reader = DepthCacheReader(
+            environment="wall",
+            source_root=Path(data_path).resolve().parent,
+            cache_dir=depth_cache_dir,
+            cache_manifest_sha256=depth_cache_manifest_sha256,
+            validation_path=depth_validation_path,
+            validation_sha256=depth_validation_sha256,
+            native_contract_path=native_depth_contract_path,
+            native_contract_sha256=native_depth_contract_sha256,
+            expected_producer_sha256=depth_cache_producer_sha256,
+            expected_checkpoint_sha256=depth_checkpoint_sha256,
+        )
     if split_mode == "random":
         dset = WallDataset(
             n_rollout=n_rollout,
             transform=transform,
             data_path=data_path,
             normalize_action=normalize_action,
+            depth_reader=depth_reader,
         )
+        if depth_reader is not None:
+            depth_reader.assert_dataset_coverage(
+                [(None, index, int(dset.get_seq_length(index))) for index in range(len(dset))]
+            )
         dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
             traj_dataset=dset, 
             train_fraction=split_ratio, 
@@ -135,13 +181,19 @@ def load_wall_slice_train_val(
             transform=transform,
             data_path=data_path + "/train",
             normalize_action=normalize_action,
+            depth_reader=depth_reader,
         )
         dset_val = WallDataset(
             n_rollout=n_rollout,
             transform=transform,
             data_path=data_path + "/val",
             normalize_action=normalize_action,
+            depth_reader=depth_reader,
         )
+        if depth_reader is not None:
+            raise ValueError(
+                "cache-aligned Wall depth requires split_mode=random with global episode IDs"
+            )
         num_frames = num_hist + num_pred
         train_slices = TrajSlicerDataset(dset_train, num_frames, frameskip)
         val_slices = TrajSlicerDataset(dset_val, num_frames, frameskip)

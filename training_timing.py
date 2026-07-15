@@ -187,6 +187,7 @@ class StrictTimingWindow:
         self.config = OmegaConf.to_container(cfg, resolve=True)
         self.config_sha256 = json_sha256(self.config)
         self.environment = os.environ.get("STRICT_P2_ENV") or str(cfg.env.name)
+        self.arm = os.environ.get("STRICT_P2_ARM") or str(cfg.encoder.name)
         self.artifacts = self._artifacts(trainer)
         self._card = self._initial_card(trainer)
         _atomic_write_yaml(self.run_card_path, self._card)
@@ -224,7 +225,7 @@ class StrictTimingWindow:
             "claim": "strict production-path DINOv2 single-A100 timing",
             "measurement_status": "MEASURED after completion; projections labeled separately",
             "environment": self.environment,
-            "arm": "dinov2_vits14",
+            "arm": self.arm,
             "slurm": {
                 "job_id": os.environ.get("SLURM_JOB_ID"),
                 "job_name": os.environ.get("SLURM_JOB_NAME"),
@@ -295,7 +296,7 @@ class StrictTimingWindow:
         result = {
             "schema": TIMING_SCHEMA,
             "status": "MEASURED_PASS",
-            "arm": "dinov2_vits14",
+            "arm": self.arm,
             "environment": self.environment,
             "host": socket.gethostname(),
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),

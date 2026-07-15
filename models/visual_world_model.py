@@ -146,8 +146,24 @@ class VWorldModel(nn.Module):
                     f"got {tuple(depth.shape)}"
                 )
             depth = rearrange(depth, "b t c h w -> (b t) c h w")
-            depth = self.encoder_transform(depth)
-            visual_embs = self.encoder.forward(visual, depth=depth)
+            validity = obs.get("depth_validity_mask")
+            if validity is not None:
+                if validity.ndim == 4:
+                    validity = validity.unsqueeze(2)
+                if validity.ndim != 5 or validity.shape[2] != 1:
+                    raise ValueError(
+                        "obs['depth_validity_mask'] must have shape [B,T,H,W] or "
+                        f"[B,T,1,H,W], got {tuple(validity.shape)}"
+                    )
+                validity = rearrange(validity, "b t c h w -> (b t) c h w")
+            if getattr(self.encoder_metadata, "requires_depth", False):
+                visual_embs = self.encoder.forward(
+                    visual,
+                    depth=depth,
+                    depth_validity_mask=validity,
+                )
+            else:
+                visual_embs = self.encoder.forward(visual, depth=depth)
         visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
 
         proprio = obs['proprio']

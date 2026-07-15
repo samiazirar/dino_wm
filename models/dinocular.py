@@ -7,11 +7,13 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import re
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
+from depth_contract import DepthContractError, load_native_depth_contract
 from .dinocular_backbone import BackendSpec, build_backbone, extract_features
 
 
@@ -288,6 +290,10 @@ class DinocularEncoder(nn.Module):
         allowed_outside_prefixes: Sequence[str] = (),
         allowed_missing_keys: Sequence[str] = (),
         depth_contract_status: str = "complete",
+        native_depth_contract_path: Optional[str] = None,
+        native_depth_contract_sha256: Optional[str] = None,
+        selected_cache_producer_sha256: Optional[str] = None,
+        neutralize_depth_at_encoder_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -308,6 +314,67 @@ class DinocularEncoder(nn.Module):
         self.allowed_outside_prefixes = tuple(allowed_outside_prefixes)
         self.allowed_missing_keys = tuple(allowed_missing_keys)
         self.depth_contract_status = str(depth_contract_status)
+        self.neutralize_depth_at_encoder_input = bool(
+            neutralize_depth_at_encoder_input
+        )
+        self._encoder_boundary_hooks: list[
+            Callable[["DinocularEncoder", torch.Tensor, torch.Tensor], None]
+        ] = []
+        self.native_depth_contract = None
+        if (native_depth_contract_path is None) != (
+            native_depth_contract_sha256 is None
+        ):
+            raise DepthContractError(
+                "native depth contract path and SHA-256 must be supplied together"
+            )
+        if native_depth_contract_path is not None:
+            native = load_native_depth_contract(
+                native_depth_contract_path,
+                native_depth_contract_sha256,
+                expected_checkpoint_sha256=self.checkpoint_sha256,
+            )
+            checkpoint_contract = native.manifest["checkpoint"]
+            configured = {
+                "backend": self.backend,
+                "factory": self.factory,
+                "checkpoint_key": self.checkpoint_key,
+                "state_prefix": self.state_prefix,
+            }
+            mismatches = {
+                key: (checkpoint_contract.get(key), value)
+                for key, value in configured.items()
+                if checkpoint_contract.get(key) != value
+            }
+            if mismatches:
+                raise DepthContractError(
+                    f"native contract/checkpoint configuration mismatch: {mismatches}"
+                )
+            self.native_depth_contract = native
+            if selected_cache_producer_sha256 is None:
+                raise DepthContractError(
+                    "native depth contract requires selected_cache_producer_sha256"
+                )
+            self.cache_binding = native.binding_for(selected_cache_producer_sha256)
+            self.depth_contract = dict(native.manifest)
+            self.depth_contract_status = "complete"
+            depth_mean = native.normalization_mean
+            depth_std = native.normalization_std
+            self.native_depth_contract_path = str(native.path)
+            self.native_depth_contract_sha256 = native.sha256
+            self.selected_cache_producer_sha256 = self.cache_binding.producer_sha256
+        else:
+            if selected_cache_producer_sha256 is not None:
+                raise DepthContractError(
+                    "selected cache producer requires a native depth contract"
+                )
+            self.cache_binding = None
+            self.native_depth_contract_path = None
+            self.native_depth_contract_sha256 = None
+            self.selected_cache_producer_sha256 = None
+        if self.neutralize_depth_at_encoder_input and self.native_depth_contract is None:
+            raise DepthContractError(
+                "neutral depth requires an explicit complete native depth contract"
+            )
         if self.depth_contract_status not in {"complete", "missing_from_gate0"}:
             raise ValueError(
                 "depth_contract_status must be 'complete' or 'missing_from_gate0'"
@@ -359,6 +426,58 @@ class DinocularEncoder(nn.Module):
         self.register_buffer(
             "depth_std", torch.tensor(float(depth_std), dtype=torch.float32), persistent=False
         )
+        if self.native_depth_contract is None:
+            cache_minimum, cache_maximum = 0.0, 1.0
+            neutral_depth, neutral_mask = 0.0, 0.0
+            affine_scale, affine_offset = 1.0, 0.0
+            clip_minimum, clip_maximum = 0.0, 1.0
+            self.depth_interpolation = "identity_224x224"
+        else:
+            cache_minimum = self.cache_binding.wire_minimum
+            cache_maximum = self.cache_binding.wire_maximum
+            neutral_depth = self.native_depth_contract.neutral_normalized_depth
+            neutral_mask = self.native_depth_contract.neutral_validity_mask
+            affine_scale = self.cache_binding.affine_scale
+            affine_offset = self.cache_binding.affine_offset
+            clip_minimum = self.cache_binding.clip_minimum
+            clip_maximum = self.cache_binding.clip_maximum
+            self.depth_interpolation = self.cache_binding.interpolation
+        self.register_buffer(
+            "depth_cache_range",
+            torch.tensor([cache_minimum, cache_maximum], dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "neutral_normalized_depth",
+            torch.tensor(neutral_depth, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "neutral_validity_mask",
+            torch.tensor(neutral_mask, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "cache_to_native_affine",
+            torch.tensor([affine_scale, affine_offset], dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "checkpoint_native_clip_range",
+            torch.tensor([clip_minimum, clip_maximum], dtype=torch.float32),
+            persistent=False,
+        )
+        self.input_metadata = {
+            "checkpoint_sha256": self.checkpoint_sha256,
+            "backend": self.backend,
+            "factory": self.factory,
+            "feature_key": self.feature_key,
+            "input_size": self.input_size,
+            "num_patches": self.num_patches,
+            "emb_dim": self.emb_dim,
+            "native_depth_contract_sha256": self.native_depth_contract_sha256,
+            "selected_cache_producer_sha256": self.selected_cache_producer_sha256,
+        }
 
         self.load_audit = load_backbone_checkpoint(
             backbone=self.backbone,
@@ -407,12 +526,118 @@ class DinocularEncoder(nn.Module):
             raise ValueError(
                 f"Depth gray must have shape [B,H,W] or [B,1,H,W], got {tuple(depth.shape)}"
             )
-        self._validate_finite_range(depth, 0.0, 1.0, "Depth gray")
+        depth_range = self.depth_cache_range.detach().cpu().tolist()
+        self._validate_finite_range(
+            depth, float(depth_range[0]), float(depth_range[1]), "Depth gray"
+        )
+        if self.native_depth_contract is not None:
+            affine = self.cache_to_native_affine.to(
+                device=depth.device, dtype=depth.dtype
+            )
+            depth = depth * affine[0] + affine[1]
+            clip_range = self.checkpoint_native_clip_range.to(
+                device=depth.device, dtype=depth.dtype
+            )
+            depth = torch.clamp(depth, min=clip_range[0], max=clip_range[1])
         mean = self.depth_mean.to(device=depth.device, dtype=depth.dtype)
         std = self.depth_std.to(device=depth.device, dtype=depth.dtype)
         return (depth - mean) / std
 
-    def forward(self, rgb: torch.Tensor, depth: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def prepare_depth_encoder_input(
+        self,
+        depth: torch.Tensor,
+        depth_validity_mask: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply native normalization and the final-boundary neutral intervention."""
+
+        if depth.ndim == 3:
+            depth = depth.unsqueeze(1)
+        if depth.ndim != 4 or depth.shape[1] != 1:
+            raise ValueError(
+                f"Depth gray must have shape [B,H,W] or [B,1,H,W], got {tuple(depth.shape)}"
+            )
+        if depth_validity_mask is None:
+            if self.native_depth_contract is not None:
+                raise ValueError(
+                    "native depth contract requires obs['depth_validity_mask']"
+                )
+            depth_validity_mask = torch.ones_like(depth)
+        elif depth_validity_mask.ndim == 3:
+            depth_validity_mask = depth_validity_mask.unsqueeze(1)
+        if tuple(depth_validity_mask.shape) != tuple(depth.shape):
+            raise ValueError(
+                "depth validity mask shape differs from depth: "
+                f"{tuple(depth_validity_mask.shape)} versus {tuple(depth.shape)}"
+            )
+        target_size = (self.input_size, self.input_size)
+        if self.depth_interpolation == "identity_224x224":
+            if tuple(depth.shape[-2:]) != target_size:
+                raise ValueError(
+                    f"identity depth interpolation requires spatial size {target_size}, "
+                    f"got {tuple(depth.shape[-2:])}"
+                )
+        elif self.depth_interpolation == "bilinear_align_corners_false":
+            depth = F.interpolate(
+                depth, size=target_size, mode="bilinear", align_corners=False
+            )
+            depth_validity_mask = F.interpolate(
+                depth_validity_mask, size=target_size, mode="nearest"
+            )
+        else:
+            raise RuntimeError(
+                f"unsupported manifest depth interpolation {self.depth_interpolation!r}"
+            )
+        if not torch.is_floating_point(depth_validity_mask):
+            raise TypeError("depth validity mask must be floating point")
+        self._validate_finite_range(
+            depth_validity_mask, 0.0, 1.0, "Depth validity mask"
+        )
+        if not torch.all(
+            (depth_validity_mask == 0.0) | (depth_validity_mask == 1.0)
+        ):
+            raise ValueError("depth validity mask must contain only exact 0 and 1")
+
+        normalized = self.preprocess_depth(depth)
+        neutral_depth = self.neutral_normalized_depth.to(
+            device=normalized.device, dtype=normalized.dtype
+        )
+        normalized = torch.where(
+            depth_validity_mask.to(dtype=torch.bool), normalized, neutral_depth
+        )
+        effective_mask = depth_validity_mask
+        if self.neutralize_depth_at_encoder_input:
+            normalized = torch.zeros_like(normalized) + neutral_depth
+            neutral_mask = self.neutral_validity_mask.to(
+                device=effective_mask.device, dtype=effective_mask.dtype
+            )
+            effective_mask = torch.zeros_like(effective_mask) + neutral_mask
+        normalized = torch.where(
+            effective_mask.to(dtype=torch.bool), normalized, neutral_depth
+        )
+        return normalized, effective_mask
+
+    def register_encoder_boundary_hook(
+        self,
+        hook: Callable[["DinocularEncoder", torch.Tensor, torch.Tensor], None],
+    ) -> Callable[[], None]:
+        """Observe the exact depth and validity tensors passed at the encoder boundary."""
+
+        if not callable(hook):
+            raise TypeError("encoder boundary hook must be callable")
+        self._encoder_boundary_hooks.append(hook)
+
+        def remove() -> None:
+            if hook in self._encoder_boundary_hooks:
+                self._encoder_boundary_hooks.remove(hook)
+
+        return remove
+
+    def forward(
+        self,
+        rgb: torch.Tensor,
+        depth: Optional[torch.Tensor] = None,
+        depth_validity_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.depth_contract_status != "complete":
             raise RuntimeError(
                 "Student checkpoint depth contract is missing from Gate 0; forward and "
@@ -433,14 +658,12 @@ class DinocularEncoder(nn.Module):
                 f"RGB spatial size must be {(self.input_size, self.input_size)}, "
                 f"got {tuple(rgb.shape[-2:])}"
             )
-        if tuple(depth.shape[-2:]) != (self.input_size, self.input_size):
-            raise ValueError(
-                f"Depth spatial size must be {(self.input_size, self.input_size)}, "
-                f"got {tuple(depth.shape[-2:])}"
-            )
-
         rgb_normalized = self.preprocess_rgb(rgb)
-        depth_normalized = self.preprocess_depth(depth)
+        depth_normalized, effective_validity_mask = self.prepare_depth_encoder_input(
+            depth, depth_validity_mask
+        )
+        for hook in tuple(self._encoder_boundary_hooks):
+            hook(self, depth_normalized, effective_validity_mask)
         features = extract_features(
             self.backbone, self.backend_spec, rgb_normalized, depth_normalized
         )

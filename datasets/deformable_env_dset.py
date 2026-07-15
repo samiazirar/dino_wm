@@ -6,6 +6,7 @@ from einops import rearrange
 from pathlib import Path
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, get_train_val_sliced
+from .depth_cache import DepthCacheReader, require_complete_depth_arguments
 decord.bridge.set_bridge("torch")
 
 def load_yaml(filename):
@@ -21,10 +22,12 @@ class DeformDataset(TrajDataset):
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
         action_scale=1.0,
+        depth_reader: Optional[DepthCacheReader] = None,
     ):
         self.data_path = Path(data_path) / object_name
         self.transform = transform
         self.normalize_action = normalize_action
+        self.depth_reader = depth_reader
         self.states = torch.load(
             self.data_path / "states.pth"
         ).float()  # (n_rollout, n_timestep, n_particles, 4)
@@ -106,6 +109,12 @@ class DeformDataset(TrajDataset):
         if self.transform:
             image = self.transform(image)
         obs = {"visual": image, "proprio": proprio}
+        if self.depth_reader is not None:
+            depth, validity = self.depth_reader.read(
+                split=None, episode=idx, frames=frames
+            )
+            obs["depth"] = depth
+            obs["depth_validity_mask"] = validity
         return obs, act, state, {} # infos is None
 
     def __getitem__(self, idx):
@@ -131,14 +140,51 @@ def load_deformable_dset_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    depth_cache_dir=None,
+    depth_cache_manifest_sha256=None,
+    depth_validation_path=None,
+    depth_validation_sha256=None,
+    native_depth_contract_path=None,
+    native_depth_contract_sha256=None,
+    depth_cache_producer_sha256=None,
+    depth_checkpoint_sha256=None,
 ):
+    depth_values = {
+        "depth_cache_dir": depth_cache_dir,
+        "depth_cache_manifest_sha256": depth_cache_manifest_sha256,
+        "depth_validation_path": depth_validation_path,
+        "depth_validation_sha256": depth_validation_sha256,
+        "native_depth_contract_path": native_depth_contract_path,
+        "native_depth_contract_sha256": native_depth_contract_sha256,
+        "depth_cache_producer_sha256": depth_cache_producer_sha256,
+        "depth_checkpoint_sha256": depth_checkpoint_sha256,
+    }
+    depth_reader = None
+    if require_complete_depth_arguments(**depth_values):
+        depth_reader = DepthCacheReader(
+            environment=object_name,
+            source_root=Path(data_path).resolve().parent,
+            cache_dir=depth_cache_dir,
+            cache_manifest_sha256=depth_cache_manifest_sha256,
+            validation_path=depth_validation_path,
+            validation_sha256=depth_validation_sha256,
+            native_contract_path=native_depth_contract_path,
+            native_contract_sha256=native_depth_contract_sha256,
+            expected_producer_sha256=depth_cache_producer_sha256,
+            expected_checkpoint_sha256=depth_checkpoint_sha256,
+        )
     dset = DeformDataset(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path,
         object_name=object_name,
         normalize_action=normalize_action,
+        depth_reader=depth_reader,
     )
+    if depth_reader is not None:
+        depth_reader.assert_dataset_coverage(
+            [(None, index, int(dset.get_seq_length(index))) for index in range(len(dset))]
+        )
     dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
         traj_dataset=dset,
         train_fraction=split_ratio,

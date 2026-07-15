@@ -19,4 +19,4 @@ depth_contract_status: complete
 native_depth_contract_path: ${oc.env:DINOCULAR_NATIVE_DEPTH_CONTRACT}
 native_depth_contract_sha256: ${oc.env:DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256}
 selected_cache_producer_sha256: ${oc.env:DINOCULAR_CACHE_PRODUCER_SHA256}
-neutralize_depth_at_encoder_input: false
+neutralize_depth_at_encoder_input: true

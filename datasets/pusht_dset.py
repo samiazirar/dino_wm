@@ -8,6 +8,7 @@ from decord import VideoReader
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, TrajSlicerDataset
 from typing import Optional, Callable, Any
+from .depth_cache import DepthCacheReader, require_complete_depth_arguments
 decord.bridge.set_bridge("torch")
 
 # precomputed dataset stats
@@ -28,6 +29,8 @@ class PushTDataset(TrajDataset):
         relative=True,
         action_scale=100.0,
         with_velocity: bool = True, # agent's velocity
+        depth_reader: Optional[DepthCacheReader] = None,
+        depth_split: Optional[str] = None,
     ):  
         self.data_path = Path(data_path)
         self.transform = transform
@@ -66,6 +69,8 @@ class PushTDataset(TrajDataset):
         self.proprios = self.states[..., :2].clone()  # For pusht, first 2 dim of states is proprio
         # load velocities and update states and proprios
         self.with_velocity = with_velocity
+        self.depth_reader = depth_reader
+        self.depth_split = depth_split
         if with_velocity:
             self.velocities = torch.load(self.data_path / "velocities.pth")
             self.velocities = self.velocities[:n].float()
@@ -119,6 +124,12 @@ class PushTDataset(TrajDataset):
         if self.transform:
             image = self.transform(image)
         obs = {"visual": image, "proprio": proprio}
+        if self.depth_reader is not None:
+            depth, validity = self.depth_reader.read(
+                split=self.depth_split, episode=idx, frames=frames
+            )
+            obs["depth"] = depth
+            obs["depth_validity_mask"] = validity
         return obs, act, state, {'shape': shape}
 
     def __getitem__(self, idx):
@@ -144,13 +155,47 @@ def load_pusht_slice_train_val(
     num_pred=0,
     frameskip=0,
     with_velocity=True,
+    depth_cache_dir=None,
+    depth_cache_manifest_sha256=None,
+    depth_validation_path=None,
+    depth_validation_sha256=None,
+    native_depth_contract_path=None,
+    native_depth_contract_sha256=None,
+    depth_cache_producer_sha256=None,
+    depth_checkpoint_sha256=None,
 ):
+    depth_values = {
+        "depth_cache_dir": depth_cache_dir,
+        "depth_cache_manifest_sha256": depth_cache_manifest_sha256,
+        "depth_validation_path": depth_validation_path,
+        "depth_validation_sha256": depth_validation_sha256,
+        "native_depth_contract_path": native_depth_contract_path,
+        "native_depth_contract_sha256": native_depth_contract_sha256,
+        "depth_cache_producer_sha256": depth_cache_producer_sha256,
+        "depth_checkpoint_sha256": depth_checkpoint_sha256,
+    }
+    depth_reader = None
+    if require_complete_depth_arguments(**depth_values):
+        depth_reader = DepthCacheReader(
+            environment="pusht",
+            source_root=Path(data_path).resolve().parent,
+            cache_dir=depth_cache_dir,
+            cache_manifest_sha256=depth_cache_manifest_sha256,
+            validation_path=depth_validation_path,
+            validation_sha256=depth_validation_sha256,
+            native_contract_path=native_depth_contract_path,
+            native_contract_sha256=native_depth_contract_sha256,
+            expected_producer_sha256=depth_cache_producer_sha256,
+            expected_checkpoint_sha256=depth_checkpoint_sha256,
+        )
     train_dset = PushTDataset(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path + "/train",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
+        depth_reader=depth_reader,
+        depth_split="train",
     )
     val_dset = PushTDataset(
         n_rollout=n_rollout,
@@ -158,7 +203,15 @@ def load_pusht_slice_train_val(
         data_path=data_path + "/val",
         normalize_action=normalize_action,
         with_velocity=with_velocity,
+        depth_reader=depth_reader,
+        depth_split="valid",
     )
+
+    if depth_reader is not None:
+        depth_reader.assert_dataset_coverage(
+            [("train", index, int(length)) for index, length in enumerate(train_dset.seq_lengths)]
+            + [("valid", index, int(length)) for index, length in enumerate(val_dset.seq_lengths)]
+        )
 
     num_frames = num_hist + num_pred
     train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip)

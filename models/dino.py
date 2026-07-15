@@ -87,8 +87,13 @@ class DinoV2Encoder(nn.Module):
         super().train(False if self.frozen else mode)
         return self
 
-    def forward(self, x: torch.Tensor, depth: Optional[torch.Tensor] = None):
-        del depth  # RGB-only baseline intentionally ignores the common depth input.
+    def forward(
+        self,
+        x: torch.Tensor,
+        depth: Optional[torch.Tensor] = None,
+        depth_validity_mask: Optional[torch.Tensor] = None,
+    ):
+        del depth, depth_validity_mask
         emb = self.base_model.forward_features(x)[self.feature_key]
         if self.latent_ndim == 1:
             emb = emb.unsqueeze(1)

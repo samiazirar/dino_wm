@@ -34,10 +34,18 @@ esac
 mkdir -p "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$HF_HOME"
 test -w "$TRITON_CACHE_DIR" -a -w "$XDG_CACHE_HOME" -a -w "$HF_HOME"
 
+python3 "$SUBMITTER" verify --manifest "$P3_CHAIN_MANIFEST"
+
 RUN_DIR=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field run_dir)
 TARGET_STEPS=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field target_steps)
 SEGMENT_STEPS=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field segment_steps)
 CHECKPOINT_EVERY=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field checkpoint_every_steps)
+RUN_CARD=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field run_card)
+RUN_CARD_SHA256=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field run_card_sha256)
+RUN_KIND=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field kind)
+P2_ENV=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field environment)
+P2_ARM=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field arm)
+SIF_SHA256=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field container_sha256)
 mapfile -t OVERRIDES < <(
     python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field overrides
 )
@@ -62,6 +70,13 @@ export PYTHONNOUSERSITE=1
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export WANDB_MODE=disabled
+export STRICT_P2_ENV=$P2_ENV
+export STRICT_P2_ARM=$P2_ARM
+export STRICT_P2_CONTAINER=$SIF
+export STRICT_P2_CONTAINER_SHA256=$SIF_SHA256
+export STRICT_P2_SLURM_WRAPPER=$PROJECT/code/dino_wm/tools/p3_step_segment.sbatch
+export STRICT_P2_IMMUTABLE_RUN_CARD=$RUN_CARD
+export STRICT_P2_IMMUTABLE_RUN_CARD_SHA256=$RUN_CARD_SHA256
 
 nvidia-smi
 sha256sum "$SIF"
@@ -79,6 +94,13 @@ setsid /usr/bin/apptainer exec --nv --writable-tmpfs \
     --env HF_HUB_OFFLINE=1 \
     --env TRANSFORMERS_OFFLINE=1 \
     --env WANDB_MODE=disabled \
+    --env STRICT_P2_ENV="$STRICT_P2_ENV" \
+    --env STRICT_P2_ARM="$STRICT_P2_ARM" \
+    --env STRICT_P2_CONTAINER="$STRICT_P2_CONTAINER" \
+    --env STRICT_P2_CONTAINER_SHA256="$STRICT_P2_CONTAINER_SHA256" \
+    --env STRICT_P2_SLURM_WRAPPER="$STRICT_P2_SLURM_WRAPPER" \
+    --env STRICT_P2_IMMUTABLE_RUN_CARD="$STRICT_P2_IMMUTABLE_RUN_CARD" \
+    --env STRICT_P2_IMMUTABLE_RUN_CARD_SHA256="$STRICT_P2_IMMUTABLE_RUN_CARD_SHA256" \
     --env DATASET_DIR="$PROJECT/data/raw" \
     --env DINOV2_REPO="$PROJECT/code/dinov2" \
     --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
@@ -104,6 +126,27 @@ if [ "$TRAIN_STATUS" -ne 0 ]; then
     printf 'Training process failed with status %s\n' "$TRAIN_STATUS" >&2
     exit "$TRAIN_STATUS"
 fi
+
+case "$RUN_KIND" in
+    p2-geometry)
+        /usr/bin/apptainer exec --nv --writable-tmpfs \
+            --bind "$PROJECT:$PROJECT" \
+            --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+            --env DATASET_DIR="$PROJECT/data/raw" \
+            --env DINOV2_REPO="$PROJECT/code/dinov2" \
+            --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
+            "$SIF" python "$PROJECT/code/dino_wm/tools/p2_harness_gate.py" geometry \
+            --run-card "$RUN_CARD" --run-dir "$RUN_DIR"
+        ;;
+    p2-timing)
+        /usr/bin/apptainer exec --nv --writable-tmpfs \
+            --bind "$PROJECT:$PROJECT" \
+            --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+            "$SIF" python "$PROJECT/code/dino_wm/tools/p2_harness_gate.py" timing \
+            --run-card "$RUN_CARD" --run-dir "$RUN_DIR"
+        ;;
+    *) ;;
+esac
 
 NEXT_JOB=$(
     python3 "$SUBMITTER" continue \
