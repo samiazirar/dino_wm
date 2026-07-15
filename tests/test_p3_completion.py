@@ -263,6 +263,25 @@ def test_training_ledger_is_exactly_once_and_rejects_gap_duplicate_or_drift(tmp_
         )
 
 
+def test_complete_training_ledger_rejects_over_target_growth(tmp_path):
+    path = tmp_path / "training_steps.jsonl"
+    for step in range(1, 101):
+        append_training_record(path, _training_row(step), target_steps=100)
+    marker_path = p3_completion.training_tail_index_path(path)
+    ledger_bytes = path.read_bytes()
+    marker_bytes = marker_path.read_bytes()
+
+    with pytest.raises(P3CompletionError, match=r"outside 1\.\.target_steps"):
+        append_training_record(path, _training_row(101), target_steps=100)
+
+    assert path.read_bytes() == ledger_bytes
+    assert marker_path.read_bytes() == marker_bytes
+    existing = json.loads(ledger_bytes.splitlines()[-1])
+    assert append_training_record(
+        path, _training_row(100), target_steps=100
+    ) == existing
+
+
 def test_consecutive_training_appends_do_not_full_scan_or_revalidate(
     tmp_path, monkeypatch
 ):

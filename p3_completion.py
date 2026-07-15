@@ -692,9 +692,16 @@ def _validate_new_training_record(
     target_steps: int,
     provenance: Mapping[str, Any],
 ) -> int:
-    step = int(value.get("global_step", -1))
+    step = value.get("global_step")
     if value.get("schema") != TRAINING_RECORD_SCHEMA:
         raise P3CompletionError("new training record has an unknown schema")
+    if (
+        not isinstance(step, int)
+        or isinstance(step, bool)
+        or step < 1
+        or step > int(target_steps)
+    ):
+        raise P3CompletionError("new training record step is outside 1..target_steps")
     if not is_source_commit(value.get("source_commit")) or not all(
         is_sha256(value.get(field))
         for field in (
