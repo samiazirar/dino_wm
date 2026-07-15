@@ -271,6 +271,60 @@ class StepCheckpointManager:
         self.last_history_record = matches[-1]
         return matches[-1]
 
+    def enrich_reasons(self, step: int, reasons: Sequence[str]) -> Mapping[str, Any]:
+        records = load_checkpoint_history(self.history_path)
+        matches = [record for record in records if record["step"] == int(step)]
+        if not matches or records[-1]["step"] != int(step):
+            raise P3CompletionError(
+                f"checkpoint reason enrichment is not at latest step {step}"
+            )
+        latest = matches[-1]
+        checkpoint_path = self.directory / str(latest["filename"])
+        if (
+            not checkpoint_path.is_file()
+            or file_sha256(checkpoint_path) != latest["checkpoint_sha256"]
+        ):
+            raise P3CompletionError(
+                f"checkpoint reason enrichment cannot verify step {step} bytes"
+            )
+        combined_reasons = sorted(
+            {
+                *(reason for record in matches for reason in record["reasons"]),
+                *(str(reason) for reason in reasons),
+            }
+        )
+        enriched = append_checkpoint_history(
+            self.history_path,
+            step=int(step),
+            filename=str(latest["filename"]),
+            checkpoint_sha256=str(latest["checkpoint_sha256"]),
+            content_sha256=str(latest["content_sha256"]),
+            reasons=combined_reasons,
+            source_commit=latest.get("source_commit"),
+            immutable_run_card_sha256=latest.get("immutable_run_card_sha256"),
+            dataset_order_sha256=latest.get("dataset_order_sha256"),
+        )
+        index = self._read_index()
+        if index is None:
+            raise P3CompletionError(
+                "checkpoint reason enrichment has no rollback index"
+            )
+        matching_entries = [
+            entry
+            for entry in index["checkpoints"]
+            if entry.get("step") == int(step)
+            and entry.get("file") == latest["filename"]
+            and entry.get("sha256") == latest["checkpoint_sha256"]
+        ]
+        if len(matching_entries) != 1:
+            raise P3CompletionError(
+                "checkpoint reason enrichment differs from rollback index"
+            )
+        matching_entries[0]["history_record_sha256"] = enriched["record_sha256"]
+        atomic_write_json(self.index_path, index)
+        self.last_history_record = enriched
+        return enriched
+
     def save(
         self,
         payload: Mapping[str, Any],
@@ -282,29 +336,33 @@ class StepCheckpointManager:
         self.directory.mkdir(parents=True, exist_ok=True)
         filename = f"step_{step:09d}.pth"
         final_path = self.directory / filename
+        content_digest = nested_state_sha256(dict(payload))
+        same_step = [
+            record
+            for record in load_checkpoint_history(self.history_path)
+            if record["step"] == int(step)
+        ]
+        if same_step:
+            latest = same_step[-1]
+            if (
+                latest.get("filename") != filename
+                or latest.get("content_sha256") != content_digest
+                or latest.get("source_commit") != payload.get("source_commit")
+                or latest.get("immutable_run_card_sha256")
+                != payload.get("immutable_run_card_sha256")
+                or latest.get("dataset_order_sha256")
+                != payload.get("dataset_order_sha256")
+            ):
+                raise P3CompletionError(
+                    f"checkpoint step {step} would create a divergent duplicate"
+                )
+            self.enrich_reasons(step, reasons)
+            return final_path, str(latest["checkpoint_sha256"])
         temporary = self.directory / f".{filename}.tmp.{os.getpid()}"
         torch.save(dict(payload), temporary)
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
         digest = file_sha256(temporary)
-        content_digest = nested_state_sha256(dict(payload))
-        existing_history = next(
-            (
-                record
-                for record in load_checkpoint_history(self.history_path)
-                if record["step"] == int(step)
-            ),
-            None,
-        )
-        if existing_history is not None and (
-            existing_history.get("filename") != filename
-            or existing_history.get("checkpoint_sha256") != digest
-            or existing_history.get("content_sha256") != content_digest
-        ):
-            temporary.unlink(missing_ok=True)
-            raise P3CompletionError(
-                f"checkpoint step {step} would create a divergent duplicate"
-            )
         os.replace(temporary, final_path)
 
         history_record = append_checkpoint_history(

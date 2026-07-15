@@ -733,14 +733,10 @@ class Trainer:
 
     def save_step_checkpoint(self, reasons):
         if self._last_saved_step == self.global_step:
-            normalized = sorted(set(str(reason) for reason in reasons))
-            existing = (
-                []
-                if self._last_checkpoint_history_record is None
-                else list(self._last_checkpoint_history_record["reasons"])
+            self._last_checkpoint_history_record = (
+                self.checkpoint_manager.enrich_reasons(self.global_step, reasons)
             )
-            if normalized == existing:
-                return self._last_checkpoint_path, self._last_checkpoint_sha256
+            return self._last_checkpoint_path, self._last_checkpoint_sha256
         components = self._model_components()
         optimizers = self._optimizers()
         optimizer_states = {
@@ -1315,17 +1311,14 @@ class Trainer:
             final_reasons.append("SEGMENT_BOUNDARY")
         if self.global_step == target_steps:
             final_reasons.append("EXACT_TARGET")
-        stop_reason = None
         if self._stop_requested:
-            stop_reason = "USR1" if self._stop_signal == "SIGUSR1" else "SIGNAL_STOP"
-            final_reasons.append(stop_reason)
+            final_reasons.append(
+                "USR1" if self._stop_signal == "SIGUSR1" else "SIGNAL_STOP"
+            )
         if self._last_saved_step != self.global_step:
             self.save_step_checkpoint(tuple(final_reasons or ["LOADER_STOP"]))
-        elif (
-            stop_reason is not None
-            and stop_reason not in self._last_checkpoint_history_record["reasons"]
-        ):
-            self.save_step_checkpoint((stop_reason,))
+        elif final_reasons:
+            self.save_step_checkpoint(tuple(final_reasons))
         if self.global_step == target_steps:
             status = "TARGET_REACHED"
         elif self._stop_requested:

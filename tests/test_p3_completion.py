@@ -92,7 +92,10 @@ def test_checkpoint_history_records_every_reason_and_duplicate_is_idempotent(tmp
         for row in load_checkpoint_history(manager.history_path)
         if row["step"] == len(required)
     ]
-    assert [row["reasons"] for row in same_step] == [["LOADER_STOP"], ["USR1"]]
+    assert [row["reasons"] for row in same_step] == [
+        ["LOADER_STOP"],
+        ["LOADER_STOP", "USR1"],
+    ]
 
     coalesced_step = len(required) + 1
     coalesced_payload = {

@@ -272,8 +272,8 @@ def append_checkpoint_history(
             raise P3CompletionError(
                 f"checkpoint step {step} would create a divergent duplicate"
             )
-        if existing.get("reasons") == normalized_reasons:
-            return existing
+    if same_step and same_step[-1].get("reasons") == normalized_reasons:
+        return same_step[-1]
     if records and int(step) < int(records[-1]["step"]):
         raise P3CompletionError("checkpoint history step order moved backwards")
     record = {

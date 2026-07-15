@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 import pytest
 import torch
 
+from p3_completion import load_checkpoint_history
 from train import Trainer
 from tools.submit_p3_chain import verify_progress_evidence
 from training_resume import (
@@ -202,6 +203,94 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
             trainer._last_checkpoint_path,
             trainer._last_checkpoint_sha256,
         )
+
+
+def test_post_checkpoint_usr1_race_enriches_reasons_without_rewriting(tmp_path):
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    scheduler = SerializableConstantScheduler(optimizer)
+    trainer = object.__new__(Trainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "saved_folder": str(tmp_path),
+            "gpu_batch_size": 4,
+            "training": {
+                "target_steps": 5,
+                "segment_steps": 5,
+                "checkpoint_every_steps": 1,
+                "test_signal_after_step": None,
+                "timing_output": None,
+                "seed": 1,
+            },
+            "env": {"num_workers": 0},
+        }
+    )
+    trainer.datasets = {"train": TinyStepDataset()}
+    trainer.p3_completion_enabled = False
+    trainer.accelerator = SimpleNamespace(prepare=lambda loader: loader)
+    trainer.global_step = 0
+    trainer.epoch = 0
+    trainer.last_step_loss = None
+    trainer._resume_rng_state = None
+    trainer._stop_requested = False
+    trainer._stop_signal = None
+    trainer._last_saved_step = None
+    trainer._last_checkpoint_path = None
+    trainer._last_checkpoint_sha256 = None
+    trainer._last_checkpoint_history_record = None
+    trainer._last_checkpoint_state_hashes = None
+    trainer._loaded_checkpoint_metadata = None
+    trainer.source_commit = "f" * 40
+    trainer.resume_config_sha256 = "b" * 64
+    trainer.immutable_run_card_sha256 = "a" * 64
+    trainer.dataset_order_sha256 = "c" * 64
+    trainer.checkpoint_manager = StepCheckpointManager(
+        tmp_path / "checkpoints" / "steps"
+    )
+    trainer.schedulers = {"model": scheduler}
+    trainer._model_components = lambda: {"model": model}
+    trainer._optimizers = lambda: {"model": optimizer}
+    trainer._train_one_step = lambda _data: float(trainer.global_step + 1)
+
+    checkpoint_identity = None
+    injected = False
+
+    def save_with_race(reasons):
+        nonlocal checkpoint_identity, injected
+        path, digest = Trainer.save_step_checkpoint(trainer, reasons)
+        identity = (path.stat().st_ino, path.stat().st_mtime_ns, digest)
+        if not injected and reasons == ("CONFIGURED_INTERVAL",):
+            checkpoint_identity = identity
+            injected = True
+            trainer._stop_requested = True
+            trainer._stop_signal = "SIGUSR1"
+        elif "USR1" in reasons:
+            assert identity == checkpoint_identity
+        return path, digest
+
+    trainer.save_step_checkpoint = save_with_race
+    Trainer.run_steps(trainer)
+
+    assert injected is True
+    progress = json.loads((tmp_path / "progress.json").read_text())
+    assert progress["status"] == "SIGNAL_CHECKPOINTED"
+    assert progress["global_step"] == 1
+    history = load_checkpoint_history(trainer.checkpoint_manager.history_path)
+    assert [record["reasons"] for record in history] == [
+        ["CONFIGURED_INTERVAL"],
+        ["CONFIGURED_INTERVAL", "USR1"],
+    ]
+    index = json.loads(trainer.checkpoint_manager.index_path.read_text())
+    assert (
+        index["checkpoints"][0]["history_record_sha256"] == history[-1]["record_sha256"]
+    )
+
+    history_count = len(history)
+    path, digest = Trainer.save_step_checkpoint(trainer, ("USR1",))
+    assert (path.stat().st_ino, path.stat().st_mtime_ns, digest) == checkpoint_identity
+    assert len(load_checkpoint_history(trainer.checkpoint_manager.history_path)) == (
+        history_count
+    )
 
 
 def test_step_sampler_split_matches_straight():
