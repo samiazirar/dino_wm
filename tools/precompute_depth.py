@@ -60,6 +60,11 @@ MAP_SIZE = 1 << 40  # sparse 1 TiB
 OUTPUT_SHAPE = (224, 224)
 WIRE_DTYPE = np.dtype("<f2")
 ZSTD_LEVEL = 3
+DINOV2_HUB_REPOSITORY = "facebookresearch/dinov2"
+DINOV2_HUB_CACHE_DIRNAME = "facebookresearch_dinov2_main"
+DINOV2_HUBCONF_SHA256 = (
+    "c1f5090e78ff940b72c076d2bf9c0310d1707c946b3d10e2d6f2b0bdf56a6f64"
+)
 
 
 class ContractError(RuntimeError):
@@ -88,6 +93,53 @@ def sha256_file(path: Path, block_size: int = 16 << 20) -> str:
             if not block:
                 return digest.hexdigest()
             digest.update(block)
+
+
+def verify_local_dinov2_hub(torch_module: Any) -> dict[str, Any]:
+    """Fail closed unless the pinned local DINOv2 Torch Hub source is present."""
+
+    repo = Path(torch_module.hub.get_dir()) / DINOV2_HUB_CACHE_DIRNAME
+    hubconf = repo / "hubconf.py"
+    if not repo.is_dir():
+        raise ContractError(f"missing local DINOv2 Torch Hub repository {repo}")
+    if not hubconf.is_file():
+        raise ContractError(f"missing local DINOv2 Torch Hub entrypoint {hubconf}")
+    hubconf_sha256 = sha256_file(hubconf)
+    if hubconf_sha256 != DINOV2_HUBCONF_SHA256:
+        raise ContractError(
+            f"local DINOv2 hubconf mismatch at {hubconf}: sha256={hubconf_sha256}; "
+            f"expected {DINOV2_HUBCONF_SHA256}"
+        )
+    return {
+        "requested_repository": DINOV2_HUB_REPOSITORY,
+        "repo_or_dir": str(repo),
+        "source": "local",
+        "hubconf_sha256": hubconf_sha256,
+    }
+
+
+def load_loop_detector_model_offline(loop_detector: Any, torch_module: Any) -> None:
+    """Load SALAD while redirecting only its pinned DINOv2 Hub request locally."""
+
+    local_hub = verify_local_dinov2_hub(torch_module)
+    original_load = torch_module.hub.load
+
+    def redirected_load(
+        repo_or_dir: str, model: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        if repo_or_dir != DINOV2_HUB_REPOSITORY:
+            return original_load(repo_or_dir, model, *args, **kwargs)
+        local_kwargs = dict(kwargs)
+        local_kwargs["source"] = "local"
+        return original_load(
+            local_hub["repo_or_dir"], model, *args, **local_kwargs
+        )
+
+    torch_module.hub.load = redirected_load
+    try:
+        loop_detector.load_model()
+    finally:
+        torch_module.hub.load = original_load
 
 
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -1007,6 +1059,7 @@ class OfficialDA3StreamingProducer:
         self._streaming = streaming
         self._torch = torch
         self._config = config
+        self._dinov2_hub_provenance = verify_local_dinov2_hub(torch)
         self._work_root = work_root.resolve() if work_root is not None else None
         if self._work_root is not None:
             self._work_root.mkdir(parents=True, exist_ok=True)
@@ -1041,6 +1094,7 @@ class OfficialDA3StreamingProducer:
                 "missing_keys": list(incompatible.missing_keys),
                 "unexpected_keys": list(incompatible.unexpected_keys),
             },
+            "dinov2_hub": self._dinov2_hub_provenance,
         }
 
     def _new_engine(self, image_dir: Path, output_dir: Path) -> Any:
@@ -1090,7 +1144,7 @@ class OfficialDA3StreamingProducer:
         engine.loop_detector = streaming.LoopDetector(
             image_dir=str(image_dir), output=loop_info, config=config
         )
-        engine.loop_detector.load_model()
+        load_loop_detector_model_offline(engine.loop_detector, torch)
         return engine
 
     def infer_trajectory(
