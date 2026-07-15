@@ -931,7 +931,9 @@ class Trainer:
             raise RuntimeError(str(exc)) from exc
 
     def _p3_validation_loss(self, *, maximum_batches=None):
-        model_was_training = self.model.training
+        module_training_modes = [
+            (module, bool(module.training)) for module in self.model.modules()
+        ]
         rng_state = capture_rng_state()
         before = {
             "parameter_sha256": parameter_sha256(self._model_components()),
@@ -976,8 +978,14 @@ class Trainer:
                     numerator += float(loss.detach().to(torch.float64).cpu()) * count
                     element_count += count
         finally:
+            for module, was_training in module_training_modes:
+                module.training = was_training
             restore_rng_state(rng_state)
-            self.model.train(model_was_training)
+        if any(
+            module.training is not was_training
+            for module, was_training in module_training_modes
+        ):
+            raise RuntimeError("held-out validation did not restore module modes")
         after = {
             "parameter_sha256": parameter_sha256(self._model_components()),
             "optimizer_sha256": nested_state_sha256(
@@ -996,7 +1004,7 @@ class Trainer:
         }
         if before != after:
             raise RuntimeError(
-                "held-out validation did not restore model/optimizer/RNG state"
+                "held-out validation did not restore model/optimizer/scheduler/RNG state"
             )
         mean = numerator / element_count if element_count else float("nan")
         if not np.isfinite(numerator) or not np.isfinite(mean) or element_count <= 0:

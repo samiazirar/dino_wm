@@ -30,6 +30,49 @@ class TinyStepDataset(torch.utils.data.Dataset):
         return torch.tensor([index]), torch.tensor([0.0]), torch.tensor([index])
 
 
+class MixedModeValidationModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = torch.nn.Sequential(torch.nn.Linear(1, 1))
+        self.predictor = torch.nn.Linear(1, 1)
+        self.concat_dim = 0
+        self.action_dim = 1
+        self.forward_modes = []
+
+    def forward(self, _obs, _act):
+        self.forward_modes.append(tuple(module.training for module in self.modules()))
+        value = self.predictor(self.encoder(torch.ones(1, 1)))
+        z_pred = value.reshape(1, 1, 1, 1).expand(1, 1, 3, 1)
+        loss = z_pred[:, :, :-1, :].square().mean()
+        return z_pred, None, None, loss, {"loss": loss}
+
+
+def test_p3_validation_restores_every_mixed_module_mode():
+    model = MixedModeValidationModel()
+    model.train()
+    model.encoder.eval()
+    model.encoder[0].train()
+    model.predictor.eval()
+    modes_before = tuple(module.training for module in model.modules())
+    assert len(set(modes_before)) == 2
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    scheduler = SerializableConstantScheduler(optimizer)
+    trainer = object.__new__(Trainer)
+    trainer.model = model
+    trainer.p3_validation_loader = [(None, None, None)]
+    trainer._model_components = lambda: {"model": model}
+    trainer._optimizers = lambda: {"model": optimizer}
+    trainer.schedulers = {"model": scheduler}
+
+    numerator, count, mean, _hashes = Trainer._p3_validation_loss(trainer)
+
+    assert model.forward_modes == [(False,) * len(modes_before)]
+    assert tuple(module.training for module in model.modules()) == modes_before
+    assert count == 2
+    assert numerator == pytest.approx(mean * count)
+
+
 @pytest.mark.parametrize(
     (
         "start_step",
