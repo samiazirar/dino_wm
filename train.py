@@ -731,7 +731,7 @@ class Trainer:
         self._loaded_checkpoint_metadata = checkpoint
         log.info("Resuming at optimizer step %d from %s", self.global_step, path)
 
-    def save_step_checkpoint(self, reasons=("LEGACY_CALL",)):
+    def save_step_checkpoint(self, reasons):
         if self._last_saved_step == self.global_step:
             normalized = sorted(set(str(reason) for reason in reasons))
             existing = (

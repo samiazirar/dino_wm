@@ -146,7 +146,7 @@ def test_run_steps_saves_every_epoch_without_changing_segment_semantics(
 
     saved_payloads = []
 
-    def save_and_record(reasons=("LEGACY_CALL",)):
+    def save_and_record(reasons):
         previous_step = trainer._last_saved_step
         path, digest = Trainer.save_step_checkpoint(trainer, reasons)
         if trainer._last_saved_step != previous_step:

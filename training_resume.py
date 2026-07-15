@@ -275,7 +275,7 @@ class StepCheckpointManager:
         self,
         payload: Mapping[str, Any],
         step: int,
-        reasons: Sequence[str] = ("LEGACY_CALL",),
+        reasons: Sequence[str],
     ) -> tuple[Path, str]:
         if payload.get("schema") != CHECKPOINT_SCHEMA:
             raise ValueError("Refusing to save an unknown checkpoint schema")

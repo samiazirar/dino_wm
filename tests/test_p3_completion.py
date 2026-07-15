@@ -57,12 +57,15 @@ def test_percent_mapping_uses_exact_ceiling_rule_and_unique_target_points():
 def test_checkpoint_history_records_every_reason_and_duplicate_is_idempotent(tmp_path):
     manager = StepCheckpointManager(tmp_path)
     required = [
+        "INITIAL_STATE",
         "CONFIGURED_INTERVAL",
         "COMPLETE_EPOCH",
         "SEGMENT_BOUNDARY",
         "USR1",
+        "SIGNAL_STOP",
         "EXACT_TARGET",
         "INTEGER_PERCENT",
+        "LOADER_STOP",
     ]
     for step, reason in enumerate(required, 1):
         payload = {
@@ -89,16 +92,52 @@ def test_checkpoint_history_records_every_reason_and_duplicate_is_idempotent(tmp
         for row in load_checkpoint_history(manager.history_path)
         if row["step"] == len(required)
     ]
-    assert [row["reasons"] for row in same_step] == [["INTEGER_PERCENT"], ["USR1"]]
+    assert [row["reasons"] for row in same_step] == [["LOADER_STOP"], ["USR1"]]
+
+    coalesced_step = len(required) + 1
+    coalesced_payload = {
+        "schema": CHECKPOINT_SCHEMA,
+        "global_step": coalesced_step,
+        "source_commit": "f" * 40,
+        "immutable_run_card_sha256": "a" * 64,
+        "dataset_order_sha256": "b" * 64,
+        "state": torch.tensor([coalesced_step]),
+    }
+    coalesced_reasons = (
+        "SEGMENT_BOUNDARY",
+        "EXACT_TARGET",
+        "INTEGER_PERCENT",
+    )
+    coalesced_path, coalesced_digest = manager.save(
+        coalesced_payload,
+        coalesced_step,
+        reasons=coalesced_reasons,
+    )
+    repeated_path, repeated_digest = manager.save(
+        coalesced_payload,
+        coalesced_step,
+        reasons=tuple(reversed(coalesced_reasons)),
+    )
+    assert (repeated_path, repeated_digest) == (
+        coalesced_path,
+        coalesced_digest,
+    )
+    coalesced_records = [
+        row
+        for row in load_checkpoint_history(manager.history_path)
+        if row["step"] == coalesced_step
+    ]
+    assert len(coalesced_records) == 1
+    assert coalesced_records[0]["reasons"] == sorted(coalesced_reasons)
     assert (
         json.loads(manager.history_path.read_text())["schema"]
         == CHECKPOINT_HISTORY_SCHEMA
     )
     assert len(list(tmp_path.glob("step_*.pth"))) == 2
-    divergent = dict(payload)
+    divergent = dict(coalesced_payload)
     divergent["state"] = torch.tensor([-1])
     with pytest.raises(P3CompletionError, match="divergent duplicate"):
-        manager.save(divergent, len(required), reasons=(required[-1],))
+        manager.save(divergent, coalesced_step, reasons=coalesced_reasons)
 
 
 def _entry(environment: str, partition: str, episode: int, start: int):
