@@ -577,7 +577,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
     evidence = {
         "source_commit": "f" * 40,
         "source_file_sha256": {"train.py": "a" * 64},
-        "artifacts": {},
+        "artifacts": spec["artifacts"],
         "container": {
             "path": spec["container"]["path"],
             "sha256": spec["container"]["sha256"],
@@ -672,6 +672,17 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
         }
         assert p4_card.get("depth_inputs") == p3_card.get("depth_inputs")
         assert p4_card["environment_variables"] == p3_card["environment_variables"]
+        expected_environment = {"DINOV2_REPO", "DINOV2_VITS14_WEIGHTS"}
+        if p4_card["arm"] != "dino_pinned":
+            expected_environment.update(
+                {
+                    "DINOCULAR_STUDENT_WEIGHTS",
+                    "DINOCULAR_NATIVE_DEPTH_CONTRACT",
+                    "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256",
+                    "DINOCULAR_CACHE_PRODUCER_SHA256",
+                }
+            )
+        assert set(p4_card["environment_variables"]) == expected_environment
         assert p4_card["overrides"] == p3_card["overrides"]
         assert p4_card["config_sha256"] == p3_card["config_sha256"]
 
@@ -950,6 +961,59 @@ def test_all_run_card_container_invocations_forward_dinocular_environment():
     assert "--field arm" in matrix_wrapper
 
 
+DINOCULAR_TEST_ENVIRONMENT = {
+    "DINOCULAR_STUDENT_WEIGHTS": "/pinned/student.pth",
+    "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/pinned/native.json",
+    "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "a" * 64,
+    "DINOCULAR_CACHE_PRODUCER_SHA256": "b" * 64,
+}
+
+
+def _run_container_environment_helper(arm, environment, *, check):
+    helper = Path(__file__).resolve().parents[1] / "tools/dinocular_container_env.sh"
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; build_dinocular_container_env "$2"; '
+                "if ((${#DINOCULAR_CONTAINER_ENV[@]})); then "
+                'printf "%s\\n" "${DINOCULAR_CONTAINER_ENV[@]}"; fi'
+            ),
+            "bash",
+            str(helper),
+            arm,
+        ],
+        env=environment,
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_dino_pinned_container_environment_needs_no_dinocular_variables():
+    environment = os.environ.copy()
+    for key in DINOCULAR_TEST_ENVIRONMENT:
+        environment.pop(key, None)
+    completed = _run_container_environment_helper(
+        "dino_pinned", environment, check=True
+    )
+    assert completed.stdout == ""
+
+
+@pytest.mark.parametrize("arm", ["dinocular", "dinocular_zerodepth"])
+def test_dinocular_arms_container_environment_contains_exact_values(arm):
+    environment = os.environ.copy()
+    environment.update(DINOCULAR_TEST_ENVIRONMENT)
+    completed = _run_container_environment_helper(arm, environment, check=True)
+    assert completed.stdout.splitlines() == [
+        value
+        for key, path in DINOCULAR_TEST_ENVIRONMENT.items()
+        for value in ("--env", f"{key}={path}")
+    ]
+
+
+@pytest.mark.parametrize("arm", ["dinocular", "dinocular_zerodepth"])
 @pytest.mark.parametrize(
     ("missing", "message"),
     [
@@ -962,64 +1026,15 @@ def test_all_run_card_container_invocations_forward_dinocular_environment():
         ("DINOCULAR_CACHE_PRODUCER_SHA256", "producer hash is required"),
     ],
 )
-def test_dinocular_container_environment_fails_closed_when_missing(missing, message):
-    helper = Path(__file__).resolve().parents[1] / "tools/dinocular_container_env.sh"
+def test_dinocular_arms_container_environment_fails_closed_when_missing(
+    arm, missing, message
+):
     environment = os.environ.copy()
-    environment.update(
-        {
-            "DINOCULAR_STUDENT_WEIGHTS": "/pinned/student.pth",
-            "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/pinned/native.json",
-            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "a" * 64,
-            "DINOCULAR_CACHE_PRODUCER_SHA256": "b" * 64,
-        }
-    )
+    environment.update(DINOCULAR_TEST_ENVIRONMENT)
     environment.pop(missing)
-    completed = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; build_dinocular_container_env dinocular',
-            "bash",
-            str(helper),
-        ],
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_container_environment_helper(arm, environment, check=False)
     assert completed.returncode != 0
     assert message in completed.stderr
-
-
-def test_dinocular_container_environment_contains_exact_required_values():
-    helper = Path(__file__).resolve().parents[1] / "tools/dinocular_container_env.sh"
-    environment = os.environ.copy()
-    expected = {
-        "DINOCULAR_STUDENT_WEIGHTS": "/pinned/student.pth",
-        "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/pinned/native.json",
-        "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "a" * 64,
-        "DINOCULAR_CACHE_PRODUCER_SHA256": "b" * 64,
-    }
-    environment.update(expected)
-    completed = subprocess.run(
-        [
-            "bash",
-            "-c",
-            (
-                'source "$1"; build_dinocular_container_env dinocular; '
-                'printf "%s\\n" "${DINOCULAR_CONTAINER_ENV[@]}"'
-            ),
-            "bash",
-            str(helper),
-        ],
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert completed.stdout.splitlines() == [
-        value for key, path in expected.items() for value in ("--env", f"{key}={path}")
-    ]
 
 
 TIMING_WINDOWS = {

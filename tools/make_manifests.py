@@ -55,7 +55,9 @@ def _parse_int_map(value: str) -> dict[str, int]:
     return result
 
 
-def _resolve_inputs(args: argparse.Namespace) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+def _resolve_inputs(
+    args: argparse.Namespace,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     spec = load_yaml(args.spec)
     validate_spec(spec)
     contract_path = args.contracts_index or Path(str(spec["contracts_index"]))
@@ -102,7 +104,6 @@ def _base_card(
         "environment_variables": {
             "DINOV2_REPO": f"{spec['study_root']}/code/dinov2",
             "DINOV2_VITS14_WEIGHTS": spec["artifacts"]["dinov2"]["path"],
-            "DINOCULAR_STUDENT_WEIGHTS": spec["artifacts"]["dinocular_student"]["path"],
         },
     }
 
@@ -111,18 +112,15 @@ def _depth_overrides(card: dict[str, Any], inputs: Mapping[str, Any]) -> None:
     card["depth_inputs"] = copy.deepcopy(dict(inputs))
     card["environment_variables"].update(
         {
+            "DINOCULAR_STUDENT_WEIGHTS": card["artifacts"]["dinocular_student"]["path"],
             "DINOCULAR_NATIVE_DEPTH_CONTRACT": inputs["native_contract_path"],
-            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": inputs[
-                "native_contract_sha256"
-            ],
+            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": inputs["native_contract_sha256"],
             "DINOCULAR_CACHE_PRODUCER_SHA256": inputs["producer_sha256"],
         }
     )
 
 
-def _training_overrides(
-    spec: Mapping[str, Any], card: dict[str, Any]
-) -> list[str]:
+def _training_overrides(spec: Mapping[str, Any], card: dict[str, Any]) -> list[str]:
     environment = str(card["environment"])
     arm = str(card["arm"])
     env_record = spec["environments"][environment]
@@ -200,7 +198,9 @@ def _segment_record(
         policy=spec["segment_sizing"],
     )
     if record.get("timing_source_commit") != evidence["source_commit"]:
-        raise HarnessError("timing summary and materialized run cards use different commits")
+        raise HarnessError(
+            "timing summary and materialized run cards use different commits"
+        )
     return record
 
 
@@ -320,11 +320,15 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
     if tuple(_parse_csv(args.encoders)) != LOCKED_ARMS:
         raise HarnessError("training matrix must contain exactly three locked arms")
     if tuple(_parse_csv(args.envs)) != LOCKED_ENVS:
-        raise HarnessError("training matrix must contain exactly four locked environments")
+        raise HarnessError(
+            "training matrix must contain exactly four locked environments"
+        )
     if tuple(int(value) for value in _parse_csv(args.seeds)) != LOCKED_SEEDS:
         raise HarnessError("training matrix must contain exactly seeds 1,2,3")
     if args.batch_size != 32 or args.predictor_lr != 0.00005 or args.decoder != "off":
-        raise HarnessError("training batch, LR, or decoder differs from the locked protocol")
+        raise HarnessError(
+            "training batch, LR, or decoder differs from the locked protocol"
+        )
     if _parse_int_map(args.target_steps) != LOCKED_TARGETS:
         raise HarnessError("training target-step map differs from the locked protocol")
     if _parse_int_map(args.frameskips) != LOCKED_FRAMESKIPS:
@@ -357,9 +361,7 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
                     environment=environment,
                     target_steps=card["target_steps"],
                 )
-                card["segment_steps"] = card["segment_sizing"][
-                    "derived_segment_steps"
-                ]
+                card["segment_steps"] = card["segment_sizing"]["derived_segment_steps"]
                 card["producer_decision"] = {
                     "path": str(args.producer_decision.resolve()),
                     "sha256": sha256_file(args.producer_decision),
@@ -387,7 +389,9 @@ def _fixed_manifest_record(directory: Path, environment: str) -> Mapping[str, An
         or metadata.get("frameskip") != LOCKED_FRAMESKIPS[environment]
         or metadata.get("horizons") != LOCKED_HORIZONS[environment]
     ):
-        raise HarnessError(f"fixed evaluation manifest contract differs for {environment}")
+        raise HarnessError(
+            f"fixed evaluation manifest contract differs for {environment}"
+        )
     return {
         "path": require_real_marvin_path(str(path), f"{environment} manifest"),
         "sha256": sha256_file(path),
