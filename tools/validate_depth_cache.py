@@ -82,6 +82,8 @@ RANGE_SAMPLE_FRAMES = 4096
 TEMPORAL_SAMPLE_PAIRS = 4096
 RECOMPUTE_FRACTION = 0.01
 RECOMPUTE_MAX_ABS = 1e-3
+LOW_STD_MAP_FRACTION_THRESHOLD = 0.01
+LOW_STD_CHARACTERIZATION_ENVIRONMENTS = frozenset({"wall"})
 
 
 def _require_lmdb_zstd() -> tuple[Any, Any]:
@@ -351,9 +353,18 @@ def validate_key_set_and_range(
         raise ContractError(
             f"range gate failed: saturation={saturation_fraction:.6f} is not <0.50"
         )
-    if not low_std_fraction < 0.01:
+    low_std_acceptance = (
+        "CHARACTERIZATION_ONLY_FLAT_SCENE_CONTROL"
+        if environment in LOW_STD_CHARACTERIZATION_ENVIRONMENTS
+        else "HARD_LT_0.01"
+    )
+    if (
+        environment not in LOW_STD_CHARACTERIZATION_ENVIRONMENTS
+        and not low_std_fraction < LOW_STD_MAP_FRACTION_THRESHOLD
+    ):
         raise ContractError(
-            f"range gate failed: low-std maps={low_std_fraction:.6f} is not <0.01"
+            f"range gate failed: low-std maps={low_std_fraction:.6f} "
+            f"is not <{LOW_STD_MAP_FRACTION_THRESHOLD}"
         )
     return {
         "expected_keys": len(expected),
@@ -363,6 +374,8 @@ def validate_key_set_and_range(
         "q90": q90,
         "saturation_fraction": saturation_fraction,
         "low_std_map_fraction": low_std_fraction,
+        "low_std_map_fraction_reference_threshold": (LOW_STD_MAP_FRACTION_THRESHOLD),
+        "low_std_map_fraction_acceptance": low_std_acceptance,
     }
 
 

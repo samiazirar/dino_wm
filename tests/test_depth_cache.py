@@ -33,6 +33,7 @@ from tools.validate_depth_cache import (
     dilate_changed_mask,
     temporal_pair_delta,
     validate_environment_cache,
+    validate_key_set_and_range,
 )
 
 
@@ -226,6 +227,43 @@ def test_wire_is_zstd3_little_endian_float16() -> None:
     assert decoded.shape == (224, 224)
     assert decoded.dtype.str == "<f2"
     np.testing.assert_array_equal(decoded, gray.astype("<f2"))
+
+
+def test_low_std_is_characterization_only_for_wall_and_hard_elsewhere(
+    tmp_path: Path,
+) -> None:
+    lmdb = pytest.importorskip("lmdb")
+
+    def constant_cache(environment: str):
+        trajectory = _trajectory(environment, "train", 0, 4)
+        cache = tmp_path / environment
+        database = lmdb.open(str(cache), map_size=64 << 20, subdir=True)
+        with database.begin(write=True) as transaction:
+            for frame, value in enumerate((0.1, 0.3, 0.6, 0.9)):
+                payload = encode_depth_value(
+                    np.full((224, 224), value, dtype=np.float32)
+                )
+                transaction.put(trajectory.physical_key(frame).encode("ascii"), payload)
+        return database, trajectory
+
+    wall_database, wall_trajectory = constant_cache("wall")
+    try:
+        result = validate_key_set_and_range(wall_database, "wall", [wall_trajectory])
+    finally:
+        wall_database.close()
+    assert result["low_std_map_fraction"] == 1.0
+    assert (
+        result["low_std_map_fraction_acceptance"]
+        == "CHARACTERIZATION_ONLY_FLAT_SCENE_CONTROL"
+    )
+    assert result["low_std_map_fraction_reference_threshold"] == 0.01
+
+    rope_database, rope_trajectory = constant_cache("rope")
+    try:
+        with pytest.raises(ContractError, match="low-std maps=1.000000"):
+            validate_key_set_and_range(rope_database, "rope", [rope_trajectory])
+    finally:
+        rope_database.close()
 
 
 def test_world_model_short_edge_resize_then_center_crop() -> None:
