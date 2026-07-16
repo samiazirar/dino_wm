@@ -538,6 +538,14 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
         ):
             raise HarnessError("P2a cards differ from the locked PushT pilot")
         for card in cards:
+            producer = card.get("producer_pilot", {}).get("producer")
+            expected_assumptions = (
+                ["[ASSUMPTION: RECOVERED-CONTRACT]"]
+                if producer == "mapanything_recovered_framewise"
+                else []
+            )
+            if card.get("assumption_tags") != expected_assumptions:
+                raise HarnessError("P2a assumption provenance differs")
             validate_segment_sizing(
                 card.get("segment_sizing"),
                 arm="dinocular",
@@ -564,6 +572,15 @@ def _validate_locked_cards(kind: str, cards: Sequence[Mapping[str, Any]]) -> Non
             raise HarnessError(
                 "P2a evaluation cards differ from the locked paired pilot"
             )
+        for card in cards:
+            producer = card.get("producer_pilot", {}).get("producer")
+            expected_assumptions = (
+                ["[ASSUMPTION: RECOVERED-CONTRACT]"]
+                if producer == "mapanything_recovered_framewise"
+                else []
+            )
+            if card.get("assumption_tags") != expected_assumptions:
+                raise HarnessError("P2a evaluation assumption provenance differs")
 
 
 def build_dry_run(

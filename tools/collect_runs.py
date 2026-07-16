@@ -296,6 +296,15 @@ def producer_pilot(args: argparse.Namespace) -> None:
         },
         "tie_tolerance": args.tie_tolerance,
         "winner": winner,
+        "winner_assumption_tags": (
+            ["[ASSUMPTION: RECOVERED-CONTRACT]"]
+            if winner == "mapanything_recovered_framewise"
+            else []
+        ),
+        "input_assumption_tags": {
+            producer: input_provenance[producer]["assumption_tags"]
+            for producer in PRODUCERS
+        },
         "selection_rule": "strictly_lower_locked_point_estimate",
     }
     _write_immutable(args.out, decision)

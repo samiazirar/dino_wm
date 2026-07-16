@@ -21,6 +21,7 @@ from harness_common import (  # noqa: E402
     LOCKED_SEEDS,
     LOCKED_TARGETS,
     RUN_CARD_SCHEMA,
+    RECOVERED_CONTRACT_ASSUMPTION,
     canonical_json_bytes,
     depth_inputs,
     derive_segment_sizing,
@@ -298,6 +299,11 @@ def make_producer_pilot(args: argparse.Namespace) -> Mapping[str, Any]:
             "decision_horizons": [5, 10],
             "paired_manifest_required": True,
         }
+        card["assumption_tags"] = (
+            [RECOVERED_CONTRACT_ASSUMPTION]
+            if producer == "mapanything_recovered_framewise"
+            else []
+        )
         card["depends_on"] = [
             f"p2-timing-{arm}-{environment}-s1"
             for arm in LOCKED_ARMS
@@ -325,6 +331,13 @@ def _load_winner(path: Path, spec: Mapping[str, Any]) -> str:
     winner = decision.get("winner")
     if winner not in spec["p2a"]["producers"]:
         raise HarnessError("P2a producer decision names an unregistered winner")
+    expected_assumptions = (
+        [RECOVERED_CONTRACT_ASSUMPTION]
+        if winner == "mapanything_recovered_framewise"
+        else []
+    )
+    if decision.get("winner_assumption_tags") != expected_assumptions:
+        raise HarnessError("P2a producer decision assumption provenance differs")
     return str(winner)
 
 
@@ -468,6 +481,11 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
                     "sha256": sha256_file(args.producer_decision),
                     "winner": winner,
                 }
+                card["assumption_tags"] = (
+                    [RECOVERED_CONTRACT_ASSUMPTION]
+                    if winner == "mapanything_recovered_framewise" and arm != "dino_pinned"
+                    else []
+                )
                 cards.append(_finish_card(spec, card))
     if len(cards) != 36:
         raise HarnessError("P3 materialization did not produce exactly 36 cards")
@@ -565,6 +583,9 @@ def make_open_loop(args: argparse.Namespace) -> Mapping[str, Any]:
                 card["environment_variables"] = copy.deepcopy(
                     p3_card["environment_variables"]
                 )
+                card["assumption_tags"] = copy.deepcopy(
+                    p3_card.get("assumption_tags", [])
+                )
                 card["depends_on"] = [card["training_run_id"]]
                 finished = _finish_card(spec, card)
                 if (
@@ -625,6 +646,9 @@ def make_producer_pilot_eval(args: argparse.Namespace) -> Mapping[str, Any]:
         card["segment_steps"] = training_card["segment_steps"]
         card["segment_sizing"] = copy.deepcopy(training_card["segment_sizing"])
         card["producer_pilot"] = copy.deepcopy(training_card["producer_pilot"])
+        card["assumption_tags"] = copy.deepcopy(
+            training_card.get("assumption_tags", [])
+        )
         _depth_overrides(card, training_card["depth_inputs"])
         card["environment_variables"] = copy.deepcopy(
             training_card["environment_variables"]

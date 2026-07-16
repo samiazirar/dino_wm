@@ -803,6 +803,11 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
             "decision_horizons": [5, 10],
             "paired_manifest_required": True,
         }
+        card["assumption_tags"] = (
+            ["[ASSUMPTION: RECOVERED-CONTRACT]"]
+            if producer == "mapanything_recovered_framewise"
+            else []
+        )
         p2a_cards.append(make_manifests._finish_card(spec, card))
     p2a_training_path = tmp_path / "p2a.yaml"
     write_matrix(
@@ -1778,6 +1783,7 @@ def _provenance_fields(
     token: str,
     slurm_job_id: str = "12345",
     depth_token: str = "a",
+    assumption_tags: list[str] | None = None,
 ):
     depth = arm != "dino_pinned"
     return {
@@ -1791,6 +1797,7 @@ def _provenance_fields(
         "checkpoint_sha256": token * 64,
         "manifest_sha256": "9" * 64,
         "slurm_job_id": slurm_job_id,
+        "assumption_tags": list(assumption_tags or []),
         "depth_producer_sha256": depth_token * 64 if depth else None,
         "depth_cache_manifest_sha256": depth_token * 64 if depth else None,
         "depth_native_contract_sha256": depth_token * 64 if depth else None,
@@ -1809,7 +1816,16 @@ def _result_row(producer, episode, model5, persistence5, model10, persistence10)
         "seed": 1,
         "environment": "pusht",
         "episode": episode,
-        **_provenance_fields(arm="dinocular", token=token, depth_token=token),
+        **_provenance_fields(
+            arm="dinocular",
+            token=token,
+            depth_token=token,
+            assumption_tags=(
+                ["[ASSUMPTION: RECOVERED-CONTRACT]"]
+                if producer == "mapanything_recovered_framewise"
+                else []
+            ),
+        ),
         "manifest_keys": [f"pusht/valid/{episode:05d}/000000"],
         "manifest_key_count": 1,
         "horizons": {

@@ -31,6 +31,7 @@ LOCKED_HORIZONS = {
 }
 LOCKED_NUM_HIST = {"pusht": 3, "wall": 1, "rope": 1, "granular": 1}
 STUDENT_SHA256 = "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc"
+RECOVERED_CONTRACT_ASSUMPTION = "[ASSUMPTION: RECOVERED-CONTRACT]"
 TIMING_SUMMARY_SCHEMA = "dino-wm-p2-timing-summary-v1"
 EVALUATION_DEPTH_PROVENANCE_FIELDS = (
     "depth_producer_sha256",
@@ -49,12 +50,13 @@ EVALUATION_IMMUTABLE_PROVENANCE_FIELDS = (
     "container_sha256",
     "checkpoint_sha256",
     "manifest_sha256",
+    "assumption_tags",
     *EVALUATION_DEPTH_PROVENANCE_FIELDS,
 )
 EVALUATION_SHA256_PROVENANCE_FIELDS = tuple(
     field
     for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS
-    if field != "source_commit"
+    if field not in {"source_commit", "assumption_tags"}
 )
 
 
@@ -125,6 +127,7 @@ def build_evaluation_provenance(
         "container_sha256": container.get("sha256"),
         "checkpoint_sha256": checkpoint_sha256,
         "manifest_sha256": manifest_sha256,
+        "assumption_tags": list(card.get("assumption_tags", [])),
         "slurm_job_id": slurm_job_id,
         **depth_values,
     }
@@ -149,6 +152,11 @@ def validate_evaluation_provenance(
             raise HarnessError(f"evaluation provenance has invalid {field}")
     if not _is_lower_hex(value.get("source_commit"), 40):
         raise HarnessError("evaluation provenance has invalid source_commit")
+    assumption_tags = value.get("assumption_tags")
+    if not isinstance(assumption_tags, list) or any(
+        item != RECOVERED_CONTRACT_ASSUMPTION for item in assumption_tags
+    ):
+        raise HarnessError("evaluation provenance has invalid assumption tags")
     slurm_job_id = value.get("slurm_job_id")
     if not isinstance(slurm_job_id, str) or not slurm_job_id.isdigit():
         raise HarnessError("evaluation provenance has invalid slurm_job_id")
@@ -558,6 +566,13 @@ def validate_run_card(card: Mapping[str, Any]) -> None:
         raise HarnessError("run card source hashes are absent")
     if card.get("decoder") is not False:
         raise HarnessError("decoder must remain off")
+    producer = card.get("producer_pilot", {}).get("producer")
+    if producer == "mapanything_recovered_framewise":
+        if card.get("assumption_tags") != [RECOVERED_CONTRACT_ASSUMPTION]:
+            raise HarnessError("MapAnything card lacks recovered-contract provenance")
+    elif card.get("kind") in {"p2a-producer-pilot", "p2a-open-loop"}:
+        if card.get("assumption_tags", []) != []:
+            raise HarnessError("DA3 P2a card has unexpected assumption provenance")
     if card.get("kind") in {"p3-training", "p4-open-loop"}:
         heldout = card.get("heldout_loss_manifest")
         if (
@@ -679,6 +694,7 @@ def verify_evaluation_bindings(
         or training.get("overrides") != card.get("overrides")
         or training.get("depth_inputs") != card.get("depth_inputs")
         or training.get("environment_variables") != card.get("environment_variables")
+        or training.get("assumption_tags", []) != card.get("assumption_tags", [])
         or training.get("heldout_loss_manifest") != card.get("heldout_loss_manifest")
         or training.get("initialization_policy") != card.get("initialization_policy")
         or training.get("optimizer_policy") != card.get("optimizer_policy")

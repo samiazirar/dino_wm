@@ -129,4 +129,8 @@ source_hash_files:
   - tools/submit_p3_chain.py
   - tools/p3_step_segment.sbatch
   - tools/dinocular_container_env.sh
+  - tools/prestage_p2a.py
+  - tools/precompute_depth_da3_shards.py
+  - tools/da3_pusht_shard.sbatch
+  - tools/da3_pusht_merge_validate.sbatch
   - training_timing.py
