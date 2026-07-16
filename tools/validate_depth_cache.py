@@ -147,32 +147,36 @@ def _validate_producer_provenance(producer: Mapping[str, Any]) -> None:
             raise ContractError(f"manifest producer artifact mismatch for {name}")
 
 
-def _validate_calibration(calibration: Mapping[str, Any]) -> tuple[float, float]:
+def _validate_calibration(
+    calibration: Mapping[str, Any], environment: str
+) -> tuple[float, float]:
     keys = calibration.get("keys")
-    if calibration.get("per_environment") != CALIBRATION_PER_ENV or not isinstance(
-        keys, list
+    if (
+        calibration.get("scope") != "environment_training_only"
+        or calibration.get("environment") != environment
+        or calibration.get("selected_environments") != [environment]
+        or calibration.get("selection")
+        != "128_smallest_sha256_training_keys_for_environment"
+        or calibration.get("per_environment") != CALIBRATION_PER_ENV
+        or not isinstance(keys, list)
     ):
         raise ContractError(
-            "cache does not use 128 calibration keys per selected environment"
+            f"cache does not use the fixed training-only {environment} calibration"
         )
-    if len(keys) != CALIBRATION_PER_ENV * len(SELECTED_ENVIRONMENTS) or len(
-        set(keys)
-    ) != len(keys):
-        raise ContractError("global calibration key set is not exactly 512 unique keys")
-    for environment in SELECTED_ENVIRONMENTS:
-        if (
-            sum(key.startswith(f"{environment}/") for key in keys)
-            != CALIBRATION_PER_ENV
-        ):
-            raise ContractError(
-                f"calibration is not stratified to 128 keys for {environment}"
-            )
+    if (
+        len(keys) != CALIBRATION_PER_ENV
+        or len(set(keys)) != CALIBRATION_PER_ENV
+        or any(not key.startswith(f"{environment}/train/") for key in keys)
+    ):
+        raise ContractError(
+            f"calibration is not exactly 128 unique {environment} training keys"
+        )
     if calibration.get("keys_sha256") != sha256_bytes(canonical_json_bytes(keys)):
         raise ContractError("calibration key-list hash mismatch")
     if calibration.get("sample") != "cropped_metric_depth[::8,::8]":
         raise ContractError("calibration sampling contract differs")
     if calibration.get("percentiles") != [2.0, 98.0]:
-        raise ContractError("calibration percentiles differ from global 2/98")
+        raise ContractError("calibration percentiles differ from environment 2/98")
     lo, hi = calibration.get("lo"), calibration.get("hi")
     if (
         not isinstance(lo, (int, float))
@@ -203,7 +207,7 @@ def validate_manifest_contract(
     if manifest.get("source_index_sha256") != _source_index_hash(trajectories):
         raise ContractError("source index hash differs from the current dataset")
     _validate_producer_provenance(manifest.get("producer", {}))
-    _validate_calibration(manifest.get("calibration", {}))
+    _validate_calibration(manifest.get("calibration", {}), environment)
     wire = manifest.get("wire_format", {})
     expected_wire = {
         "physical_key": "<split>/<episode:05d>/<frame:06d>",
@@ -436,6 +440,8 @@ def validate_temporal_gate(
     environment: str,
     trajectories: Sequence[Trajectory],
     records: Mapping[str, Mapping[str, Any]],
+    *,
+    enforce: bool = True,
 ) -> dict[str, Any]:
     _, zstandard = _require_lmdb_zstd()
     decompressor = zstandard.ZstdDecompressor()
@@ -487,9 +493,10 @@ def validate_temporal_gate(
                         f"only {static_fraction:.6f} static pixels"
                     )
     eligible_fraction = eligible_count / len(pairs) if pairs else 1.0
+    failures: list[str] = []
     if eligible_fraction < 0.95:
-        raise ContractError(
-            f"temporal gate failed: only {eligible_fraction:.6f} pairs retain >=20% static pixels"
+        failures.append(
+            f"only {eligible_fraction:.6f} pairs retain >=20% static pixels"
         )
     if not eligible_values:
         raise ContractError("temporal gate has no eligible consecutive pairs")
@@ -497,25 +504,30 @@ def validate_temporal_gate(
     q95 = float(np.percentile(eligible_values, 95.0, method="linear"))
     max_boundary = max(boundary_values) if boundary_values else None
     if median > 0.01:
-        raise ContractError(
-            f"temporal gate failed: median static delta {median:.6f} > 0.01"
-        )
+        failures.append(f"median static delta {median:.6f} > 0.01")
     if q95 > 0.03:
-        raise ContractError(f"temporal gate failed: q95 static delta {q95:.6f} > 0.03")
+        failures.append(f"q95 static delta {q95:.6f} > 0.03")
     if max_boundary is not None and max_boundary > 0.03:
-        raise ContractError(
-            f"temporal seam gate failed: max boundary delta {max_boundary:.6f} > 0.03"
-        )
-    return {
+        failures.append(f"max boundary delta {max_boundary:.6f} > 0.03")
+    result = {
+        "state": "FAIL" if failures else "PASS",
         "selected_pairs_including_boundaries": len(pairs),
         "eligible_pairs": eligible_count,
         "eligible_fraction": eligible_fraction,
+        "eligible_fraction_threshold": 0.95,
         "minimum_static_fraction": minimum_static,
         "median_static_depth_delta": median,
+        "median_static_depth_delta_threshold": 0.01,
         "q95_static_depth_delta": q95,
+        "q95_static_depth_delta_threshold": 0.03,
         "chunk_boundary_pairs": boundary_count,
         "max_chunk_boundary_static_depth_delta": max_boundary,
+        "max_chunk_boundary_static_depth_delta_threshold": 0.03,
+        "failures": failures,
     }
+    if failures and enforce:
+        raise ContractError(f"temporal gate failed: {failures[0]}")
+    return result
 
 
 def validate_recomputation(
@@ -536,7 +548,7 @@ def validate_recomputation(
         lambda trajectory: f"{environment}/{trajectory.trajectory_key}",
         count,
     )
-    lo, hi = _validate_calibration(manifest["calibration"])
+    lo, hi = _validate_calibration(manifest["calibration"], environment)
     maximum = 0.0
     compared_frames = 0
     with database.begin(write=False) as transaction:
@@ -705,13 +717,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     environments = _parse_environments(args.environments)
     first_manifest = load_manifest(args.cache / f"{environments[0]}.lmdb")
-    calibration = first_manifest.get("calibration", {})
     trajectories_by_env = enumerate_selected(args.root)
-    if calibration.get("keys") != select_calibration_keys(trajectories_by_env):
-        raise ContractError(
-            "manifest calibration keys are not the current dataset's exact stratified "
-            "smallest-SHA256 selection"
-        )
     producer = _producer_from_manifest(
         first_manifest,
         args.da3_root,
@@ -729,9 +735,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ContractError(
                     "environment caches use different producer provenance"
                 )
-            if manifest.get("calibration") != first_manifest.get("calibration"):
+            calibration = manifest.get("calibration", {})
+            expected_keys = select_calibration_keys(
+                trajectories_by_env, environments=[environment]
+            )
+            if calibration.get("keys") != expected_keys:
                 raise ContractError(
-                    "environment caches do not share one exact global calibration"
+                    "manifest calibration keys are not the current dataset's exact "
+                    f"training-only {environment} smallest-SHA256 selection"
                 )
             results[environment] = validate_environment_cache(
                 root=args.root,

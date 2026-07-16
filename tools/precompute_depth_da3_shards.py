@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import resource
 import sys
+import tempfile
 import time
 import uuid
 from typing import Any, Mapping, Sequence
@@ -36,10 +37,12 @@ from tools.precompute_depth import (  # noqa: E402
     build_environment_cache,
     canonical_json_bytes,
     enumerate_environment,
+    generate_environment_calibration,
     load_calibration_manifest,
     producer_identity,
     sha256_bytes,
     sha256_file,
+    select_calibration_keys,
     utc_now,
 )
 
@@ -52,7 +55,7 @@ EXPECTED_TRAJECTORIES = 18_706
 EXPECTED_FRAMES = 2_339_250
 EXPECTED_MIN_LOAD = 292_391
 EXPECTED_MAX_LOAD = 292_440
-CALIBRATION_PATH = Path("/workspace/data/depth_cache/wall.lmdb/manifest.json")
+CALIBRATION_PATH = Path("/workspace/data/depth_cache_calibration/pusht.json")
 SHARDS_ROOT = Path("/workspace/data/depth_cache_da3_pusht_shards")
 CANONICAL_CACHE_ROOT = Path("/workspace/data/depth_cache")
 
@@ -100,33 +103,87 @@ def plan_trajectory_shards(
     return shards
 
 
-def _load_wall_calibration(path: Path) -> tuple[Mapping[str, Any], str]:
+def _load_calibration_source(
+    path: Path, trajectories: Sequence[Trajectory]
+) -> tuple[Mapping[str, Any], str]:
     if path != CALIBRATION_PATH:
         raise ContractError(f"sole calibration source must be {CALIBRATION_PATH}")
     if not path.is_file():
-        raise ContractError(f"missing passed Wall cache manifest: {path}")
+        raise ContractError(f"missing PushT calibration manifest: {path}")
     digest = sha256_file(path)
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ContractError(f"invalid Wall cache manifest {path}: {exc}") from exc
-    data_path = path.parent / "data.mdb"
+        raise ContractError(f"invalid PushT calibration manifest {path}: {exc}") from exc
+    calibration = manifest.get("calibration")
+    expected_keys = select_calibration_keys(
+        {"pusht": trajectories}, environments=["pusht"]
+    )
+    calibration_keys = calibration.get("keys") if isinstance(calibration, Mapping) else None
+    lo = calibration.get("lo") if isinstance(calibration, Mapping) else None
+    hi = calibration.get("hi") if isinstance(calibration, Mapping) else None
     if (
-        manifest.get("schema") != "dinocular-depth-cache-v1"
-        or manifest.get("environment") != "wall"
-        or manifest.get("closed_before_hash") is not True
-        or not data_path.is_file()
-        or sha256_file(data_path) != manifest.get("data_mdb_sha256")
-        or not isinstance(manifest.get("calibration"), Mapping)
+        manifest.get("schema") != "dinocular-depth-calibration-v1"
+        or manifest.get("environment") != "pusht"
+        or manifest.get("source_index_sha256") != _source_index_hash(trajectories)
+        or not isinstance(manifest.get("producer"), Mapping)
+        or not isinstance(calibration, Mapping)
+        or calibration.get("scope") != "environment_training_only"
+        or calibration.get("environment") != "pusht"
+        or calibration.get("selected_environments") != ["pusht"]
+        or calibration.get("selection")
+        != "128_smallest_sha256_training_keys_for_environment"
+        or calibration.get("per_environment") != 128
+        or calibration_keys != expected_keys
+        or calibration.get("keys_sha256")
+        != sha256_bytes(canonical_json_bytes(expected_keys))
+        or calibration.get("sample") != "cropped_metric_depth[::8,::8]"
+        or calibration.get("sample_stride") != 8
+        or calibration.get("percentiles") != [2.0, 98.0]
+        or calibration.get("percentile_method") != "numpy.linear"
+        or not isinstance(lo, (int, float))
+        or not isinstance(hi, (int, float))
+        or not hi > lo + 1e-6
     ):
-        raise ContractError("Wall calibration source is not a closed hash-valid cache")
+        raise ContractError("PushT calibration source violates the immutable contract")
     return manifest, digest
+
+
+def create_calibration(args: argparse.Namespace) -> Mapping[str, Any]:
+    if args.json != CALIBRATION_PATH:
+        raise ContractError(f"calibration output must be {CALIBRATION_PATH}")
+    if args.json.exists():
+        raise ContractError(f"calibration output already exists: {args.json}")
+    trajectories = enumerate_environment(args.root, "pusht")
+    producer = _producer(args, args.json.parent / ".da3-work")
+    args.json.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".pusht-calibration-", dir=args.json.parent
+    ) as staging:
+        calibration, _raw = generate_environment_calibration(
+            environment="pusht",
+            trajectories_by_env={"pusht": trajectories},
+            producer=producer,
+            staging_root=Path(staging),
+        )
+    document = {
+        "schema": "dinocular-depth-calibration-v1",
+        "created_utc": utc_now(),
+        "environment": "pusht",
+        "source_index_sha256": _source_index_hash(trajectories),
+        "producer": _jsonable(producer.provenance),
+        "calibration": calibration,
+    }
+    atomic_write_json(args.json, document)
+    return document
 
 
 def make_plan(
     *, trajectories: Sequence[Trajectory], calibration_manifest: Path
 ) -> Mapping[str, Any]:
-    wall, calibration_sha256 = _load_wall_calibration(calibration_manifest)
+    source, calibration_sha256 = _load_calibration_source(
+        calibration_manifest, trajectories
+    )
     if (
         len(trajectories) != EXPECTED_TRAJECTORIES
         or sum(item.frame_count for item in trajectories) != EXPECTED_FRAMES
@@ -166,7 +223,7 @@ def make_plan(
         "calibration_manifest": str(calibration_manifest),
         "calibration_manifest_sha256": calibration_sha256,
         "calibration_object_sha256": sha256_bytes(
-            canonical_json_bytes(wall["calibration"])
+            canonical_json_bytes(source["calibration"])
         ),
         "assignments": assignments,
     }
@@ -209,11 +266,11 @@ def build_shard(args: argparse.Namespace) -> Mapping[str, Any]:
     by_key = {item.trajectory_key: item for item in trajectories}
     selected = [by_key[key] for key in assignment["trajectory_keys"]]
     producer = _producer(args, shard_root / ".da3-work")
-    calibration = load_calibration_manifest(CALIBRATION_PATH, producer)
-    wall, wall_sha256 = _load_wall_calibration(CALIBRATION_PATH)
+    calibration = load_calibration_manifest(CALIBRATION_PATH, producer, "pusht")
+    source, source_sha256 = _load_calibration_source(CALIBRATION_PATH, trajectories)
     if (
-        calibration != wall["calibration"]
-        or wall_sha256 != plan["calibration_manifest_sha256"]
+        calibration != source["calibration"]
+        or source_sha256 != plan["calibration_manifest_sha256"]
         or sha256_bytes(canonical_json_bytes(calibration))
         != plan["calibration_object_sha256"]
     ):
@@ -256,7 +313,7 @@ def build_shard(args: argparse.Namespace) -> Mapping[str, Any]:
         "plan_path": str(args.plan),
         "plan_sha256": plan["plan_sha256"],
         **copy.deepcopy(assignment),
-        "calibration_manifest_sha256": wall_sha256,
+        "calibration_manifest_sha256": source_sha256,
         "calibration_object_sha256": plan["calibration_object_sha256"],
         "manifest_id": manifest["manifest_id"],
         "manifest_sha256": sha256_file(shard_root / "pusht.lmdb" / "manifest.json"),
@@ -502,6 +559,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    calibrate = subparsers.add_parser("calibrate")
+    calibrate.add_argument("--root", type=Path, required=True)
+    calibrate.add_argument("--model-dir", type=Path, required=True)
+    calibrate.add_argument("--da3-root", type=Path, required=True)
+    calibrate.add_argument("--json", type=Path, default=CALIBRATION_PATH)
+
     plan = subparsers.add_parser("plan")
     plan.add_argument("--root", type=Path, required=True)
     plan.add_argument("--calibration-manifest", type=Path, default=CALIBRATION_PATH)
@@ -525,7 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "plan":
+    if args.command == "calibrate":
+        value = create_calibration(args)
+    elif args.command == "plan":
         value = make_plan(
             trajectories=enumerate_environment(args.root, "pusht"),
             calibration_manifest=args.calibration_manifest,

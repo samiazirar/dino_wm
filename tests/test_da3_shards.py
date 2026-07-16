@@ -39,7 +39,7 @@ def test_stable_lpt_keeps_whole_trajectories() -> None:
 
 def test_build_shard_writes_and_hashes_validation_receipt(tmp_path, monkeypatch) -> None:
     shards_root = tmp_path / "shards"
-    calibration = tmp_path / "wall.lmdb" / "manifest.json"
+    calibration = tmp_path / "depth_cache_calibration" / "pusht.json"
     calibration.parent.mkdir(parents=True)
     calibration.write_text("{}", encoding="utf-8")
     selected = [_trajectory(0, 50), _trajectory(1, 51)]
@@ -65,7 +65,7 @@ def test_build_shard_writes_and_hashes_validation_receipt(tmp_path, monkeypatch)
     monkeypatch.setattr(sharding, "load_calibration_manifest", lambda *_: {"lo": 0, "hi": 1})
     monkeypatch.setattr(
         sharding,
-        "_load_wall_calibration",
+        "_load_calibration_source",
         lambda *_: ({"calibration": {"lo": 0, "hi": 1}}, "3" * 64),
     )
     monkeypatch.setattr(

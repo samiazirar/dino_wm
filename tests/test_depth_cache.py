@@ -94,18 +94,18 @@ class DeterministicTrajectoryProducer:
         )
 
 
-def _calibration() -> dict:
+def _calibration(environment: str = "wall") -> dict:
     keys = [
         f"{environment}/train/{episode:05d}/{frame:06d}"
-        for environment in SELECTED_ENVIRONMENTS
         for episode in range(16)
         for frame in range(8)
     ]
-    assert len(keys) == 512
+    assert len(keys) == 128
     return {
-        "scope": "global_across_selected_environments",
-        "selected_environments": list(SELECTED_ENVIRONMENTS),
-        "selection": "128_smallest_sha256_keys_per_environment",
+        "scope": "environment_training_only",
+        "environment": environment,
+        "selected_environments": [environment],
+        "selection": "128_smallest_sha256_training_keys_for_environment",
         "per_environment": 128,
         "frame_key_format": "<env>/<split>/<episode:05d>/<frame:06d>",
         "keys": keys,
@@ -207,6 +207,7 @@ def test_calibration_keys_are_stratified_smallest_sha256() -> None:
         candidates = [
             item.logical_key(frame)
             for item in trajectories[environment]
+            if item.split == "train"
             for frame in range(item.frame_count)
         ]
         expected = sorted(
@@ -215,6 +216,7 @@ def test_calibration_keys_are_stratified_smallest_sha256() -> None:
         assert [
             key for key in selected if key.startswith(f"{environment}/")
         ] == expected
+        assert all("/train/" in key for key in selected)
 
 
 def test_wire_is_zstd3_little_endian_float16() -> None:

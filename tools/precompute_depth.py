@@ -576,23 +576,30 @@ def streaming_chunks(frame_count: int) -> list[dict[str, Any]]:
 def select_calibration_keys(
     trajectories_by_env: Mapping[str, Sequence[Trajectory]],
     per_environment: int = CALIBRATION_PER_ENV,
+    environments: Sequence[str] = SELECTED_ENVIRONMENTS,
 ) -> list[str]:
     selected: list[str] = []
-    for environment in SELECTED_ENVIRONMENTS:
+    if not environments or len(set(environments)) != len(environments):
+        raise ContractError("calibration environments must be unique and nonempty")
+    unsupported = sorted(set(environments) - set(SELECTED_ENVIRONMENTS))
+    if unsupported:
+        raise ContractError(f"unsupported calibration environments: {unsupported}")
+    for environment in environments:
         trajectories = trajectories_by_env.get(environment, ())
         keys = [
             trajectory.logical_key(frame)
             for trajectory in trajectories
+            if trajectory.split == "train"
             for frame in range(trajectory.frame_count)
         ]
         if len(keys) < per_environment:
             raise ContractError(
-                f"{environment} has {len(keys)} frames, fewer than the required {per_environment} "
-                "global-calibration keys"
+                f"{environment} has {len(keys)} training frames, fewer than the required "
+                f"{per_environment} calibration keys"
             )
         keys.sort(key=lambda key: (sha256_bytes(key.encode()), key))
         selected.extend(keys[:per_environment])
-    expected = per_environment * len(SELECTED_ENVIRONMENTS)
+    expected = per_environment * len(environments)
     if len(selected) != expected or len(set(selected)) != expected:
         raise ContractError(
             "calibration selection is not exactly stratified and unique"
@@ -1303,14 +1310,17 @@ def _trajectory_lookup(
     return result
 
 
-def generate_global_calibration(
+def generate_environment_calibration(
     *,
+    environment: str,
     trajectories_by_env: Mapping[str, Sequence[Trajectory]],
     producer: TrajectoryDepthProducer,
     staging_root: Path,
     per_environment: int = CALIBRATION_PER_ENV,
 ) -> tuple[dict[str, Any], dict[str, tuple[Path, Mapping[str, Any]]]]:
-    keys = select_calibration_keys(trajectories_by_env, per_environment)
+    keys = select_calibration_keys(
+        trajectories_by_env, per_environment, environments=[environment]
+    )
     trajectory_lookup = _trajectory_lookup(trajectories_by_env)
     selected_frames: dict[str, list[int]] = defaultdict(list)
     for logical_key in keys:
@@ -1319,10 +1329,9 @@ def generate_global_calibration(
 
     raw_by_trajectory: dict[str, tuple[Path, Mapping[str, Any]]] = {}
     samples_by_key: dict[str, np.ndarray] = {}
-    environment_order = {name: index for index, name in enumerate(DEFAULT_BUILD_ORDER)}
     calibration_parents = sorted(
         selected_frames,
-        key=lambda key: (environment_order[key.split("/", 1)[0]], key),
+        key=lambda key: key,
     )
     for trajectory_key in calibration_parents:
         trajectory = trajectory_lookup[trajectory_key]
@@ -1353,9 +1362,10 @@ def generate_global_calibration(
         )
     lo, hi = compute_global_calibration(samples_by_key[key] for key in keys)
     calibration = {
-        "scope": "global_across_selected_environments",
-        "selected_environments": list(SELECTED_ENVIRONMENTS),
-        "selection": "128_smallest_sha256_keys_per_environment",
+        "scope": "environment_training_only",
+        "environment": environment,
+        "selected_environments": [environment],
+        "selection": "128_smallest_sha256_training_keys_for_environment",
         "per_environment": per_environment,
         "frame_key_format": "<env>/<split>/<episode:05d>/<frame:06d>",
         "keys": keys,
@@ -1371,7 +1381,7 @@ def generate_global_calibration(
 
 
 def load_calibration_manifest(
-    path: Path, producer: TrajectoryDepthProducer
+    path: Path, producer: TrajectoryDepthProducer, environment: str
 ) -> dict[str, Any]:
     manifest = json.loads(path.read_text())
     calibration = manifest.get("calibration")
@@ -1383,15 +1393,25 @@ def load_calibration_manifest(
         raise ContractError(
             "calibration manifest producer differs from the pinned current producer"
         )
-    if calibration.get("per_environment") != CALIBRATION_PER_ENV:
-        raise ContractError(
-            "calibration manifest is not the fixed 128-key-per-environment transform"
-        )
-    if len(calibration.get("keys", [])) != CALIBRATION_PER_ENV * len(
-        SELECTED_ENVIRONMENTS
+    if (
+        calibration.get("scope") != "environment_training_only"
+        or calibration.get("environment") != environment
+        or calibration.get("selected_environments") != [environment]
+        or calibration.get("selection")
+        != "128_smallest_sha256_training_keys_for_environment"
+        or calibration.get("per_environment") != CALIBRATION_PER_ENV
     ):
         raise ContractError(
-            "calibration manifest does not contain exactly 512 frame keys"
+            f"calibration manifest is not the fixed training-only {environment} transform"
+        )
+    keys = calibration.get("keys", [])
+    if (
+        len(keys) != CALIBRATION_PER_ENV
+        or len(set(keys)) != CALIBRATION_PER_ENV
+        or any(not key.startswith(f"{environment}/train/") for key in keys)
+    ):
+        raise ContractError(
+            f"calibration manifest does not contain exactly 128 unique {environment} training keys"
         )
     expected_hash = sha256_bytes(canonical_json_bytes(calibration["keys"]))
     if calibration.get("keys_sha256") != expected_hash:
@@ -1455,12 +1475,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--build-environments",
         default=",".join(DEFAULT_BUILD_ORDER),
-        help="comma-separated caches to build; calibration still spans all four selected environments",
+        help="comma-separated caches to build; each gets its own training-only calibration",
     )
     parser.add_argument(
         "--calibration-manifest",
         type=Path,
-        help="reuse the exact global calibration from an already-built cache manifest",
+        help="reuse one exact environment calibration (requires one build environment)",
     )
     parser.add_argument(
         "--rebuild",
@@ -1488,26 +1508,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         da3_root, args.model_dir, work_root=args.out / ".da3-work"
     )
     trajectories_by_env = enumerate_selected(args.root)
+    if args.calibration_manifest and len(build_environments) != 1:
+        raise ContractError("--calibration-manifest requires exactly one build environment")
     with tempfile.TemporaryDirectory(
         prefix=".depth-calibration-", dir=args.out
     ) as temporary:
-        if args.calibration_manifest:
-            calibration = load_calibration_manifest(args.calibration_manifest, producer)
-            expected_keys = select_calibration_keys(trajectories_by_env)
-            if calibration.get("keys") != expected_keys:
-                raise ContractError(
-                    "reused calibration keys are not the current dataset's exact stratified "
-                    "smallest-SHA256 selection"
-                )
-            calibration_raw: dict[str, tuple[Path, Mapping[str, Any]]] = {}
-        else:
-            calibration, calibration_raw = generate_global_calibration(
-                trajectories_by_env=trajectories_by_env,
-                producer=producer,
-                staging_root=Path(temporary),
-            )
         summaries = {}
         for environment in build_environments:
+            if args.calibration_manifest:
+                calibration = load_calibration_manifest(
+                    args.calibration_manifest, producer, environment
+                )
+                expected_keys = select_calibration_keys(
+                    trajectories_by_env, environments=[environment]
+                )
+                if calibration.get("keys") != expected_keys:
+                    raise ContractError(
+                        "reused calibration keys are not the current dataset's exact "
+                        f"training-only {environment} smallest-SHA256 selection"
+                    )
+                calibration_raw: dict[str, tuple[Path, Mapping[str, Any]]] = {}
+            else:
+                calibration, calibration_raw = generate_environment_calibration(
+                    environment=environment,
+                    trajectories_by_env=trajectories_by_env,
+                    producer=producer,
+                    staging_root=Path(temporary),
+                )
             summaries[environment] = build_environment_cache(
                 output_root=args.out,
                 environment=environment,
@@ -1517,6 +1544,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 calibration_raw=calibration_raw,
                 rebuild=args.rebuild,
             )
+
+    # Production jobs must not become afterok-successful on generation alone.
+    # Run the immutable-cache gates while the same GPU allocation and exact
+    # producer are still live, and keep reports outside the LMDB directories.
+    try:
+        from tools.validate_depth_cache import validate_environment_cache
+
+        validation_reports: dict[str, dict[str, Any]] = {}
+        validation_root = args.out.parent / "depth_cache_validation"
+        for environment in build_environments:
+            validation = validate_environment_cache(
+                root=args.root,
+                cache_root=args.out,
+                environment=environment,
+                producer=producer,
+                trajectories=trajectories_by_env[environment],
+            )
+            report = {
+                "schema": "dinocular-depth-cache-validation-v1",
+                "created_utc": utc_now(),
+                "state": "PASS",
+                "results": {environment: validation},
+            }
+            report_path = validation_root / (
+                f"{environment}.{summaries[environment]['manifest_id']}.json"
+            )
+            atomic_write_json(report_path, report)
+            validation_reports[environment] = {
+                "state": validation["state"],
+                "report": str(report_path),
+            }
+    except Exception as exc:
+        raise ContractError(f"post-build validation failed: {exc}") from exc
     print(
         json.dumps(
             {
@@ -1527,6 +1587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "committed_frames_per_second"
                     ],
                     "data_mdb_sha256": manifest["data_mdb_sha256"],
+                    "validation": validation_reports[environment],
                 }
                 for environment, manifest in summaries.items()
             },
