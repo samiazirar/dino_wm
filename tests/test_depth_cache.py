@@ -58,6 +58,8 @@ def _fake_provenance() -> dict:
             "chunk_size": 120,
             "overlap": 60,
             "overlap_policy": "discard_duplicated_tail_no_blend",
+            "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
+            "wall_terminal_observation_policy": "drop_post_action_frame_not_selected_by_WallDataset",
         },
         "official_non_strict_load_audit": {"missing_keys": [], "unexpected_keys": []},
     }

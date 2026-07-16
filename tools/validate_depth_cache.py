@@ -132,6 +132,8 @@ def _validate_producer_provenance(producer: Mapping[str, Any]) -> None:
         "chunk_size": CHUNK_SIZE,
         "overlap": OVERLAP,
         "overlap_policy": "discard_duplicated_tail_no_blend",
+        "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
+        "wall_terminal_observation_policy": "drop_post_action_frame_not_selected_by_WallDataset",
     }
     if settings != expected_settings:
         raise ContractError(f"producer settings differ from fixed contract: {settings}")
