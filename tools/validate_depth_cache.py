@@ -136,6 +136,15 @@ def _validate_producer_provenance(producer: Mapping[str, Any]) -> None:
         "overlap_policy": "discard_duplicated_tail_no_blend",
         "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
         "wall_terminal_observation_policy": "drop_post_action_frame_not_selected_by_WallDataset",
+        "deterministic_execution": {
+            "seed": 42,
+            "cublas_workspace_config": ":4096:8",
+            "deterministic_algorithms": True,
+            "cudnn_benchmark": False,
+            "cudnn_deterministic": True,
+            "allow_tf32": False,
+            "reset_before_each_trajectory": True,
+        },
     }
     if settings != expected_settings:
         raise ContractError(f"producer settings differ from fixed contract: {settings}")

@@ -17,6 +17,7 @@ import json
 import math
 import os
 import pickle
+import random
 import resource
 import subprocess
 import sys
@@ -65,10 +66,43 @@ DINOV2_HUB_CACHE_DIRNAME = "facebookresearch_dinov2_main"
 DINOV2_HUBCONF_SHA256 = (
     "c1f5090e78ff940b72c076d2bf9c0310d1707c946b3d10e2d6f2b0bdf56a6f64"
 )
+DETERMINISTIC_SEED = 42
+CUBLAS_WORKSPACE_CONFIG = ":4096:8"
 
 
 class ContractError(RuntimeError):
     """A pinned producer, dataset, cache, or invocation violated the contract."""
+
+
+def configure_deterministic_producer(torch_module: Any) -> dict[str, Any]:
+    """Reset and fail-close the CUDA state used by every DA3 trajectory call."""
+
+    workspace_config = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if workspace_config != CUBLAS_WORKSPACE_CONFIG:
+        raise ContractError(
+            "fixed DA3 recomputation requires "
+            f"CUBLAS_WORKSPACE_CONFIG={CUBLAS_WORKSPACE_CONFIG}, got "
+            f"{workspace_config!r}"
+        )
+
+    random.seed(DETERMINISTIC_SEED)
+    np.random.seed(DETERMINISTIC_SEED)
+    torch_module.manual_seed(DETERMINISTIC_SEED)
+    torch_module.cuda.manual_seed_all(DETERMINISTIC_SEED)
+    torch_module.use_deterministic_algorithms(True)
+    torch_module.backends.cudnn.benchmark = False
+    torch_module.backends.cudnn.deterministic = True
+    torch_module.backends.cudnn.allow_tf32 = False
+    torch_module.backends.cuda.matmul.allow_tf32 = False
+    return {
+        "seed": DETERMINISTIC_SEED,
+        "cublas_workspace_config": CUBLAS_WORKSPACE_CONFIG,
+        "deterministic_algorithms": True,
+        "cudnn_benchmark": False,
+        "cudnn_deterministic": True,
+        "allow_tf32": False,
+        "reset_before_each_trajectory": True,
+    }
 
 
 def utc_now() -> str:
@@ -1008,6 +1042,7 @@ class OfficialDA3StreamingProducer:
             raise ContractError(
                 "PyTorch is unavailable for the pinned DA3 producer"
             ) from exc
+        deterministic_provenance = configure_deterministic_producer(torch)
         if not torch.cuda.is_available():
             raise ContractError(
                 "official DA3-Streaming requires CUDA; no CPU/fake fallback is allowed"
@@ -1096,6 +1131,7 @@ class OfficialDA3StreamingProducer:
                 "overlap_policy": "discard_duplicated_tail_no_blend",
                 "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
                 "wall_terminal_observation_policy": "drop_post_action_frame_not_selected_by_WallDataset",
+                "deterministic_execution": deterministic_provenance,
             },
             "official_non_strict_load_audit": {
                 "missing_keys": list(incompatible.missing_keys),
@@ -1157,6 +1193,7 @@ class OfficialDA3StreamingProducer:
     def infer_trajectory(
         self, frames_rgb: np.ndarray, trajectory: Trajectory
     ) -> ProducerResult:
+        configure_deterministic_producer(self._torch)
         if len(frames_rgb) != trajectory.frame_count:
             raise ContractError(
                 "official producer was not given one complete trajectory"

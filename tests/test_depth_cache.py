@@ -9,6 +9,7 @@ import torch
 from tools import precompute_depth as depth_module
 from tools.precompute_depth import (
     ARTIFACTS,
+    CUBLAS_WORKSPACE_CONFIG,
     MAP_SIZE,
     SELECTED_ENVIRONMENTS,
     ContractError,
@@ -16,6 +17,7 @@ from tools.precompute_depth import (
     Trajectory,
     build_environment_cache,
     canonical_json_bytes,
+    configure_deterministic_producer,
     decode_trajectory,
     decode_depth_value,
     encode_depth_value,
@@ -61,6 +63,15 @@ def _fake_provenance() -> dict:
             "overlap_policy": "discard_duplicated_tail_no_blend",
             "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png",
             "wall_terminal_observation_policy": "drop_post_action_frame_not_selected_by_WallDataset",
+            "deterministic_execution": {
+                "seed": 42,
+                "cublas_workspace_config": ":4096:8",
+                "deterministic_algorithms": True,
+                "cudnn_benchmark": False,
+                "cudnn_deterministic": True,
+                "allow_tf32": False,
+                "reset_before_each_trajectory": True,
+            },
         },
         "official_non_strict_load_audit": {"missing_keys": [], "unexpected_keys": []},
     }
@@ -93,6 +104,43 @@ class DeterministicTrajectoryProducer:
             alignments=[],
             metadata={"injected": True},
         )
+
+
+def test_da3_determinism_is_reset_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior = {
+        "enabled": torch.are_deterministic_algorithms_enabled(),
+        "benchmark": torch.backends.cudnn.benchmark,
+        "deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_tf32": torch.backends.cudnn.allow_tf32,
+        "matmul_tf32": torch.backends.cuda.matmul.allow_tf32,
+    }
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    with pytest.raises(ContractError, match="CUBLAS_WORKSPACE_CONFIG"):
+        configure_deterministic_producer(torch)
+
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", CUBLAS_WORKSPACE_CONFIG)
+    try:
+        first_provenance = configure_deterministic_producer(torch)
+        first = (np.random.random(), torch.rand(1).item())
+        torch.backends.cudnn.benchmark = True
+        second_provenance = configure_deterministic_producer(torch)
+        second = (np.random.random(), torch.rand(1).item())
+
+        assert first == second
+        assert first_provenance == second_provenance
+        assert torch.are_deterministic_algorithms_enabled()
+        assert not torch.backends.cudnn.benchmark
+        assert torch.backends.cudnn.deterministic
+        assert not torch.backends.cudnn.allow_tf32
+        assert not torch.backends.cuda.matmul.allow_tf32
+    finally:
+        torch.use_deterministic_algorithms(prior["enabled"])
+        torch.backends.cudnn.benchmark = prior["benchmark"]
+        torch.backends.cudnn.deterministic = prior["deterministic"]
+        torch.backends.cudnn.allow_tf32 = prior["cudnn_tf32"]
+        torch.backends.cuda.matmul.allow_tf32 = prior["matmul_tf32"]
 
 
 def _calibration(environment: str = "wall") -> dict:
