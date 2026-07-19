@@ -40,6 +40,7 @@ test -w "$TRITON_CACHE_DIR" -a -w "$XDG_CACHE_HOME" -a -w "$HF_HOME"
     --env XDG_CACHE_HOME=/workspace/cache/da3-pusht-shards/$SLURM_JOB_ID/xdg \
     --env HF_HOME=/workspace/cache/da3-pusht-shards/$SLURM_JOB_ID/hf \
     --env TORCH_HOME=/workspace/env/torch \
+    --env CUBLAS_WORKSPACE_CONFIG=:4096:8 \
     --env PYTHONPATH=/workspace/env/da3-runtime-site:/workspace/code/dino_wm:/workspace/code/depth-anything-3/src:/workspace/code/depth-anything-3/da3_streaming \
     "$SIF" \
     python /workspace/code/dino_wm/tools/precompute_depth_da3_shards.py build \

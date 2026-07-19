@@ -499,3 +499,30 @@ def test_dinov2_hub_redirect_restores_after_load_failure(
     with pytest.raises(RuntimeError, match="injected load failure"):
         load_loop_detector_model_offline(Detector(), torch_module)
     assert torch_module.hub.load is original_load
+
+
+# Every DA3 PushT sbatch wrapper that constructs OfficialDA3StreamingProducer
+# (build shard; merge-validate recompute) MUST hand CUBLAS_WORKSPACE_CONFIG=:4096:8
+# into the container, or configure_deterministic_producer() fail-closes at
+# producer __init__ with ContractError (exit 2) before any depth is written.
+# Regression for the 2026-07-17 eight-shard 2:0 failure: the wrappers were
+# authored against the pre-determinism-fix producer and omitted this --env.
+DA3_PUSHT_PRODUCER_SBATCH = (
+    "da3_pusht_shard.sbatch",
+    "da3_pusht_merge_validate.sbatch",
+)
+
+
+@pytest.mark.parametrize("script_name", DA3_PUSHT_PRODUCER_SBATCH)
+def test_da3_pusht_producer_sbatch_passes_cublas_workspace_config(
+    script_name: str,
+) -> None:
+    script = Path(__file__).resolve().parents[1] / "tools" / script_name
+    text = script.read_text(encoding="utf-8")
+    assert (
+        f"--env CUBLAS_WORKSPACE_CONFIG={CUBLAS_WORKSPACE_CONFIG}" in text
+    ), (
+        f"{script_name} must pass --env CUBLAS_WORKSPACE_CONFIG="
+        f"{CUBLAS_WORKSPACE_CONFIG} into apptainer; the pinned producer "
+        "fail-closes without it"
+    )
