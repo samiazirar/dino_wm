@@ -20,6 +20,7 @@ from harness_common import (  # noqa: E402
     LOCKED_HORIZONS,
     LOCKED_SEEDS,
     LOCKED_TARGETS,
+    LEGACY_RUN_CARD_SCHEMA,
     RUN_CARD_SCHEMA,
     RECOVERED_CONTRACT_ASSUMPTION,
     canonical_json_bytes,
@@ -27,10 +28,15 @@ from harness_common import (  # noqa: E402
     derive_segment_sizing,
     finalize_run_card,
     load_contract_index,
+    load_native_contract_index,
+    legacy_depth_inputs,
     load_json,
     load_matrix,
     load_yaml,
+    require_launch_authorization,
     require_real_marvin_path,
+    require_regular_file_no_alias,
+    resolve_authorization_prerequisites,
     sha256_bytes,
     sha256_file,
     source_evidence,
@@ -59,10 +65,64 @@ def _parse_int_map(value: str) -> dict[str, int]:
 def _resolve_inputs(
     args: argparse.Namespace,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
-    spec = load_yaml(args.spec)
-    validate_spec(spec)
-    contract_path = args.contracts_index or Path(str(spec["contracts_index"]))
+    spec_path = require_regular_file_no_alias(
+        Path(args.spec),
+        "materialization study specification",
+    )
+    loaded_spec = load_yaml(spec_path)
+    validate_spec(loaded_spec)
+    spec = copy.deepcopy(dict(loaded_spec))
+    contract_path = require_regular_file_no_alias(
+        Path(args.contracts_index or str(spec["contracts_index"])),
+        "materialization contracts index",
+    )
+    raw_index = load_yaml(contract_path)
+    entries = raw_index.get("entries")
+    release_record = raw_index.get("empirical_runtime_release")
+    if not isinstance(entries, Mapping) or not isinstance(release_record, Mapping):
+        raise HarnessError("materialization contracts index lacks empirical bindings")
+    empirical_entry = entries.get("pusht/mapanything_recovered_framewise")
+    if not isinstance(empirical_entry, Mapping):
+        raise HarnessError("materialization empirical PushT entry is absent")
+    evidence = source_evidence(spec, args.local_code_root)
+    bindings = resolve_authorization_prerequisites(
+        spec,
+        contracts_index_sha256=sha256_file(contract_path),
+        empirical_contract_sha256=str(empirical_entry.get("contract_sha256")),
+        empirical_runtime_release_sha256=str(release_record.get("release_sha256")),
+        source_commit=str(evidence["source_commit"]),
+        source_file_sha256=evidence["source_file_sha256"],
+    )
+    authorization_path = getattr(args, "launch_authorization", None)
+    authorization_sha = getattr(args, "launch_authorization_sha256", None)
+    spec["launch_authorization"] = {
+        "status": "AUTHORIZED",
+        "path": str(authorization_path) if authorization_path is not None else None,
+        "sha256": authorization_sha,
+    }
+    spec["authorization_bindings"] = bindings
+    require_launch_authorization(spec, operation="materialize")
     contracts = load_contract_index(contract_path)
+    return spec, contracts, evidence
+
+
+def _resolve_native_inputs(
+    args: argparse.Namespace,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    """Resolve unchanged native-v1 inputs without empirical authority surfaces."""
+
+    spec_path = require_regular_file_no_alias(
+        Path(args.spec),
+        "materialization study specification",
+    )
+    loaded_spec = load_yaml(spec_path)
+    validate_spec(loaded_spec)
+    spec = copy.deepcopy(dict(loaded_spec))
+    contract_path = require_regular_file_no_alias(
+        Path(args.contracts_index or str(spec["contracts_index"])),
+        "materialization contracts index",
+    )
+    contracts = load_native_contract_index(contract_path)
     evidence = source_evidence(spec, args.local_code_root)
     return spec, contracts, evidence
 
@@ -76,13 +136,14 @@ def _base_card(
     environment: str,
     arm: str,
     seed: int,
+    schema: str = RUN_CARD_SCHEMA,
 ) -> dict[str, Any]:
     if environment not in LOCKED_ENVS or arm not in LOCKED_ARMS:
         raise HarnessError("run card requests an unlocked environment or arm")
     env_record = spec["environments"][environment]
     run_dir = f"{spec['study_root']}/outputs/{kind}/{run_id}"
-    return {
-        "schema": RUN_CARD_SCHEMA,
+    card = {
+        "schema": schema,
         "kind": kind,
         "run_id": run_id,
         "environment": environment,
@@ -107,27 +168,83 @@ def _base_card(
             "DINOV2_VITS14_WEIGHTS": spec["artifacts"]["dinov2"]["path"],
         },
     }
+    if schema == RUN_CARD_SCHEMA:
+        card.update(
+            {
+                "launch_authorization_subject": spec.get(
+                    "launch_authorization_subject"
+                ),
+                "launch_authorization": copy.deepcopy(
+                    spec.get("launch_authorization")
+                ),
+                "authorization_bindings": copy.deepcopy(
+                    spec.get("authorization_bindings", {})
+                ),
+            }
+        )
+    elif schema != LEGACY_RUN_CARD_SCHEMA:
+        raise HarnessError("unsupported materialized run-card schema")
+    return card
 
 
 def _depth_overrides(card: dict[str, Any], inputs: Mapping[str, Any]) -> None:
-    card["depth_inputs"] = copy.deepcopy(dict(inputs))
-    card["environment_variables"].update(
-        {
-            "DINOCULAR_STUDENT_WEIGHTS": card["artifacts"]["dinocular_student"]["path"],
-            "DINOCULAR_NATIVE_DEPTH_CONTRACT": inputs["native_contract_path"],
-            "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": inputs["native_contract_sha256"],
-            "DINOCULAR_CACHE_PRODUCER_SHA256": inputs["producer_sha256"],
-        }
-    )
+    values = copy.deepcopy(dict(inputs))
+    if values.get("contract_kind") == "empirical_lossy_cache":
+        values["adapter_mode"] = (
+            "exact_constant_zero_numeric"
+            if card["arm"] == "dinocular_zerodepth"
+            else "proxy_depth_z"
+        )
+        runtime_paths = values.get("runtime_paths")
+        if not isinstance(runtime_paths, Mapping):
+            raise HarnessError("empirical runtime paths are unavailable")
+        card["assumption_tags"] = [RECOVERED_CONTRACT_ASSUMPTION]
+        card["environment_variables"].update(
+            {
+                "DINOCULAR_STUDENT_WEIGHTS": runtime_paths["checkpoint"],
+                "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT": runtime_paths[
+                    "empirical_contract"
+                ],
+                "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT_SHA256": values["empirical_contract_sha256"],
+                "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE": runtime_paths[
+                    "empirical_runtime_release"
+                ],
+                "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE_SHA256": values["empirical_runtime_release_sha256"],
+                "DINOCULAR_DEPTH_INPUT_MODE": "empirical_lossy_cache_v1",
+                "DINOCULAR_EMPIRICAL_ADAPTER_ID": values["adapter_id"],
+                "DINOCULAR_EMPIRICAL_ADAPTER_MODE": values["adapter_mode"],
+                "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION": (
+                    "true" if card["arm"] == "dinocular_zerodepth" else "false"
+                ),
+            }
+        )
+    else:
+        card["environment_variables"].update(
+            {
+                "DINOCULAR_STUDENT_WEIGHTS": card["artifacts"]["dinocular_student"]["path"],
+                "DINOCULAR_NATIVE_DEPTH_CONTRACT": values["native_contract_path"],
+                "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": values["native_contract_sha256"],
+                "DINOCULAR_CACHE_PRODUCER_SHA256": values["producer_sha256"],
+            }
+        )
+    card["depth_inputs"] = values
 
 
 def _training_overrides(spec: Mapping[str, Any], card: dict[str, Any]) -> list[str]:
     environment = str(card["environment"])
     arm = str(card["arm"])
     env_record = spec["environments"][environment]
+    inputs = card.get("depth_inputs")
+    encoder_config = arm
+    if isinstance(inputs, Mapping) and inputs.get("contract_kind") == "empirical_lossy_cache":
+        encoder_config = (
+            "dinocular_zerodepth_pusht_empirical"
+            if arm == "dinocular_zerodepth"
+            else "dinocular_pusht_empirical"
+        )
     overrides = [
         f"env={env_record['hydra_env']}",
-        f"encoder={arm}",
+        f"encoder={encoder_config}",
         f"training.seed={card['seed']}",
         "training.predictor_lr=5e-5",
         "training.strict_determinism=true",
@@ -146,20 +263,31 @@ def _training_overrides(spec: Mapping[str, Any], card: dict[str, Any]) -> list[s
     if env_record.get("object_name") is not None:
         overrides.append(f"env.dataset.object_name={env_record['object_name']}")
         overrides.append(f"env.kwargs.object_name={env_record['object_name']}")
-    inputs = card.get("depth_inputs")
     if inputs is not None:
-        overrides.extend(
-            [
-                f"+env.dataset.depth_cache_dir={inputs['cache_dir']}",
-                f"+env.dataset.depth_cache_manifest_sha256={inputs['cache_manifest_sha256']}",
-                f"+env.dataset.depth_validation_path={inputs['validation_path']}",
-                f"+env.dataset.depth_validation_sha256={inputs['validation_sha256']}",
-                f"+env.dataset.native_depth_contract_path={inputs['native_contract_path']}",
-                f"+env.dataset.native_depth_contract_sha256={inputs['native_contract_sha256']}",
-                f"+env.dataset.depth_cache_producer_sha256={inputs['producer_sha256']}",
-                f"+env.dataset.depth_checkpoint_sha256={inputs['checkpoint_sha256']}",
-            ]
-        )
+        if inputs.get("contract_kind") == "empirical_lossy_cache":
+            overrides.extend(
+                [
+                    "+env.dataset.depth_contract_kind=empirical_lossy_cache",
+                    f"+env.dataset.empirical_depth_contract_path={inputs['empirical_contract_path']}",
+                    f"+env.dataset.empirical_depth_contract_sha256={inputs['empirical_contract_sha256']}",
+                    f"+env.dataset.empirical_runtime_release_path={inputs['empirical_runtime_release_path']}",
+                    f"+env.dataset.empirical_runtime_release_sha256={inputs['empirical_runtime_release_sha256']}",
+                    f"+env.dataset.depth_checkpoint_sha256={inputs['checkpoint_sha256']}",
+                ]
+            )
+        else:
+            overrides.extend(
+                [
+                    f"+env.dataset.depth_cache_dir={inputs['cache_dir']}",
+                    f"+env.dataset.depth_cache_manifest_sha256={inputs['cache_manifest_sha256']}",
+                    f"+env.dataset.depth_validation_path={inputs['validation_path']}",
+                    f"+env.dataset.depth_validation_sha256={inputs['validation_sha256']}",
+                    f"+env.dataset.native_depth_contract_path={inputs['native_contract_path']}",
+                    f"+env.dataset.native_depth_contract_sha256={inputs['native_contract_sha256']}",
+                    f"+env.dataset.depth_cache_producer_sha256={inputs['producer_sha256']}",
+                    f"+env.dataset.depth_checkpoint_sha256={inputs['checkpoint_sha256']}",
+                ]
+            )
     heldout = card.get("heldout_loss_manifest")
     if heldout is not None:
         overrides.extend(
@@ -219,7 +347,7 @@ def _segment_record(
 
 
 def make_p2(args: argparse.Namespace) -> Mapping[str, Any]:
-    spec, contracts, evidence = _resolve_inputs(args)
+    spec, contracts, evidence = _resolve_native_inputs(args)
     kind = args.kind
     producer = args.producer
     if producer not in spec["p2a"]["producers"]:
@@ -236,9 +364,10 @@ def make_p2(args: argparse.Namespace) -> Mapping[str, Any]:
                 environment=environment,
                 arm=arm,
                 seed=1,
+                schema=LEGACY_RUN_CARD_SCHEMA,
             )
             if arm != "dino_pinned":
-                _depth_overrides(card, depth_inputs(contracts, producer, environment))
+                _depth_overrides(card, legacy_depth_inputs(contracts, producer, environment))
             if kind == "geometry":
                 card["gate_mode"] = "geometry"
                 card["target_steps"] = 1
@@ -266,7 +395,7 @@ def make_p2(args: argparse.Namespace) -> Mapping[str, Any]:
 
 
 def make_producer_pilot(args: argparse.Namespace) -> Mapping[str, Any]:
-    spec, contracts, evidence = _resolve_inputs(args)
+    spec, contracts, evidence = _resolve_native_inputs(args)
     if args.env != "pusht" or args.seed != 1 or args.target_steps != 123858:
         raise HarnessError("P2a must be PushT seed 1 at exactly 123858 steps")
     producers = _parse_csv(args.producers)
@@ -283,8 +412,9 @@ def make_producer_pilot(args: argparse.Namespace) -> Mapping[str, Any]:
             environment="pusht",
             arm="dinocular",
             seed=1,
+            schema=LEGACY_RUN_CARD_SCHEMA,
         )
-        _depth_overrides(card, depth_inputs(contracts, producer, "pusht"))
+        _depth_overrides(card, legacy_depth_inputs(contracts, producer, "pusht"))
         card["segment_sizing"] = _segment_record(
             spec,
             evidence,
@@ -321,6 +451,7 @@ def make_producer_pilot(args: argparse.Namespace) -> Mapping[str, Any]:
 
 
 def _load_winner(path: Path, spec: Mapping[str, Any]) -> str:
+    path = require_regular_file_no_alias(path, "P2a producer decision")
     decision = load_json(path)
     if (
         decision.get("schema") != "dino-wm-p2a-producer-decision-v1"
@@ -347,10 +478,13 @@ def _heldout_manifest_record(
     source_commit: str,
     target_steps: int,
 ) -> Mapping[str, Any]:
-    path = directory / f"heldout_{environment}.jsonl"
-    metadata_path = path.with_suffix(".meta.json")
-    if not path.is_file() or not metadata_path.is_file():
-        raise HarnessError(f"P3 held-out loss manifest is absent for {environment}")
+    path = require_regular_file_no_alias(
+        directory / f"heldout_{environment}.jsonl",
+        f"{environment} held-out manifest",
+    )
+    metadata_path = require_regular_file_no_alias(
+        path.with_suffix(".meta.json"), f"{environment} held-out metadata"
+    )
     metadata = load_json(metadata_path)
     try:
         rows = [
@@ -396,6 +530,87 @@ def _heldout_manifest_record(
     }
 
 
+def materialize_training_card(
+    spec: Mapping[str, Any],
+    contracts: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    *,
+    winner: str,
+    heldout: Mapping[str, Mapping[str, Any]],
+    rates: Path,
+    producer_decision: Path,
+    arm: str,
+    environment: str,
+    seed: int,
+) -> Mapping[str, Any]:
+    """Materialize one exact P3 card; the matrix entrypoint locks the full grid."""
+
+    run_id = f"p3-{environment}-{arm}-s{seed}"
+    card = _base_card(
+        spec,
+        evidence,
+        kind="p3-training",
+        run_id=run_id,
+        environment=environment,
+        arm=arm,
+        seed=seed,
+    )
+    if arm != "dino_pinned":
+        _depth_overrides(card, depth_inputs(contracts, winner, environment))
+    card["heldout_loss_manifest"] = copy.deepcopy(heldout[environment])
+    card["initialization_policy"] = {
+        "predictor": "fresh_seeded",
+        "action_encoder": "fresh_seeded",
+        "proprio_encoder": "fresh_seeded",
+        "seed": seed,
+        "encoder": "frozen",
+    }
+    card["optimizer_policy"] = {
+        "predictor": "adamw",
+        "predictor_lr": 0.00005,
+        "action_proprio": "adamw",
+        "action_proprio_lr": 0.0005,
+    }
+    card["schedule_policy"] = "fixed_learning_rates"
+    if arm == "dino_pinned":
+        card["encoder_boundary"] = "not_applicable"
+    elif card["depth_inputs"].get("contract_kind") == "empirical_lossy_cache":
+        card["encoder_boundary"] = (
+            "exact_constant_zero_numeric_and_audit_mask"
+            if arm == "dinocular_zerodepth"
+            else "empirical_proxy_depth_and_payload_presence_mask"
+        )
+    else:
+        card["encoder_boundary"] = (
+            "manifest_neutral_depth_and_mask"
+            if arm == "dinocular_zerodepth"
+            else "informative_depth_and_mask"
+        )
+    card["segment_sizing"] = _segment_record(
+        spec,
+        evidence,
+        rates,
+        arm=arm,
+        environment=environment,
+        target_steps=card["target_steps"],
+    )
+    card["segment_steps"] = card["segment_sizing"]["derived_segment_steps"]
+    producer_decision = require_regular_file_no_alias(
+        producer_decision, "P3 producer decision"
+    )
+    card["producer_decision"] = {
+        "path": str(producer_decision),
+        "sha256": sha256_file(producer_decision),
+        "winner": winner,
+    }
+    card["assumption_tags"] = (
+        [RECOVERED_CONTRACT_ASSUMPTION]
+        if winner == "mapanything_recovered_framewise" and arm != "dino_pinned"
+        else []
+    )
+    return _finish_card(spec, card)
+
+
 def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
     spec, contracts, evidence = _resolve_inputs(args)
     if tuple(_parse_csv(args.encoders)) != LOCKED_ARMS:
@@ -431,62 +646,20 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
     for arm in LOCKED_ARMS:
         for environment in LOCKED_ENVS:
             for seed in LOCKED_SEEDS:
-                run_id = f"p3-{environment}-{arm}-s{seed}"
-                card = _base_card(
-                    spec,
-                    evidence,
-                    kind="p3-training",
-                    run_id=run_id,
-                    environment=environment,
-                    arm=arm,
-                    seed=seed,
-                )
-                if arm != "dino_pinned":
-                    _depth_overrides(card, depth_inputs(contracts, winner, environment))
-                card["heldout_loss_manifest"] = copy.deepcopy(heldout[environment])
-                card["initialization_policy"] = {
-                    "predictor": "fresh_seeded",
-                    "action_encoder": "fresh_seeded",
-                    "proprio_encoder": "fresh_seeded",
-                    "seed": seed,
-                    "encoder": "frozen",
-                }
-                card["optimizer_policy"] = {
-                    "predictor": "adamw",
-                    "predictor_lr": 0.00005,
-                    "action_proprio": "adamw",
-                    "action_proprio_lr": 0.0005,
-                }
-                card["schedule_policy"] = "fixed_learning_rates"
-                card["encoder_boundary"] = (
-                    "not_applicable"
-                    if arm == "dino_pinned"
-                    else (
-                        "manifest_neutral_depth_and_mask"
-                        if arm == "dinocular_zerodepth"
-                        else "informative_depth_and_mask"
+                cards.append(
+                    materialize_training_card(
+                        spec,
+                        contracts,
+                        evidence,
+                        winner=winner,
+                        heldout=heldout,
+                        rates=args.rates,
+                        producer_decision=args.producer_decision,
+                        arm=arm,
+                        environment=environment,
+                        seed=seed,
                     )
                 )
-                card["segment_sizing"] = _segment_record(
-                    spec,
-                    evidence,
-                    args.rates,
-                    arm=arm,
-                    environment=environment,
-                    target_steps=card["target_steps"],
-                )
-                card["segment_steps"] = card["segment_sizing"]["derived_segment_steps"]
-                card["producer_decision"] = {
-                    "path": str(args.producer_decision.resolve()),
-                    "sha256": sha256_file(args.producer_decision),
-                    "winner": winner,
-                }
-                card["assumption_tags"] = (
-                    [RECOVERED_CONTRACT_ASSUMPTION]
-                    if winner == "mapanything_recovered_framewise" and arm != "dino_pinned"
-                    else []
-                )
-                cards.append(_finish_card(spec, card))
     if len(cards) != 36:
         raise HarnessError("P3 materialization did not produce exactly 36 cards")
     return write_matrix(
@@ -498,10 +671,14 @@ def make_training(args: argparse.Namespace) -> Mapping[str, Any]:
 
 
 def _fixed_manifest_record(directory: Path, environment: str) -> Mapping[str, Any]:
-    path = directory / f"openloop_{environment}.jsonl"
-    meta_path = path.with_suffix(".meta.json")
-    if not path.is_file() or not meta_path.is_file():
-        raise HarnessError(f"fixed evaluation manifest is absent for {environment}")
+    path = require_regular_file_no_alias(
+        directory / f"openloop_{environment}.jsonl",
+        f"{environment} fixed evaluation manifest",
+    )
+    meta_path = require_regular_file_no_alias(
+        path.with_suffix(".meta.json"),
+        f"{environment} fixed evaluation manifest metadata",
+    )
     metadata = load_json(meta_path)
     if (
         metadata.get("environment") != environment
@@ -539,6 +716,13 @@ def make_open_loop(args: argparse.Namespace) -> Mapping[str, Any]:
         for environment in LOCKED_ENVS:
             for seed in LOCKED_SEEDS:
                 run_id = f"p4-{environment}-{arm}-s{seed}"
+                training_run_id = f"p3-{environment}-{arm}-s{seed}"
+                p3_card = p3_by_id.get(training_run_id)
+                p3_reference = p3_refs.get(training_run_id)
+                if p3_card is None or p3_reference is None:
+                    raise HarnessError(
+                        f"P4 card has no exact hashed P3 card: {training_run_id}"
+                    )
                 card = _base_card(
                     spec,
                     evidence,
@@ -547,15 +731,10 @@ def make_open_loop(args: argparse.Namespace) -> Mapping[str, Any]:
                     environment=environment,
                     arm=arm,
                     seed=seed,
+                    schema=str(p3_card["schema"]),
                 )
                 card["fixed_manifest"] = manifest_records[environment]
-                card["training_run_id"] = f"p3-{environment}-{arm}-s{seed}"
-                p3_card = p3_by_id.get(card["training_run_id"])
-                p3_reference = p3_refs.get(card["training_run_id"])
-                if p3_card is None or p3_reference is None:
-                    raise HarnessError(
-                        f"P4 card has no exact hashed P3 card: {card['training_run_id']}"
-                    )
+                card["training_run_id"] = training_run_id
                 card["training_run_dir"] = p3_card["run_dir"]
                 card["segment_steps"] = p3_card["segment_steps"]
                 card["segment_sizing"] = copy.deepcopy(p3_card["segment_sizing"])
@@ -607,7 +786,7 @@ def make_open_loop(args: argparse.Namespace) -> Mapping[str, Any]:
 
 
 def make_producer_pilot_eval(args: argparse.Namespace) -> Mapping[str, Any]:
-    spec, _contracts, evidence = _resolve_inputs(args)
+    spec, _contracts, evidence = _resolve_native_inputs(args)
     training, training_cards = load_matrix(args.training_matrix)
     if (
         training.get("kind") != "p2a-producer-pilot"
@@ -634,6 +813,7 @@ def make_producer_pilot_eval(args: argparse.Namespace) -> Mapping[str, Any]:
             environment="pusht",
             arm="dinocular",
             seed=1,
+            schema=LEGACY_RUN_CARD_SCHEMA,
         )
         card["fixed_manifest"] = copy.deepcopy(fixed_manifest)
         card["training_run_id"] = training_run_id
@@ -677,6 +857,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(__file__).resolve().parents[1] / "conf" / "study_matrix.yaml",
     )
     parser.add_argument("--contracts-index", type=Path)
+    parser.add_argument("--launch-authorization", type=Path)
+    parser.add_argument("--launch-authorization-sha256")
     parser.add_argument(
         "--local-code-root", type=Path, default=Path(__file__).resolve().parents[1]
     )

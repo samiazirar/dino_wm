@@ -25,6 +25,7 @@ from p3_completion import (
 if __package__:
     from .harness_common import (
         HarnessError,
+        depth_artifact_records,
         LOCKED_ARMS,
         LOCKED_ENVS,
         LOCKED_FRAMESKIPS,
@@ -34,7 +35,12 @@ if __package__:
         load_json,
         load_matrix,
         load_timing_summary,
+        load_yaml,
+        require_directory_no_alias,
+        require_run_card_authorization,
         require_real_marvin_path,
+        run_card_receipt_expectations,
+        require_regular_file_no_alias,
         sha256_file,
         validate_segment_sizing,
     )
@@ -42,6 +48,7 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from harness_common import (  # noqa: E402
         HarnessError,
+        depth_artifact_records,
         LOCKED_ARMS,
         LOCKED_ENVS,
         LOCKED_FRAMESKIPS,
@@ -51,7 +58,12 @@ else:
         load_json,
         load_matrix,
         load_timing_summary,
+        load_yaml,
+        require_directory_no_alias,
+        require_run_card_authorization,
         require_real_marvin_path,
+        run_card_receipt_expectations,
+        require_regular_file_no_alias,
         sha256_file,
         validate_segment_sizing,
     )
@@ -96,7 +108,10 @@ def _file_hash(path: Path) -> str:
 
 
 def verify_live_card(card: Mapping[str, Any]) -> None:
-    code_root = Path(require_real_marvin_path(str(card.get("code_root")), "code_root"))
+    code_root = require_directory_no_alias(
+        require_real_marvin_path(str(card.get("code_root")), "code_root"),
+        "live code root",
+    )
     commit = subprocess.check_output(
         ["git", "-C", str(code_root), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -108,32 +123,22 @@ def verify_live_card(card: Mapping[str, Any]) -> None:
     if dirty:
         raise HarnessError("live Marvin source tree is dirty; sbatch is forbidden")
     for relative, expected in card["source_file_sha256"].items():
-        path = code_root / relative
-        if not path.is_file() or _file_hash(path) != expected:
+        path = require_regular_file_no_alias(
+            code_root / relative, f"live source file {relative}"
+        )
+        if _file_hash(path) != expected:
             raise HarnessError(f"live source file hash differs: {relative}")
     records = dict(card.get("artifacts", {}))
     records["container"] = card["container"]
     depth = card.get("depth_inputs")
     if isinstance(depth, Mapping):
-        records.update(
-            {
-                "depth cache manifest": {
-                    "path": str(Path(depth["cache_dir"]) / "manifest.json"),
-                    "sha256": depth["cache_manifest_sha256"],
-                },
-                "depth validation": {
-                    "path": depth["validation_path"],
-                    "sha256": depth["validation_sha256"],
-                },
-                "native depth contract": {
-                    "path": depth["native_contract_path"],
-                    "sha256": depth["native_contract_sha256"],
-                },
-            }
-        )
+        records.update(depth_artifact_records(depth))
     for label, record in records.items():
-        path = Path(require_real_marvin_path(str(record.get("path")), f"{label}.path"))
-        if not path.is_file() or _file_hash(path) != record.get("sha256"):
+        path = require_regular_file_no_alias(
+            require_real_marvin_path(str(record.get("path")), f"{label}.path"),
+            f"live pinned artifact {label}",
+        )
+        if _file_hash(path) != record.get("sha256"):
             raise HarnessError(f"live pinned artifact hash differs: {label}")
 
 
@@ -207,6 +212,7 @@ def _batch_command(
 def _load_dependencies(path: Path | None) -> dict[str, str]:
     if path is None:
         return {}
+    path = require_regular_file_no_alias(path, "dependency index")
     value = load_json(path)
     jobs = value.get("jobs")
     if not isinstance(jobs, Mapping):
@@ -235,25 +241,40 @@ def verify_evaluation_training_dependencies(
             raise HarnessError(
                 f"evaluation card has no training reference for {run_id}"
             )
-        training_run_card = Path(str(training_reference.get("path"))).resolve()
-        if not training_run_card.is_file() or sha256_file(
-            training_run_card
-        ) != training_reference.get("file_sha256"):
+        training_run_card = require_regular_file_no_alias(
+            Path(str(training_reference.get("path"))),
+            f"training run card for {run_id}",
+        )
+        if sha256_file(training_run_card) != training_reference.get("file_sha256"):
             raise HarnessError(f"training run-card file hash differs for {run_id}")
-        training_run_dir = Path(str(card.get("training_run_dir"))).resolve()
-        chain_path = training_run_dir / "chain.json"
-        progress_path = training_run_dir / "progress.json"
+        training_card = load_yaml(training_run_card)
+        training_run_dir = require_directory_no_alias(
+            Path(str(card.get("training_run_dir"))),
+            f"training run directory for {run_id}",
+        )
+        chain_path = require_regular_file_no_alias(
+            training_run_dir / "chain.json", f"training chain for {run_id}"
+        )
+        progress_path = require_regular_file_no_alias(
+            training_run_dir / "progress.json", f"training progress for {run_id}"
+        )
         chain = load_json(chain_path)
         progress = load_json(progress_path)
         expected_run_card_sha256 = training_reference.get("run_card_sha256")
         target_steps = int(card["target_steps"])
+        chain_run_dir = require_directory_no_alias(
+            Path(str(chain.get("run_dir"))), f"chain run directory for {run_id}"
+        )
+        chain_run_card = require_regular_file_no_alias(
+            Path(str(chain.get("run_card"))), f"chain run card for {run_id}"
+        )
         if (
             chain.get("schema") != "dino-wm.p3-slurm-chain.v1"
             or chain.get("status") != "PASSED"
-            or Path(str(chain.get("run_dir"))).resolve() != training_run_dir
+            or chain_run_dir != training_run_dir
             or int(chain.get("target_steps", -1)) != target_steps
             or chain.get("run_card_sha256") != expected_run_card_sha256
-            or Path(str(chain.get("run_card"))).resolve() != training_run_card
+            or chain_run_card != training_run_card
             or chain.get("run_card_file_sha256")
             != training_reference.get("file_sha256")
             or chain.get("source_commit") != card.get("source_commit")
@@ -267,7 +288,10 @@ def verify_evaluation_training_dependencies(
             raise HarnessError(
                 f"dependency job for {training_run_id} is not chain tail {tail_job_id}"
             )
-        checkpoint = Path(str(progress.get("checkpoint"))).resolve()
+        checkpoint = require_regular_file_no_alias(
+            Path(str(progress.get("checkpoint"))),
+            f"training checkpoint for {run_id}",
+        )
         expected_checkpoint = (
             training_run_dir / "checkpoints" / "steps" / f"step_{target_steps:09d}.pth"
         )
@@ -280,7 +304,6 @@ def verify_evaluation_training_dependencies(
             or progress.get("immutable_run_card_sha256") != expected_run_card_sha256
             or not is_process_id(progress.get("training_process_id"))
             or checkpoint != expected_checkpoint
-            or not checkpoint.is_file()
             or sha256_file(checkpoint) != progress.get("checkpoint_sha256")
             or not isinstance(sampler, Mapping)
             or sampler.get("next_step") != target_steps
@@ -300,13 +323,17 @@ def verify_evaluation_training_dependencies(
         ):
             raise HarnessError(f"training chain has no final event for {run_id}")
         final_event = events[-1]
+        final_event_checkpoint = require_regular_file_no_alias(
+            Path(str(final_event.get("checkpoint"))),
+            f"training final-event checkpoint for {run_id}",
+        )
         if (
             str(final_event.get("job_id")) != tail_job_id
             or final_event.get("progress_status") != "TARGET_REACHED"
             or int(final_event.get("global_step", -1)) != target_steps
             or final_event.get("immutable_run_card_sha256") != expected_run_card_sha256
             or final_event.get("training_process_id") != progress["training_process_id"]
-            or Path(str(final_event.get("checkpoint"))).resolve() != checkpoint
+            or final_event_checkpoint != checkpoint
             or final_event.get("checkpoint_sha256") != progress.get("checkpoint_sha256")
         ):
             raise HarnessError(f"training chain final event differs for {run_id}")
@@ -338,11 +365,15 @@ def verify_evaluation_training_dependencies(
                 raise HarnessError(
                     f"P4 completion held-out provenance differs for {run_id}"
                 )
-            expected_receipt_path = training_run_dir / "final_acceptance.json"
-            if (
-                Path(str(completion_reference.get("path"))).resolve()
-                != expected_receipt_path
-            ):
+            expected_receipt_path = require_regular_file_no_alias(
+                training_run_dir / "final_acceptance.json",
+                f"final acceptance receipt for {run_id}",
+            )
+            completion_reference_path = require_regular_file_no_alias(
+                Path(str(completion_reference.get("path"))),
+                f"P4 completion receipt reference for {run_id}",
+            )
+            if completion_reference_path != expected_receipt_path:
                 raise HarnessError(f"P4 completion receipt path differs for {run_id}")
             try:
                 validation_manifest_key = canonical_first_heldout_manifest_key(
@@ -394,20 +425,33 @@ def verify_evaluation_training_dependencies(
                 }
             )
             try:
+                expected_empirical_adapter_mode, _empirical_provenance = (
+                    run_card_receipt_expectations(training_card)
+                )
                 receipt, receipt_path, receipt_sha256 = load_final_receipt(
-                    training_run_dir, expected=expected_receipt
+                    training_run_dir,
+                    expected_empirical_adapter_mode=expected_empirical_adapter_mode,
+                    expected=expected_receipt,
                 )
             except P3CompletionError as exc:
                 raise HarnessError(str(exc)) from exc
+            chain_receipt_path = require_regular_file_no_alias(
+                Path(str(chain.get("final_acceptance_receipt"))),
+                f"chain final acceptance receipt for {run_id}",
+            )
+            event_receipt_path = require_regular_file_no_alias(
+                Path(str(final_event.get("final_acceptance_receipt"))),
+                f"final-event acceptance receipt for {run_id}",
+            )
             if (
                 receipt_path != expected_receipt_path
                 or chain.get("training_process_id") != progress["training_process_id"]
                 or chain.get("final_acceptance_process_id") != receipt["process_id"]
                 or final_event.get("final_acceptance_process_id")
                 != receipt["process_id"]
-                or chain.get("final_acceptance_receipt") != str(receipt_path)
+                or chain_receipt_path != receipt_path
                 or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
-                or final_event.get("final_acceptance_receipt") != str(receipt_path)
+                or event_receipt_path != receipt_path
                 or final_event.get("final_acceptance_receipt_sha256") != receipt_sha256
             ):
                 raise HarnessError(
@@ -428,6 +472,7 @@ def _write_submission_state(path: Path, value: Mapping[str, Any]) -> None:
 def _validate_rates(
     path: Path, cards: Sequence[Mapping[str, Any]], max_hours: float
 ) -> None:
+    path = require_regular_file_no_alias(path, "timing summary")
     if float(max_hours) != 8.0:
         raise HarnessError("productive wall limit must remain exactly 8 hours")
     rates = load_timing_summary(path)
@@ -632,7 +677,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--frameskips")
     args = parser.parse_args(argv)
-    matrix_path = args.matrix or _matrix_default(args.mode)
+    matrix_path = require_regular_file_no_alias(
+        args.matrix or _matrix_default(args.mode), "submission matrix"
+    )
     matrix, cards = load_matrix(matrix_path)
     expected_kind = MODE_KINDS[args.mode]
     if matrix.get("kind") != expected_kind or any(
@@ -684,6 +731,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _validate_rates(args.rates, cards, args.max_productive_hours)
     elif args.execute and expected_kind in {"p2a-producer-pilot", "p3-training"}:
         raise HarnessError("P2a/P3 execution requires accepted per-arm timing rates")
+    if args.execute:
+        for card in cards:
+            require_run_card_authorization(card, operation="submit")
     if args.verify_live or args.execute:
         for card in cards:
             verify_live_card(card)
@@ -722,6 +772,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     state_path = matrix_path.with_suffix(".submissions.json")
     if state_path.exists():
+        state_path = require_regular_file_no_alias(
+            state_path, "submission state"
+        )
         state = load_json(state_path)
         if state.get("matrix_sha256") != matrix["matrix_sha256"]:
             raise HarnessError("submission state belongs to a different matrix hash")

@@ -13,6 +13,12 @@ import torch
 import yaml
 
 import p3_completion
+from empirical_depth_contract import (
+    ACCEPTED_IDENTITIES,
+    EMPIRICAL_ADAPTER_ID,
+    EMPIRICAL_ASSUMPTION,
+    EMPIRICAL_NON_EQUIVALENCE,
+)
 from p3_completion import (
     CHECKPOINT_HISTORY_SCHEMA,
     FINAL_RECEIPT_SCHEMA,
@@ -32,6 +38,7 @@ from p3_completion import (
     plateau_verdict,
     sha256_file,
     validate_checkpoint_evidence_bindings,
+    validate_final_receipt,
     validate_training_records,
     validate_runtime_heldout_manifest,
     validate_validation_records,
@@ -45,6 +52,7 @@ from tools.harness_common import (
     LOCKED_ARMS,
     LOCKED_ENVS,
     LOCKED_SEEDS,
+    LEGACY_RUN_CARD_SCHEMA,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -808,18 +816,30 @@ def _receipt(**updates):
 
 def test_final_fresh_load_receipt_rejects_nonfinite_and_provenance_drift(tmp_path):
     path = tmp_path / "final_acceptance.json"
-    digest = write_final_receipt(path, _receipt())
+    digest = write_final_receipt(
+        path, _receipt(), expected_empirical_adapter_mode=None
+    )
     loaded, loaded_path, loaded_digest = load_final_receipt(
-        tmp_path, expected={"checkpoint_sha256": "d" * 64, "slurm_job_id": "222"}
+        tmp_path,
+        expected_empirical_adapter_mode=None,
+        expected={"checkpoint_sha256": "d" * 64, "slurm_job_id": "222"},
     )
     assert loaded["fresh_model_process"] is True
     assert (loaded_path, loaded_digest) == (path, digest)
     with pytest.raises(P3CompletionError, match="differs"):
-        load_final_receipt(tmp_path, expected={"checkpoint_sha256": "f" * 64})
+        load_final_receipt(
+            tmp_path,
+            expected_empirical_adapter_mode=None,
+            expected={"checkpoint_sha256": "f" * 64},
+        )
     bad = _receipt()
     bad["validation_batch"] = dict(bad["validation_batch"], mean_loss=float("inf"))
     with pytest.raises(P3CompletionError, match="validation loss"):
-        write_final_receipt(tmp_path / "bad_receipt.json", bad)
+        write_final_receipt(
+            tmp_path / "bad_receipt.json",
+            bad,
+            expected_empirical_adapter_mode=None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -843,14 +863,21 @@ def test_final_receipt_rejects_canonical_type_edges(tmp_path, field, value, mess
         receipt[field] = value
     _write_json(tmp_path / "final_acceptance.json", receipt)
     with pytest.raises(P3CompletionError, match=message):
-        load_final_receipt(tmp_path)
+        load_final_receipt(
+            tmp_path, expected_empirical_adapter_mode=None
+        )
 
 
 def test_final_receipt_expected_map_binds_sampler_and_manifest_key(tmp_path):
     receipt = _receipt()
-    write_final_receipt(tmp_path / "final_acceptance.json", receipt)
+    write_final_receipt(
+        tmp_path / "final_acceptance.json",
+        receipt,
+        expected_empirical_adapter_mode=None,
+    )
     load_final_receipt(
         tmp_path,
+        expected_empirical_adapter_mode=None,
         expected={
             "sampler": receipt["sampler"],
             "validation_batch.manifest_key": "first",
@@ -859,10 +886,16 @@ def test_final_receipt_expected_map_binds_sampler_and_manifest_key(tmp_path):
     changed_sampler = copy.deepcopy(receipt["sampler"])
     changed_sampler["dataset_size"] = 11
     with pytest.raises(P3CompletionError, match="sampler"):
-        load_final_receipt(tmp_path, expected={"sampler": changed_sampler})
+        load_final_receipt(
+            tmp_path,
+            expected_empirical_adapter_mode=None,
+            expected={"sampler": changed_sampler},
+        )
     with pytest.raises(P3CompletionError, match="validation_batch.manifest_key"):
         load_final_receipt(
-            tmp_path, expected={"validation_batch.manifest_key": "different"}
+            tmp_path,
+            expected_empirical_adapter_mode=None,
+            expected={"validation_batch.manifest_key": "different"},
         )
 
 
@@ -900,7 +933,116 @@ def test_final_receipt_rejects_equal_training_and_acceptance_process_ids(tmp_pat
         write_final_receipt(
             tmp_path / "same_process.json",
             _receipt(process_id=456, training_process_id=456),
+            expected_empirical_adapter_mode=None,
         )
+
+
+def test_final_receipt_requires_expected_empirical_adapter_mode() -> None:
+    contract_sha = "3" * 64
+    receipt = _receipt(
+        depth_producer_sha256=ACCEPTED_IDENTITIES["producer_sha256"],
+        depth_cache_manifest_sha256=ACCEPTED_IDENTITIES["manifest_sha256"],
+        depth_native_contract_sha256=None,
+        depth_empirical_contract_sha256=contract_sha,
+        depth_empirical_provenance={
+            "contract_kind": "empirical_lossy_cache",
+            "empirical_contract_sha256": contract_sha,
+            "assumption_tags": [EMPIRICAL_ASSUMPTION],
+            "adapter_id": EMPIRICAL_ADAPTER_ID,
+            "adapter_mode": "proxy_depth_z",
+            "producer_sha256": ACCEPTED_IDENTITIES["producer_sha256"],
+            "cache_manifest_sha256": ACCEPTED_IDENTITIES["manifest_sha256"],
+            "manifest_id": ACCEPTED_IDENTITIES["manifest_id"],
+            "validation_sha256": ACCEPTED_IDENTITIES["validation_sha256"],
+            "validation_schema": "dinocular-mapanything-cache-validation-v1",
+            "data_sha256": ACCEPTED_IDENTITIES["data_sha256"],
+            "source_index_sha256": ACCEPTED_IDENTITIES["source_index_sha256"],
+            "wire_format_sha256": ACCEPTED_IDENTITIES["wire_format_sha256"],
+            "checkpoint_sha256": ACCEPTED_IDENTITIES["checkpoint_sha256"],
+            "non_equivalence_statement": EMPIRICAL_NON_EQUIVALENCE,
+            "execution_authority_granted": False,
+            "neutrality_claimed": False,
+            "rgb_only_claimed": False,
+        },
+        depth_validation_sha256=ACCEPTED_IDENTITIES["validation_sha256"],
+        depth_checkpoint_sha256=ACCEPTED_IDENTITIES["checkpoint_sha256"],
+    )
+    validate_final_receipt(
+        receipt, expected_empirical_adapter_mode="proxy_depth_z"
+    )
+    with pytest.raises(P3CompletionError, match="adapter mode"):
+        validate_final_receipt(
+            receipt,
+            expected_empirical_adapter_mode="exact_constant_zero_numeric",
+        )
+    with pytest.raises(P3CompletionError, match="adapter mode"):
+        validate_final_receipt(receipt, expected_empirical_adapter_mode=None)
+
+
+def test_final_receipt_rejects_forged_minimal_empirical_provenance(tmp_path):
+    receipt = _receipt(
+        depth_producer_sha256="1" * 64,
+        depth_cache_manifest_sha256="2" * 64,
+        depth_native_contract_sha256=None,
+        depth_empirical_contract_sha256="3" * 64,
+        depth_empirical_provenance={"empirical_contract_sha256": "3" * 64},
+        depth_validation_sha256="4" * 64,
+        depth_checkpoint_sha256="5" * 64,
+    )
+    with pytest.raises(P3CompletionError, match="empirical provenance"):
+        write_final_receipt(
+            tmp_path / "forged.json",
+            receipt,
+            expected_empirical_adapter_mode="proxy_depth_z",
+        )
+
+
+def test_candidate_chain_missing_authorization_fails_closed():
+    with pytest.raises(Exception, match="run-card schema|authorization"):
+        submit_p3_chain.require_candidate_launch_authorization({})
+
+
+def test_existing_chain_start_validates_current_run_card_before_reuse(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_card_path = tmp_path / "card.yaml"
+    run_card_path.write_text("schema: forged\nrun_card_sha256: " + "a" * 64 + "\n")
+    run_card_file_sha256 = sha256_file(run_card_path)
+    manifest = {
+        "schema": "dino-wm.p3-slurm-chain.v1",
+        "target_steps": 100,
+        "segment_steps": 10,
+        "checkpoint_every_steps": 10,
+        "partition": "gpu",
+        "time_limit": "01:00:00",
+        "job_name": "test",
+        "run_card": str(run_card_path.resolve()),
+        "run_card_file_sha256": run_card_file_sha256,
+        "run_card_sha256": "a" * 64,
+        "overrides": [],
+        "jobs": [{"job_id": "123"}],
+    }
+    _write_json(run_dir / "chain.json", manifest)
+    args = type(
+        "Args",
+        (),
+        {
+            "target_steps": 100,
+            "segment_steps": 10,
+            "checkpoint_every_steps": 10,
+            "partition": "gpu",
+            "time_limit": "01:00:00",
+            "job_name": "test",
+            "run_card": run_card_path,
+            "run_card_file_sha256": run_card_file_sha256,
+            "run_card_sha256": "a" * 64,
+            "override": [],
+            "run_dir": run_dir,
+            "dependency": None,
+        },
+    )()
+    with pytest.raises(Exception, match="run-card schema|authorization"):
+        submit_p3_chain.start(args)
 
 
 def _paired_fixture():
@@ -1045,6 +1187,50 @@ def test_paired_config_audit_rejects_unallowlisted_container_drift():
         _paired_audit(changed, cells)
 
 
+def test_paired_config_audit_accepts_exact_empirical_arm_differences():
+    cards, cells = _paired_fixture()
+    for card in cards:
+        if card["environment"] != "pusht" or card["arm"] == "dino_pinned":
+            continue
+        zero = card["arm"] == "dinocular_zerodepth"
+        card["depth_inputs"] = {
+            "contract_kind": "empirical_lossy_cache",
+            "producer_sha256": "1" * 64,
+            "cache_manifest_sha256": "2" * 64,
+            "native_contract_sha256": None,
+            "empirical_contract_sha256": "3" * 64,
+            "validation_sha256": "4" * 64,
+            "checkpoint_sha256": "5" * 64,
+            "adapter_mode": (
+                "exact_constant_zero_numeric" if zero else "proxy_depth_z"
+            ),
+        }
+        card["environment_variables"] = {
+            "DINOV2_REPO": "/study/code/dinov2",
+            "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+            "DINOCULAR_STUDENT_WEIGHTS": "/study/checkpoints/student.pth",
+            "DINOCULAR_DEPTH_INPUT_MODE": "empirical_lossy_cache_v1",
+            "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT": "/study/contracts/empirical.json",
+            "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT_SHA256": "3" * 64,
+            "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE": "/study/releases/empirical.json",
+            "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE_SHA256": "6" * 64,
+            "DINOCULAR_EMPIRICAL_ADAPTER_ID": "mapanything_pusht_empirical_lossy_v1",
+            "DINOCULAR_EMPIRICAL_ADAPTER_MODE": card["depth_inputs"]["adapter_mode"],
+            "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION": "true" if zero else "false",
+        }
+        card["encoder_boundary"] = (
+            "exact_constant_zero_numeric_and_audit_mask"
+            if zero
+            else "empirical_proxy_depth_and_payload_presence_mask"
+        )
+        cell = cells[("pusht", card["arm"], card["seed"])]
+        cell["depth_native_contract_sha256"] = None
+        cell["depth_empirical_contract_sha256"] = "3" * 64
+        cell["depth_adapter_mode"] = card["depth_inputs"]["adapter_mode"]
+    comparisons = _paired_audit(cards, cells)
+    assert len(comparisons) == 36
+
+
 def _p4_acceptance_fixture(tmp_path):
     run_dir = tmp_path / "training"
     target = 100
@@ -1112,9 +1298,19 @@ def _p4_acceptance_fixture(tmp_path):
         },
     )
     receipt_path = run_dir / "final_acceptance.json"
-    receipt_sha256 = write_final_receipt(receipt_path, receipt)
+    receipt_sha256 = write_final_receipt(
+        receipt_path, receipt, expected_empirical_adapter_mode=None
+    )
     training_card = {
+        "schema": LEGACY_RUN_CARD_SCHEMA,
         "kind": "p3-training",
+        "arm": "dino_pinned",
+        "environment": "pusht",
+        "environment_variables": {
+            "DINOV2_REPO": "/study/code/dinov2",
+            "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+        },
+        "overrides": ["encoder=dino_pinned"],
         "run_card_sha256": run_card_sha256,
         "config_sha256": "b" * 64,
         "batch_size": 4,
@@ -1156,7 +1352,15 @@ def _p4_acceptance_fixture(tmp_path):
     }
     _write_json(run_dir / "chain.json", chain)
     card = {
+        "schema": LEGACY_RUN_CARD_SCHEMA,
         "kind": "p4-open-loop",
+        "arm": "dino_pinned",
+        "environment": "pusht",
+        "environment_variables": {
+            "DINOV2_REPO": "/study/code/dinov2",
+            "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+        },
+        "overrides": ["encoder=dino_pinned"],
         "run_id": "p4-pusht-dino_pinned-s1",
         "run_dir": str(run_dir),
         "training_run_id": "p3-pusht-dino_pinned-s1",
@@ -1218,6 +1422,42 @@ def test_receipt_consumers_reject_rehashed_sampler_or_manifest_key(
             _load_cell(card)
 
 
+@pytest.mark.parametrize("consumer", ["evaluator", "collector"])
+@pytest.mark.parametrize(
+    "artifact", ["run_dir", "progress", "checkpoint", "chain", "final_receipt"]
+)
+def test_completion_consumers_reject_lexical_evidence_aliases(
+    tmp_path, consumer, artifact
+):
+    card, training_card, progress, chain = _p4_acceptance_fixture(tmp_path)
+    run_dir = Path(card["training_run_dir"])
+    if artifact == "run_dir":
+        alias = tmp_path / "training-alias"
+        alias.symlink_to(run_dir, target_is_directory=True)
+        if consumer == "evaluator":
+            training_run_dir = alias
+        else:
+            card = dict(card, run_dir=str(alias))
+            training_run_dir = run_dir
+    else:
+        training_run_dir = run_dir
+        path = {
+            "progress": run_dir / "progress.json",
+            "checkpoint": Path(progress["checkpoint"]),
+            "chain": run_dir / "chain.json",
+            "final_receipt": run_dir / "final_acceptance.json",
+        }[artifact]
+        target = path.with_name(path.name + ".real")
+        path.rename(target)
+        path.symlink_to(target)
+    error = EvaluationContractError if consumer == "evaluator" else HarnessError
+    with pytest.raises(error, match="symlink"):
+        if consumer == "evaluator":
+            _verify_training_completion(card, training_card, training_run_dir)
+        else:
+            _load_cell(card)
+
+
 @pytest.mark.parametrize("field", ["sampler", "manifest_key"])
 def test_chain_acceptance_rejects_rehashed_sampler_or_manifest_key(
     tmp_path, monkeypatch, field
@@ -1248,6 +1488,11 @@ def test_chain_acceptance_rejects_rehashed_sampler_or_manifest_key(
         "check_output",
         lambda *_args, **_kwargs: "f" * 40 + "\n",
     )
+    monkeypatch.setattr(
+        submit_p3_chain,
+        "load_and_validate_run_card",
+        lambda *_args, **_kwargs: training_card,
+    )
     match = "sampler" if field == "sampler" else "validation_batch.manifest_key"
     with pytest.raises(RuntimeError, match=match):
         submit_p3_chain.continue_chain(
@@ -1261,7 +1506,22 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
     checkpoint.parent.mkdir(parents=True)
     torch.save({"target": 100}, checkpoint)
     training_card = tmp_path / "training.yaml"
-    training_card.write_text("immutable: true\n", encoding="utf-8")
+    training_card.write_text(
+        yaml.safe_dump(
+            {
+                "schema": LEGACY_RUN_CARD_SCHEMA,
+                "arm": "dino_pinned",
+                "environment": "pusht",
+                "environment_variables": {
+                    "DINOV2_REPO": "/study/code/dinov2",
+                    "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+                },
+                "overrides": ["encoder=dino_pinned"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     data_manifest = tmp_path / "DATASET_MANIFEST.json"
     _write_json(data_manifest, {"released": True})
     heldout = materialize_heldout_manifest(
@@ -1309,7 +1569,9 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         },
     )
     receipt_path = run_dir / "final_acceptance.json"
-    receipt_sha = write_final_receipt(receipt_path, receipt)
+    receipt_sha = write_final_receipt(
+        receipt_path, receipt, expected_empirical_adapter_mode=None
+    )
     event = {
         "job_id": "222",
         "progress_status": "TARGET_REACHED",
@@ -1341,7 +1603,15 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
     }
     _write_json(run_dir / "chain.json", chain)
     card = {
+        "schema": LEGACY_RUN_CARD_SCHEMA,
         "kind": "p4-open-loop",
+        "arm": "dino_pinned",
+        "environment": "pusht",
+        "environment_variables": {
+            "DINOV2_REPO": "/study/code/dinov2",
+            "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+        },
+        "overrides": ["encoder=dino_pinned"],
         "run_id": "p4-pusht-dino_pinned-s1",
         "training_run_id": "p3-pusht-dino_pinned-s1",
         "training_run_dir": str(run_dir),
@@ -1364,6 +1634,56 @@ def test_p4_execute_gate_requires_exact_final_receipt_and_tail(tmp_path):
         "heldout_loss_manifest": heldout,
     }
     verify_evaluation_training_dependencies([card], {"p3-pusht-dino_pinned-s1": "222"})
+
+    run_dir_alias = tmp_path / "training-alias"
+    run_dir_alias.symlink_to(run_dir, target_is_directory=True)
+    aliased_card = copy.deepcopy(card)
+    aliased_card["training_run_dir"] = str(run_dir_alias)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_training_dependencies(
+            [aliased_card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
+
+    chain_path = run_dir / "chain.json"
+    chain_target = run_dir / "chain-target.json"
+    chain_path.rename(chain_target)
+    chain_path.symlink_to(chain_target)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_training_dependencies(
+            [card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
+    chain_path.unlink()
+    chain_target.rename(chain_path)
+
+    progress_path = run_dir / "progress.json"
+    progress_target = run_dir / "progress-target.json"
+    progress_path.rename(progress_target)
+    progress_path.symlink_to(progress_target)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_training_dependencies(
+            [card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
+    progress_path.unlink()
+    progress_target.rename(progress_path)
+
+    checkpoint_target = checkpoint.with_name("checkpoint-target.pth")
+    checkpoint.rename(checkpoint_target)
+    checkpoint.symlink_to(checkpoint_target)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_training_dependencies(
+            [card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
+    checkpoint.unlink()
+    checkpoint_target.rename(checkpoint)
+
+    receipt_alias = run_dir / "final-acceptance-alias.json"
+    receipt_alias.symlink_to(receipt_path)
+    aliased_card = copy.deepcopy(card)
+    aliased_card["training_completion_receipt"]["path"] = str(receipt_alias)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_training_dependencies(
+            [aliased_card], {"p3-pusht-dino_pinned-s1": "222"}
+        )
 
     event["training_process_id"] = 999
     _write_json(run_dir / "chain.json", chain)
@@ -1442,7 +1762,15 @@ def test_fresh_trainer_process_loads_final_state_and_rejects_tampered_metadata(
     run_card.write_text(
         json.dumps(
             {
+                "schema": LEGACY_RUN_CARD_SCHEMA,
                 "kind": "p3-training",
+                "arm": "dino_pinned",
+                "environment": "pusht",
+                "environment_variables": {
+                    "DINOV2_REPO": "/study/code/dinov2",
+                    "DINOV2_VITS14_WEIGHTS": "/study/models/dinov2.pth",
+                },
+                "overrides": ["encoder=dino_pinned"],
                 "run_card_sha256": "a" * 64,
                 "source_commit": "f" * 40,
                 "config_sha256": "b" * 64,

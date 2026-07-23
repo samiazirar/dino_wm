@@ -14,6 +14,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from depth_contract import DepthContractError, load_native_depth_contract
+from empirical_depth_contract import (
+    EMPIRICAL_ADAPTER_ID,
+    apply_empirical_depth_adapter,
+    load_empirical_depth_contract,
+    load_empirical_runtime_release,
+)
 from .dinocular_backbone import BackendSpec, build_backbone, extract_features
 
 
@@ -293,6 +299,12 @@ class DinocularEncoder(nn.Module):
         native_depth_contract_path: Optional[str] = None,
         native_depth_contract_sha256: Optional[str] = None,
         selected_cache_producer_sha256: Optional[str] = None,
+        empirical_depth_contract_path: Optional[str] = None,
+        empirical_depth_contract_sha256: Optional[str] = None,
+        empirical_runtime_release_path: Optional[str] = None,
+        empirical_runtime_release_sha256: Optional[str] = None,
+        depth_input_mode: str = "native_v1",
+        empirical_zero_intervention: bool = False,
         neutralize_depth_at_encoder_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
@@ -314,6 +326,8 @@ class DinocularEncoder(nn.Module):
         self.allowed_outside_prefixes = tuple(allowed_outside_prefixes)
         self.allowed_missing_keys = tuple(allowed_missing_keys)
         self.depth_contract_status = str(depth_contract_status)
+        self.depth_input_mode = str(depth_input_mode)
+        self.empirical_zero_intervention = bool(empirical_zero_intervention)
         self.neutralize_depth_at_encoder_input = bool(
             neutralize_depth_at_encoder_input
         )
@@ -321,16 +335,96 @@ class DinocularEncoder(nn.Module):
             Callable[["DinocularEncoder", torch.Tensor, torch.Tensor], None]
         ] = []
         self.native_depth_contract = None
+        self.empirical_depth_contract = None
+        self.cache_binding = None
         if (native_depth_contract_path is None) != (
             native_depth_contract_sha256 is None
         ):
             raise DepthContractError(
                 "native depth contract path and SHA-256 must be supplied together"
             )
-        if native_depth_contract_path is not None:
+        if (empirical_depth_contract_path is None) != (
+            empirical_depth_contract_sha256 is None
+        ):
+            raise DepthContractError(
+                "empirical depth contract path and SHA-256 must be supplied together"
+            )
+        if (empirical_runtime_release_path is None) != (
+            empirical_runtime_release_sha256 is None
+        ):
+            raise DepthContractError(
+                "empirical runtime release path and SHA-256 must be supplied together"
+            )
+        if native_depth_contract_path is not None and empirical_depth_contract_path is not None:
+            raise DepthContractError("native and empirical depth contracts are mutually exclusive")
+        if empirical_depth_contract_path is not None:
+            if self.depth_input_mode != "empirical_lossy_cache_v1":
+                raise DepthContractError("empirical contract requires empirical_lossy_cache_v1 mode")
+            if self.neutralize_depth_at_encoder_input:
+                raise DepthContractError("native neutralization is forbidden for empirical input")
+            if empirical_runtime_release_path is None:
+                raise DepthContractError(
+                    "empirical mode requires an independently accepted runtime release"
+                )
+            canonical_empirical = load_empirical_depth_contract(
+                empirical_depth_contract_path,
+                str(empirical_depth_contract_sha256),
+                expected_checkpoint_sha256=self.checkpoint_sha256,
+            )
+            empirical_release = load_empirical_runtime_release(
+                empirical_runtime_release_path,
+                str(empirical_runtime_release_sha256),
+                contract=canonical_empirical,
+            )
+            empirical = load_empirical_depth_contract(
+                empirical_depth_contract_path,
+                str(empirical_depth_contract_sha256),
+                expected_checkpoint_sha256=self.checkpoint_sha256,
+                runtime_resolver=empirical_release.resolver,
+            )
+            configured_checkpoint = Path(self.checkpoint_path)
+            if configured_checkpoint != empirical.checkpoint_path:
+                raise DepthContractError(
+                    "configured checkpoint path differs from the runtime resolver"
+                )
+            empirical_release.resolver.validate_open_path(
+                configured_checkpoint, artifact="empirical checkpoint"
+            )
+            checkpoint_contract = empirical.manifest["checkpoint"]
+            configured = {
+                "backend": self.backend,
+                "factory": self.factory,
+                "checkpoint_key": self.checkpoint_key,
+                "state_prefix": self.state_prefix,
+                "feature_key": self.feature_key,
+                "input_shape": [1, self.input_size, self.input_size],
+            }
+            mismatches = {
+                key: (checkpoint_contract.get(key), value)
+                for key, value in configured.items()
+                if checkpoint_contract.get(key) != value
+            }
+            if mismatches:
+                raise DepthContractError(
+                    f"empirical contract/checkpoint configuration mismatch: {mismatches}"
+                )
+            self.empirical_depth_contract = empirical
+            self.depth_contract = dict(empirical.manifest)
+            self.depth_contract_status = "complete"
+            self.empirical_depth_contract_path = str(empirical.path)
+            self.empirical_depth_contract_sha256 = empirical.sha256
+            self.empirical_runtime_release_path = str(empirical_release.path)
+            self.empirical_runtime_release_sha256 = empirical_release.sha256
+            self.empirical_runtime_mode = empirical_release.mode
+            self.selected_cache_producer_sha256 = empirical.producer_sha256
+            self.native_depth_contract_path = None
+            self.native_depth_contract_sha256 = None
+        elif native_depth_contract_path is not None:
+            if self.depth_input_mode != "native_v1" or self.empirical_zero_intervention:
+                raise DepthContractError("native contract requires unchanged native_v1 semantics")
             native = load_native_depth_contract(
                 native_depth_contract_path,
-                native_depth_contract_sha256,
+                str(native_depth_contract_sha256),
                 expected_checkpoint_sha256=self.checkpoint_sha256,
             )
             checkpoint_contract = native.manifest["checkpoint"]
@@ -362,14 +456,25 @@ class DinocularEncoder(nn.Module):
             self.native_depth_contract_path = str(native.path)
             self.native_depth_contract_sha256 = native.sha256
             self.selected_cache_producer_sha256 = self.cache_binding.producer_sha256
+            self.empirical_depth_contract_path = None
+            self.empirical_depth_contract_sha256 = None
+            self.empirical_runtime_release_path = None
+            self.empirical_runtime_release_sha256 = None
+            self.empirical_runtime_mode = None
         else:
             if selected_cache_producer_sha256 is not None:
                 raise DepthContractError(
                     "selected cache producer requires a native depth contract"
                 )
-            self.cache_binding = None
+            if self.depth_input_mode != "native_v1" or self.empirical_zero_intervention:
+                raise DepthContractError("empirical mode requires an explicit empirical contract")
             self.native_depth_contract_path = None
             self.native_depth_contract_sha256 = None
+            self.empirical_depth_contract_path = None
+            self.empirical_depth_contract_sha256 = None
+            self.empirical_runtime_release_path = None
+            self.empirical_runtime_release_sha256 = None
+            self.empirical_runtime_mode = None
             self.selected_cache_producer_sha256 = None
         if self.neutralize_depth_at_encoder_input and self.native_depth_contract is None:
             raise DepthContractError(
@@ -426,13 +531,20 @@ class DinocularEncoder(nn.Module):
         self.register_buffer(
             "depth_std", torch.tensor(float(depth_std), dtype=torch.float32), persistent=False
         )
-        if self.native_depth_contract is None:
+        if self.empirical_depth_contract is not None:
+            cache_minimum, cache_maximum = 0.0, 1.0
+            neutral_depth, neutral_mask = 0.0, 0.0
+            affine_scale, affine_offset = 1.0, 0.0
+            clip_minimum, clip_maximum = 0.0, 1.0
+            self.depth_interpolation = "identity_224x224"
+        elif self.native_depth_contract is None:
             cache_minimum, cache_maximum = 0.0, 1.0
             neutral_depth, neutral_mask = 0.0, 0.0
             affine_scale, affine_offset = 1.0, 0.0
             clip_minimum, clip_maximum = 0.0, 1.0
             self.depth_interpolation = "identity_224x224"
         else:
+            assert self.cache_binding is not None
             cache_minimum = self.cache_binding.wire_minimum
             cache_maximum = self.cache_binding.wire_maximum
             neutral_depth = self.native_depth_contract.neutral_normalized_depth
@@ -476,6 +588,14 @@ class DinocularEncoder(nn.Module):
             "num_patches": self.num_patches,
             "emb_dim": self.emb_dim,
             "native_depth_contract_sha256": self.native_depth_contract_sha256,
+            "empirical_depth_contract_sha256": self.empirical_depth_contract_sha256,
+            "depth_input_mode": self.depth_input_mode,
+            "empirical_adapter_id": (
+                EMPIRICAL_ADAPTER_ID
+                if self.empirical_depth_contract is not None
+                else None
+            ),
+            "empirical_zero_intervention": self.empirical_zero_intervention,
             "selected_cache_producer_sha256": self.selected_cache_producer_sha256,
         }
 
@@ -569,6 +689,21 @@ class DinocularEncoder(nn.Module):
                 "depth validity mask shape differs from depth: "
                 f"{tuple(depth_validity_mask.shape)} versus {tuple(depth.shape)}"
             )
+        if self.empirical_depth_contract is not None:
+            if not torch.is_floating_point(depth_validity_mask):
+                raise TypeError("empirical payload-presence mask must be floating point")
+            if not torch.isfinite(depth_validity_mask).all() or not torch.all(
+                depth_validity_mask == 1.0
+            ):
+                raise ValueError(
+                    "empirical payload-presence mask must be exact all-ones after validation"
+                )
+            adapted, boundary_mask, diagnostics = apply_empirical_depth_adapter(
+                depth,
+                zero_intervention=self.empirical_zero_intervention,
+            )
+            self.last_empirical_adapter_diagnostics = diagnostics
+            return adapted, boundary_mask
         target_size = (self.input_size, self.input_size)
         if self.depth_interpolation == "identity_224x224":
             if tuple(depth.shape[-2:]) != target_size:

@@ -40,6 +40,7 @@ from tools.harness_common import (
     LOCKED_HORIZONS,
     LOCKED_SEEDS,
     LOCKED_TARGETS,
+    LEGACY_RUN_CARD_SCHEMA,
     RUN_CARD_SCHEMA,
     derive_segment_sizing,
     finalize_run_card,
@@ -548,7 +549,7 @@ def _add_p3_completion_contract(card, environment, seed):
 def _card(run_id, arm, environment, seed, kind="p3-training", gate_mode=None):
     sizing = _sizing(arm, environment, LOCKED_TARGETS[environment])
     card = {
-        "schema": RUN_CARD_SCHEMA,
+        "schema": LEGACY_RUN_CARD_SCHEMA,
         "kind": kind,
         "run_id": run_id,
         "code_root": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/code/dino_wm",
@@ -573,15 +574,131 @@ def _card(run_id, arm, environment, seed, kind="p3-training", gate_mode=None):
         "decoder": False,
         "strict_resume": True,
         "depends_on": [],
-        "environment_variables": {},
+        "environment_variables": {
+            "DINOV2_REPO": "/native/dinov2",
+            "DINOV2_VITS14_WEIGHTS": "/native/dinov2.pth",
+        },
         "overrides": [f"env={environment}", f"encoder={arm}"],
         "config_sha256": "c" * 64,
     }
+    if arm != "dino_pinned":
+        card["depth_inputs"] = {
+            "producer": "mapanything_recovered_framewise",
+            "producer_sha256": "1" * 64,
+            "cache_dir": f"/native/{environment}.lmdb",
+            "cache_manifest_sha256": "2" * 64,
+            "validation_path": f"/native/{environment}.json",
+            "validation_sha256": "3" * 64,
+            "native_contract_path": "/native/contract.json",
+            "native_contract_sha256": "4" * 64,
+            "checkpoint_sha256": "5" * 64,
+        }
+        card["environment_variables"].update(
+            {
+                "DINOCULAR_STUDENT_WEIGHTS": "/native/student.pth",
+                "DINOCULAR_NATIVE_DEPTH_CONTRACT": "/native/contract.json",
+                "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": "4" * 64,
+                "DINOCULAR_CACHE_PRODUCER_SHA256": "1" * 64,
+            }
+        )
     if gate_mode is not None:
         card["gate_mode"] = gate_mode
     if kind == "p3-training":
         _add_p3_completion_contract(card, environment, seed)
     return finalize_run_card(card)
+
+
+def test_materializer_rejects_producer_decision_alias_before_open(tmp_path):
+    spec = {
+        "p2a": {
+            "tie_tolerance": 0.000001,
+            "producers": [
+                "da3_giant_video",
+                "mapanything_recovered_framewise",
+            ],
+        }
+    }
+    target = tmp_path / "decision-target.json"
+    _write_json(
+        target,
+        {
+            "schema": "dino-wm-p2a-producer-decision-v1",
+            "status": "PASS",
+            "tie_tolerance": 0.000001,
+            "winner": "mapanything_recovered_framewise",
+            "winner_assumption_tags": ["[ASSUMPTION: RECOVERED-CONTRACT]"],
+        },
+    )
+    alias = tmp_path / "decision.json"
+    alias.symlink_to(target)
+    with pytest.raises(make_manifests.HarnessError, match="symlink"):
+        make_manifests._load_winner(alias, spec)
+
+
+@pytest.mark.parametrize("aliased", ["manifest", "metadata"])
+def test_materializer_rejects_heldout_evidence_aliases_before_open(
+    tmp_path, monkeypatch, aliased
+):
+    manifest = tmp_path / "heldout_pusht.jsonl"
+    manifest_target = tmp_path / "heldout-target.jsonl"
+    manifest_target.write_text("{}\n", encoding="utf-8")
+    metadata = manifest.with_suffix(".meta.json")
+    metadata_target = tmp_path / "heldout-target.meta.json"
+    metadata_value = {
+        "schema": "dino-wm.p3-heldout-manifest.v1",
+        "environment": "pusht",
+        "selection": "all_validation_examples",
+        "source_commit": "f" * 40,
+        "manifest_sha256": sha256_file(manifest_target),
+        "entry_count": 1,
+        "target_steps": LOCKED_TARGETS["pusht"],
+        "rounding_rule": "ceil(target_steps*percent/100)",
+        "data_manifest_sha256": "a" * 64,
+        "split_sha256": "b" * 64,
+    }
+    if aliased == "manifest":
+        manifest.symlink_to(manifest_target)
+        _write_json(metadata, metadata_value)
+    else:
+        manifest.write_bytes(manifest_target.read_bytes())
+        metadata_value["manifest_sha256"] = sha256_file(manifest)
+        _write_json(metadata_target, metadata_value)
+        metadata.symlink_to(metadata_target)
+    monkeypatch.setattr(
+        make_manifests, "require_real_marvin_path", lambda value, _label: value
+    )
+    with pytest.raises(make_manifests.HarnessError, match="symlink"):
+        make_manifests._heldout_manifest_record(
+            tmp_path, "pusht", "f" * 40, LOCKED_TARGETS["pusht"]
+        )
+
+
+@pytest.mark.parametrize("aliased", ["manifest", "metadata"])
+def test_evaluation_materializer_rejects_fixed_evidence_aliases_before_open(
+    tmp_path, monkeypatch, aliased
+):
+    manifest = tmp_path / "openloop_pusht.jsonl"
+    manifest_target = tmp_path / "openloop-target.jsonl"
+    manifest_target.write_text("{}\n", encoding="utf-8")
+    metadata = manifest.with_suffix(".meta.json")
+    metadata_target = tmp_path / "openloop-target.meta.json"
+    metadata_value = {
+        "environment": "pusht",
+        "frameskip": 5,
+        "horizons": [1, 5, 10, 25],
+    }
+    if aliased == "manifest":
+        manifest.symlink_to(manifest_target)
+        _write_json(metadata, metadata_value)
+    else:
+        manifest.write_bytes(manifest_target.read_bytes())
+        _write_json(metadata_target, metadata_value)
+        metadata.symlink_to(metadata_target)
+    monkeypatch.setattr(
+        make_manifests, "require_real_marvin_path", lambda value, _label: value
+    )
+    with pytest.raises(make_manifests.HarnessError, match="symlink"):
+        make_manifests._fixed_manifest_record(tmp_path, "pusht")
 
 
 def test_heldout_entry_count_boolean_fails_card_and_materialization_record(tmp_path):
@@ -664,6 +781,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
                     environment=environment,
                     arm=arm,
                     seed=seed,
+                    schema=LEGACY_RUN_CARD_SCHEMA,
                 )
                 if arm != "dino_pinned":
                     make_manifests._depth_overrides(
@@ -713,6 +831,11 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
     monkeypatch.setattr(
         make_manifests,
         "_resolve_inputs",
+        lambda _args: (spec, {}, evidence),
+    )
+    monkeypatch.setattr(
+        make_manifests,
+        "_resolve_native_inputs",
         lambda _args: (spec, {}, evidence),
     )
     monkeypatch.setattr(
@@ -781,6 +904,7 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
             environment="pusht",
             arm="dinocular",
             seed=1,
+            schema=LEGACY_RUN_CARD_SCHEMA,
         )
         make_manifests._depth_overrides(
             card,
@@ -856,6 +980,24 @@ def test_p4_cards_bind_every_exact_hashed_p3_card_and_run_dir(tmp_path, monkeypa
         "--dependency=afterok:<p2a-pusht-dinocular-s1-" in " ".join(job["command"])
         for job in dry_result["jobs"]
     )
+    aliased_fixed = dict(evaluation_cards[0])
+    aliased_fixed["fixed_manifest"] = dict(aliased_fixed["fixed_manifest"])
+    fixed_target = Path(aliased_fixed["fixed_manifest"]["path"])
+    fixed_alias = tmp_path / "fixed-manifest-alias.jsonl"
+    fixed_alias.symlink_to(fixed_target)
+    aliased_fixed["fixed_manifest"]["path"] = str(fixed_alias)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_bindings(aliased_fixed)
+    aliased_training = dict(evaluation_cards[0])
+    aliased_training["training_run_card"] = dict(
+        aliased_training["training_run_card"]
+    )
+    training_target = Path(aliased_training["training_run_card"]["path"])
+    training_alias = tmp_path / "training-card-alias.yaml"
+    training_alias.symlink_to(training_target)
+    aliased_training["training_run_card"]["path"] = str(training_alias)
+    with pytest.raises(HarnessError, match="symlink"):
+        verify_evaluation_bindings(aliased_training)
     bad_config = dict(evaluation_cards[0])
     bad_config["config_sha256"] = "0" * 64
     with pytest.raises(Exception, match="exactly bound"):
@@ -1115,6 +1257,18 @@ DINOCULAR_TEST_ENVIRONMENT = {
     "DINOCULAR_CACHE_PRODUCER_SHA256": "b" * 64,
 }
 
+DINOCULAR_EMPIRICAL_TEST_ENVIRONMENT = {
+    "DINOCULAR_STUDENT_WEIGHTS": "/opt/dinocular/models/dinocular_student.pth",
+    "DINOCULAR_DEPTH_INPUT_MODE": "empirical_lossy_cache_v1",
+    "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT": "/opt/dinocular/contracts/empirical.json",
+    "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT_SHA256": "c" * 64,
+    "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE": "/opt/dinocular/releases/empirical.json",
+    "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE_SHA256": "d" * 64,
+    "DINOCULAR_EMPIRICAL_ADAPTER_ID": "mapanything_pusht_empirical_lossy_v1",
+    "DINOCULAR_EMPIRICAL_ADAPTER_MODE": "proxy_depth_z",
+    "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION": "false",
+}
+
 
 def _run_container_environment_helper(arm, environment, *, check):
     helper = Path(__file__).resolve().parents[1] / "tools/dinocular_container_env.sh"
@@ -1123,7 +1277,7 @@ def _run_container_environment_helper(arm, environment, *, check):
             "bash",
             "-c",
             (
-                'source "$1"; build_dinocular_container_env "$2"; '
+                'source "$1"; build_dinocular_container_env "$2" || exit $?; '
                 "if ((${#DINOCULAR_CONTAINER_ENV[@]})); then "
                 'printf "%s\\n" "${DINOCULAR_CONTAINER_ENV[@]}"; fi'
             ),
@@ -1158,6 +1312,54 @@ def test_dinocular_arms_container_environment_contains_exact_values(arm):
         for key, path in DINOCULAR_TEST_ENVIRONMENT.items()
         for value in ("--env", f"{key}={path}")
     ]
+
+
+@pytest.mark.parametrize(
+    ("arm", "mode", "zero"),
+    [
+        ("dinocular", "proxy_depth_z", "false"),
+        ("dinocular_zerodepth", "exact_constant_zero_numeric", "true"),
+    ],
+)
+def test_dinocular_empirical_container_environment_contains_exact_values(
+    arm, mode, zero
+):
+    environment = os.environ.copy()
+    values = dict(
+        DINOCULAR_EMPIRICAL_TEST_ENVIRONMENT,
+        DINOCULAR_EMPIRICAL_ADAPTER_MODE=mode,
+        DINOCULAR_EMPIRICAL_ZERO_INTERVENTION=zero,
+    )
+    environment.update(values)
+    completed = _run_container_environment_helper(arm, environment, check=True)
+    assert completed.stdout.splitlines() == [
+        value
+        for key, path in values.items()
+        for value in ("--env", f"{key}={path}")
+    ]
+
+
+def test_dinocular_empirical_container_environment_rejects_native_inputs():
+    environment = os.environ.copy()
+    environment.update(DINOCULAR_EMPIRICAL_TEST_ENVIRONMENT)
+    environment.update(DINOCULAR_TEST_ENVIRONMENT)
+    completed = _run_container_environment_helper(
+        "dinocular", environment, check=False
+    )
+    assert completed.returncode != 0
+    assert "must not include native depth inputs" in completed.stderr
+
+
+def test_dinocular_empirical_container_environment_rejects_wrong_arm_mode():
+    environment = os.environ.copy()
+    environment.update(DINOCULAR_EMPIRICAL_TEST_ENVIRONMENT)
+    environment["DINOCULAR_EMPIRICAL_ADAPTER_MODE"] = "exact_constant_zero_numeric"
+    environment["DINOCULAR_EMPIRICAL_ZERO_INTERVENTION"] = "true"
+    completed = _run_container_environment_helper(
+        "dinocular", environment, check=False
+    )
+    assert completed.returncode != 0
+    assert "adapter mode differs from arm" in completed.stderr
 
 
 @pytest.mark.parametrize("arm", ["dinocular", "dinocular_zerodepth"])
@@ -1383,9 +1585,14 @@ def _timing_collector_fixture(tmp_path):
             }
             if arm != "dino_pinned":
                 card["depth_inputs"] = {
+                    "producer": "mapanything_recovered_framewise",
+                    "producer_sha256": TIMING_PRODUCER_SHA256,
+                    "cache_dir": f"{artifact_root}/depth/{environment}.lmdb",
+                    "cache_manifest_sha256": "d" * 64,
+                    "validation_path": f"{artifact_root}/depth/{environment}.validation.json",
+                    "validation_sha256": "e" * 64,
                     "native_contract_path": f"{artifact_root}/manifests/native.json",
                     "native_contract_sha256": TIMING_NATIVE_SHA256,
-                    "producer_sha256": TIMING_PRODUCER_SHA256,
                     "checkpoint_sha256": "c" * 64,
                 }
             card = finalize_run_card(card)
@@ -1745,6 +1952,46 @@ def test_timing_gate_rejects_truncating_float_train_windows(tmp_path):
     completed = _run_timing_gate(matrix_path, results_root, run_id, check=False)
     assert completed.returncode == 2
     assert "must be integer 1981721" in completed.stderr
+
+
+def test_matrix_card_and_timing_summary_aliases_are_rejected_before_open(tmp_path):
+    card = _card("p3-pusht-dino_pinned-s1", "dino_pinned", "pusht", 1)
+    matrix_path = tmp_path / "matrix.yaml"
+    matrix = write_matrix(
+        matrix_path,
+        kind="p3-training",
+        cards=[card],
+        source_commit=card["source_commit"],
+    )
+    card_target = Path(matrix["cards"][0]["path"])
+    card_alias = tmp_path / "card-alias.yaml"
+    card_alias.symlink_to(card_target)
+    changed = yaml.safe_load(matrix_path.read_text(encoding="utf-8"))
+    changed["cards"][0]["path"] = str(card_alias)
+    unhashed = dict(changed)
+    unhashed.pop("matrix_sha256")
+    changed["matrix_sha256"] = sha256_bytes(canonical_json_bytes(unhashed))
+    matrix_path.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
+    with pytest.raises(HarnessError, match="symlink"):
+        load_matrix(matrix_path)
+
+    rates = _timing_summary(
+        tmp_path / "rates.json", {"dino_pinned/pusht": 0.488031}
+    )
+    rates_alias = tmp_path / "rates-alias.json"
+    rates_alias.symlink_to(rates)
+    with pytest.raises(HarnessError, match="symlink"):
+        derive_segment_sizing(
+            summary_path=rates_alias,
+            arm="dino_pinned",
+            environment="pusht",
+            target_steps=123858,
+            policy={
+                "max_productive_hours": 8.0,
+                "safety_margin_fraction": 0.2,
+                "quantum_steps": 1000,
+            },
+        )
 
 
 def test_pusht_segment_budget_rejects_26000_and_derives_safe_chunk(tmp_path):

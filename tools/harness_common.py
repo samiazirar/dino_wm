@@ -3,21 +3,115 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
 from typing import Any, Mapping, Sequence
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from empirical_depth_contract import (  # noqa: E402
+    EMPIRICAL_ADAPTER_ID,
+    EMPIRICAL_ASSUMPTION,
+    EMPIRICAL_NON_EQUIVALENCE,
+    EmpiricalDepthContractError,
+    LoadedDepthConsumptionIndex,
+    load_depth_consumption_index,
+    validate_empirical_provenance,
+)
 
 
 STUDY_SPEC_SCHEMA = "dino-wm-study-spec-v1"
 CONTRACT_INDEX_SCHEMA = "dino-wm-depth-contract-index-v1"
 MATRIX_SCHEMA = "dino-wm-run-matrix-v1"
 RUN_CARD_SCHEMA = "dino-wm-run-card-v1"
+LEGACY_RUN_CARD_SCHEMA = "dino-wm.legacy-run-card.v1"
+LAUNCH_AUTHORIZATION_SCHEMA = "dino-wm-launch-authorization-v1"
+AUTHORIZATION_PREREQUISITE_SCHEMAS = {
+    "source_release": {
+        "schema": "dino-wm-source-release-v1",
+        "state": "ACCEPTED",
+        "fields": {
+            "schema",
+            "state",
+            "authorization_subject",
+            "source_commit",
+            "source_file_sha256",
+        },
+        "binding_fields": None,
+    },
+    "empirical_implementation_acceptance": {
+        "schema": "dino-wm-empirical-implementation-acceptance-v1",
+        "state": "INDEPENDENTLY_ACCEPTED",
+        "verdict": "PASS",
+        "fields": {
+            "schema",
+            "state",
+            "verdict",
+            "authorization_subject",
+            "bindings",
+        },
+        "binding_fields": {
+            "contracts_index_sha256",
+            "empirical_contract_sha256",
+            "source_release_sha256",
+        },
+    },
+    "immutable_execution_acceptance": {
+        "schema": "dino-wm-immutable-execution-acceptance-v1",
+        "state": "INDEPENDENTLY_ACCEPTED",
+        "verdict": "PASS",
+        "fields": {
+            "schema",
+            "state",
+            "verdict",
+            "authorization_subject",
+            "bindings",
+        },
+        "binding_fields": {
+            "empirical_runtime_release_sha256",
+            "source_release_sha256",
+            "empirical_implementation_acceptance_sha256",
+        },
+    },
+    "immutable_probe_acceptance": {
+        "schema": "dino-wm-immutable-probe-acceptance-v1",
+        "state": "INDEPENDENTLY_ACCEPTED",
+        "verdict": "PASS",
+        "fields": {
+            "schema",
+            "state",
+            "verdict",
+            "authorization_subject",
+            "bindings",
+        },
+        "binding_fields": {
+            "empirical_runtime_release_sha256",
+            "immutable_execution_acceptance_sha256",
+        },
+    },
+}
+AUTHORIZATION_BINDING_FIELDS = {
+    "contracts_index_sha256",
+    "empirical_contract_sha256",
+    "empirical_runtime_release_sha256",
+    "source_commit",
+    "source_release_sha256",
+    "empirical_implementation_acceptance_sha256",
+    "immutable_execution_acceptance_sha256",
+    "immutable_probe_acceptance_sha256",
+}
+LAUNCH_OPERATIONS = frozenset(
+    {"materialize", "submit", "run_matrix", "evaluation", "chain"}
+)
 LOCKED_ARMS = ("dino_pinned", "dinocular", "dinocular_zerodepth")
 LOCKED_ENVS = ("pusht", "wall", "rope", "granular")
 LOCKED_SEEDS = (1, 2, 3)
@@ -40,6 +134,21 @@ EVALUATION_DEPTH_PROVENANCE_FIELDS = (
     "depth_validation_sha256",
     "depth_checkpoint_sha256",
 )
+EVALUATION_EMPIRICAL_PROVENANCE_FIELDS = (
+    "depth_contract_kind",
+    "depth_empirical_contract_sha256",
+    "depth_adapter_id",
+    "depth_adapter_mode",
+    "depth_manifest_id",
+    "depth_data_sha256",
+    "depth_source_index_sha256",
+    "depth_wire_format_sha256",
+    "depth_validation_schema",
+    "depth_non_equivalence_statement",
+    "depth_neutrality_claimed",
+    "depth_rgb_only_claimed",
+    "depth_execution_authority_granted",
+)
 EVALUATION_IMMUTABLE_PROVENANCE_FIELDS = (
     "evaluation_run_card_sha256",
     "evaluation_run_card_file_sha256",
@@ -52,12 +161,130 @@ EVALUATION_IMMUTABLE_PROVENANCE_FIELDS = (
     "manifest_sha256",
     "assumption_tags",
     *EVALUATION_DEPTH_PROVENANCE_FIELDS,
+    *EVALUATION_EMPIRICAL_PROVENANCE_FIELDS,
 )
 EVALUATION_SHA256_PROVENANCE_FIELDS = tuple(
     field
     for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS
-    if field not in {"source_commit", "assumption_tags"}
+    if field.endswith("_sha256")
 )
+
+BASE_ENVIRONMENT_FIELDS = frozenset({"DINOV2_REPO", "DINOV2_VITS14_WEIGHTS"})
+NATIVE_ENVIRONMENT_FIELDS = BASE_ENVIRONMENT_FIELDS | frozenset(
+    {
+        "DINOCULAR_STUDENT_WEIGHTS",
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT",
+        "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256",
+        "DINOCULAR_CACHE_PRODUCER_SHA256",
+    }
+)
+EMPIRICAL_ENVIRONMENT_FIELDS = BASE_ENVIRONMENT_FIELDS | frozenset(
+    {
+        "DINOCULAR_STUDENT_WEIGHTS",
+        "DINOCULAR_DEPTH_INPUT_MODE",
+        "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT",
+        "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT_SHA256",
+        "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE",
+        "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE_SHA256",
+        "DINOCULAR_EMPIRICAL_ADAPTER_ID",
+        "DINOCULAR_EMPIRICAL_ADAPTER_MODE",
+        "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION",
+    }
+)
+NATIVE_DEPTH_INPUT_FIELDS = frozenset(
+    {
+        "producer",
+        "producer_sha256",
+        "cache_dir",
+        "cache_manifest_sha256",
+        "validation_path",
+        "validation_sha256",
+        "native_contract_path",
+        "native_contract_sha256",
+        "checkpoint_sha256",
+    }
+)
+EMPIRICAL_DEPTH_INPUT_FIELDS = frozenset(
+    {
+        "producer",
+        "contract_kind",
+        "empirical_contract_path",
+        "empirical_contract_sha256",
+        "empirical_runtime_release_path",
+        "empirical_runtime_release_sha256",
+        "runtime_mode",
+        "runtime_paths",
+        "capsule_record_path",
+        "capsule_record_sha256",
+        "deployment_acceptance_path",
+        "deployment_acceptance_sha256",
+        "producer_sha256",
+        "cache_dir",
+        "cache_manifest_sha256",
+        "manifest_id",
+        "validation_path",
+        "validation_sha256",
+        "validation_schema",
+        "data_path",
+        "data_sha256",
+        "source_index_sha256",
+        "wire_format_sha256",
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "adapter_id",
+        "adapter_mode",
+        "assumption_tags",
+        "non_equivalence_statement",
+        "execution_authority_granted",
+        "neutrality_claimed",
+        "rgb_only_claimed",
+    }
+)
+_CANDIDATE_AUTHORITY_FIELDS = frozenset(
+    {"launch_authorization_subject", "launch_authorization", "authorization_bindings"}
+)
+_LEGACY_FORBIDDEN_KEY_PARTS = (
+    "empirical",
+    "runtime_path",
+    "adapter_",
+    "capsule",
+    "deployment",
+    "launch_authorization",
+    "authorization_binding",
+    "contract_kind",
+)
+_LEGACY_FORBIDDEN_VALUE_PARTS = (
+    "empirical",
+    "empirical_lossy_cache",
+    "dinocular_pusht_empirical",
+    "dinocular_zerodepth_pusht_empirical",
+    "/opt/dinocular/",
+)
+
+
+@dataclass(frozen=True)
+class LoadedMixedContractIndex(Mapping[str, Any]):
+    empirical: LoadedDepthConsumptionIndex
+    native_v1: Mapping[str, Any]
+
+    def __getitem__(self, key: str) -> Any:
+        return self.empirical[key]
+
+    def __iter__(self):
+        return iter(self.empirical)
+
+    def __len__(self) -> int:
+        return len(self.empirical)
+
+
+@dataclass(frozen=True)
+class RunCardClassification:
+    schema: str
+    arm: str
+    environment: str
+    depth_kind: str
+    expected_empirical_adapter_mode: str | None
+    empirical_provenance: Mapping[str, Any] | None
 
 
 class HarnessError(RuntimeError):
@@ -108,9 +335,28 @@ def build_evaluation_provenance(
             "depth_native_contract_sha256": depth.get("native_contract_sha256"),
             "depth_validation_sha256": depth.get("validation_sha256"),
             "depth_checkpoint_sha256": depth.get("checkpoint_sha256"),
+            "depth_contract_kind": depth.get("contract_kind"),
+            "depth_empirical_contract_sha256": depth.get("empirical_contract_sha256"),
+            "depth_adapter_id": depth.get("adapter_id"),
+            "depth_adapter_mode": depth.get("adapter_mode"),
+            "depth_manifest_id": depth.get("manifest_id"),
+            "depth_data_sha256": depth.get("data_sha256"),
+            "depth_source_index_sha256": depth.get("source_index_sha256"),
+            "depth_wire_format_sha256": depth.get("wire_format_sha256"),
+            "depth_validation_schema": depth.get("validation_schema"),
+            "depth_non_equivalence_statement": depth.get("non_equivalence_statement"),
+            "depth_neutrality_claimed": depth.get("neutrality_claimed"),
+            "depth_rgb_only_claimed": depth.get("rgb_only_claimed"),
+            "depth_execution_authority_granted": depth.get("execution_authority_granted"),
         }
     else:
-        depth_values = {field: None for field in EVALUATION_DEPTH_PROVENANCE_FIELDS}
+        depth_values = {
+            field: None
+            for field in (
+                *EVALUATION_DEPTH_PROVENANCE_FIELDS,
+                *EVALUATION_EMPIRICAL_PROVENANCE_FIELDS,
+            )
+        }
     training_reference = card.get("training_run_card")
     container = card.get("container")
     if not isinstance(training_reference, Mapping) or not isinstance(
@@ -143,11 +389,24 @@ def validate_evaluation_provenance(
     expected: Mapping[str, Any] | None = None,
     requires_depth: bool,
 ) -> None:
+    empirical = value.get("depth_contract_kind") == "empirical_lossy_cache"
     for field in EVALUATION_SHA256_PROVENANCE_FIELDS:
         field_value = value.get(field)
-        if field in EVALUATION_DEPTH_PROVENANCE_FIELDS and not requires_depth:
+        if not requires_depth and field in {
+            *EVALUATION_DEPTH_PROVENANCE_FIELDS,
+            *EVALUATION_EMPIRICAL_PROVENANCE_FIELDS,
+        }:
             if field_value is not None:
                 raise HarnessError("depth provenance is present for a depth-free run")
+        elif field in EVALUATION_EMPIRICAL_PROVENANCE_FIELDS and not empirical:
+            if field_value is not None:
+                raise HarnessError("non-empirical evaluation carries empirical provenance")
+        elif field == "depth_native_contract_sha256" and empirical:
+            if field_value is not None:
+                raise HarnessError("empirical evaluation cannot carry a native contract hash")
+        elif field == "depth_empirical_contract_sha256" and not empirical:
+            if field_value is not None:
+                raise HarnessError("non-empirical evaluation carries an empirical contract hash")
         elif not _is_lower_hex(field_value, 64):
             raise HarnessError(f"evaluation provenance has invalid {field}")
     if not _is_lower_hex(value.get("source_commit"), 40):
@@ -157,6 +416,40 @@ def validate_evaluation_provenance(
         item != RECOVERED_CONTRACT_ASSUMPTION for item in assumption_tags
     ):
         raise HarnessError("evaluation provenance has invalid assumption tags")
+    if empirical:
+        empirical_value = {
+            "contract_kind": value.get("depth_contract_kind"),
+            "empirical_contract_sha256": value.get("depth_empirical_contract_sha256"),
+            "assumption_tags": value.get("assumption_tags"),
+            "adapter_id": value.get("depth_adapter_id"),
+            "adapter_mode": value.get("depth_adapter_mode"),
+            "producer_sha256": value.get("depth_producer_sha256"),
+            "cache_manifest_sha256": value.get("depth_cache_manifest_sha256"),
+            "manifest_id": value.get("depth_manifest_id"),
+            "validation_sha256": value.get("depth_validation_sha256"),
+            "validation_schema": value.get("depth_validation_schema"),
+            "data_sha256": value.get("depth_data_sha256"),
+            "source_index_sha256": value.get("depth_source_index_sha256"),
+            "wire_format_sha256": value.get("depth_wire_format_sha256"),
+            "checkpoint_sha256": value.get("depth_checkpoint_sha256"),
+            "non_equivalence_statement": value.get("depth_non_equivalence_statement"),
+            "execution_authority_granted": value.get(
+                "depth_execution_authority_granted"
+            ),
+            "neutrality_claimed": value.get("depth_neutrality_claimed"),
+            "rgb_only_claimed": value.get("depth_rgb_only_claimed"),
+        }
+        try:
+            validate_empirical_provenance(
+                empirical_value,
+                expected_contract_sha256=str(
+                    value.get("depth_empirical_contract_sha256")
+                ),
+            )
+        except EmpiricalDepthContractError as exc:
+            raise HarnessError(f"evaluation empirical provenance is invalid: {exc}") from exc
+    elif any(value.get(field) is not None for field in EVALUATION_EMPIRICAL_PROVENANCE_FIELDS):
+        raise HarnessError("non-empirical evaluation carries empirical provenance")
     slurm_job_id = value.get("slurm_job_id")
     if not isinstance(slurm_job_id, str) or not slurm_job_id.isdigit():
         raise HarnessError("evaluation provenance has invalid slurm_job_id")
@@ -193,6 +486,391 @@ def load_json(path: str | Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise HarnessError(f"JSON root must be an object: {path}")
     return value
+
+
+def _require_no_alias_components(
+    path: str | Path, label: str, *, allow_missing: bool
+) -> tuple[Path, int | None]:
+    artifact = Path(path).expanduser()
+    if not artifact.is_absolute() or ".." in artifact.parts:
+        raise HarnessError(f"{label} path is not closed")
+    current = Path(artifact.anchor)
+    final_mode = None
+    for component in artifact.parts[1:]:
+        current = current / component
+        try:
+            final_mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            if allow_missing:
+                return artifact, None
+            raise HarnessError(f"{label} is absent: {current}") from None
+        if stat.S_ISLNK(final_mode):
+            raise HarnessError(f"{label} path contains a symlink: {current}")
+    return artifact, final_mode
+
+
+def require_regular_file_no_alias(path: str | Path, label: str) -> Path:
+    """Require an absolute regular file whose lexical path contains no symlink."""
+
+    artifact, mode = _require_no_alias_components(path, label, allow_missing=False)
+    if mode is None or not stat.S_ISREG(mode):
+        raise HarnessError(f"{label} is not a regular file: {artifact}")
+    return artifact
+
+
+def require_directory_no_alias(
+    path: str | Path, label: str, *, allow_missing: bool = False
+) -> Path:
+    """Require a lexical absolute directory path with no symlink component."""
+
+    artifact, mode = _require_no_alias_components(
+        path, label, allow_missing=allow_missing
+    )
+    if mode is not None and not stat.S_ISDIR(mode):
+        raise HarnessError(f"{label} is not a directory: {artifact}")
+    return artifact
+
+
+def resolve_authorization_prerequisites(
+    spec: Mapping[str, Any],
+    *,
+    contracts_index_sha256: str,
+    empirical_contract_sha256: str,
+    empirical_runtime_release_sha256: str,
+    source_commit: str,
+    source_file_sha256: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Resolve the complete acyclic pre-authorization evidence chain."""
+
+    subject = spec.get("launch_authorization_subject")
+    references = spec.get("authorization_prerequisites")
+    if not isinstance(subject, str) or not subject or not isinstance(references, Mapping):
+        raise HarnessError("launch authorization subject or prerequisites are absent")
+    if set(references) != set(AUTHORIZATION_PREREQUISITE_SCHEMAS):
+        raise HarnessError("launch authorization prerequisite set differs")
+    resolved: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    for name, closed_schema in AUTHORIZATION_PREREQUISITE_SCHEMAS.items():
+        reference = references[name]
+        if (
+            not isinstance(reference, Mapping)
+            or set(reference) != {"status", "path", "sha256"}
+            or reference.get("status") != "READY"
+        ):
+            raise HarnessError(f"authorization prerequisite {name} is unavailable")
+        path_value = reference.get("path")
+        expected_sha = reference.get("sha256")
+        if not isinstance(path_value, str) or not _is_lower_hex(expected_sha, 64):
+            raise HarnessError(f"authorization prerequisite {name} identity is incomplete")
+        path = require_regular_file_no_alias(
+            Path(path_value), f"authorization prerequisite {name}"
+        )
+        if sha256_file(path) != expected_sha:
+            raise HarnessError(f"authorization prerequisite {name} hash differs")
+        record = load_json(path)
+        if (
+            set(record) != closed_schema["fields"]
+            or record.get("schema") != closed_schema["schema"]
+            or record.get("state") != closed_schema["state"]
+            or (
+                "verdict" in closed_schema
+                and record.get("verdict") != closed_schema["verdict"]
+            )
+        ):
+            raise HarnessError(
+                f"authorization prerequisite {name} does not match its closed schema"
+            )
+        if record.get("authorization_subject") != subject:
+            raise HarnessError(f"authorization prerequisite {name} subject differs")
+        binding_fields = closed_schema["binding_fields"]
+        if binding_fields is not None:
+            bindings = record.get("bindings")
+            if not isinstance(bindings, Mapping) or set(bindings) != binding_fields:
+                raise HarnessError(
+                    f"authorization prerequisite {name} binding schema differs"
+                )
+        resolved[name] = (str(expected_sha), record)
+    source_release_sha, source_release = resolved["source_release"]
+    if (
+        source_release.get("source_commit") != source_commit
+        or source_release.get("source_file_sha256") != source_file_sha256
+    ):
+        raise HarnessError("accepted source release differs from the executable source")
+    expected_acceptance_bindings = {
+        "empirical_implementation_acceptance": {
+            "contracts_index_sha256": contracts_index_sha256,
+            "empirical_contract_sha256": empirical_contract_sha256,
+            "source_release_sha256": source_release_sha,
+        },
+        "immutable_execution_acceptance": {
+            "empirical_runtime_release_sha256": empirical_runtime_release_sha256,
+            "source_release_sha256": source_release_sha,
+            "empirical_implementation_acceptance_sha256": resolved[
+                "empirical_implementation_acceptance"
+            ][0],
+        },
+        "immutable_probe_acceptance": {
+            "empirical_runtime_release_sha256": empirical_runtime_release_sha256,
+            "immutable_execution_acceptance_sha256": resolved[
+                "immutable_execution_acceptance"
+            ][0],
+        },
+    }
+    for name, expected in expected_acceptance_bindings.items():
+        if resolved[name][1].get("bindings") != expected:
+            raise HarnessError(f"authorization prerequisite {name} bindings differ")
+    return {
+        "contracts_index_sha256": contracts_index_sha256,
+        "empirical_contract_sha256": empirical_contract_sha256,
+        "empirical_runtime_release_sha256": empirical_runtime_release_sha256,
+        "source_commit": source_commit,
+        "source_release_sha256": source_release_sha,
+        "empirical_implementation_acceptance_sha256": resolved[
+            "empirical_implementation_acceptance"
+        ][0],
+        "immutable_execution_acceptance_sha256": resolved[
+            "immutable_execution_acceptance"
+        ][0],
+        "immutable_probe_acceptance_sha256": resolved[
+            "immutable_probe_acceptance"
+        ][0],
+    }
+
+
+def require_launch_authorization(
+    value: Mapping[str, Any], *, operation: str
+) -> Mapping[str, Any]:
+    """Require a byte-hashed external explicit launch decision for execution work."""
+
+    if operation not in LAUNCH_OPERATIONS:
+        raise HarnessError(f"unsupported launch authorization operation {operation!r}")
+    pointer = value.get("launch_authorization")
+    if not isinstance(pointer, Mapping):
+        raise HarnessError(f"{operation} is blocked: explicit launch authorization is absent")
+    path_value = pointer.get("path")
+    expected_sha = pointer.get("sha256")
+    if pointer.get("status") not in {None, "AUTHORIZED"}:
+        raise HarnessError(f"{operation} is blocked: launch authorization is not AUTHORIZED")
+    if not isinstance(path_value, str) or not _is_lower_hex(expected_sha, 64):
+        raise HarnessError(f"{operation} is blocked: launch authorization identity is incomplete")
+    path = require_regular_file_no_alias(
+        Path(path_value), "launch authorization record"
+    )
+    if sha256_file(path) != expected_sha:
+        raise HarnessError(f"{operation} is blocked: launch authorization hash differs")
+    record = load_json(path)
+    if (
+        record.get("schema") != LAUNCH_AUTHORIZATION_SCHEMA
+        or record.get("state") != "AUTHORIZED"
+        or record.get("execution_authority_granted") is not True
+        or record.get("decision") != "EXPLICIT_LAUNCH_AUTHORIZED"
+        or record.get("authorization_subject")
+        != value.get("launch_authorization_subject")
+    ):
+        raise HarnessError(f"{operation} is blocked: launch authorization record is invalid")
+    operations = record.get("authorized_operations")
+    if not isinstance(operations, list) or set(operations) != LAUNCH_OPERATIONS:
+        raise HarnessError("launch authorization does not bind the closed operation set")
+    if operation not in operations:
+        raise HarnessError(f"{operation} is not authorized")
+    bindings = record.get("bindings")
+    if not isinstance(bindings, Mapping):
+        raise HarnessError("launch authorization bindings are absent")
+    expected_bindings = value.get("authorization_bindings", {})
+    if not isinstance(expected_bindings, Mapping) or bindings != expected_bindings:
+        raise HarnessError("launch authorization is not hash-bound to this candidate")
+    if set(bindings) != AUTHORIZATION_BINDING_FIELDS:
+        raise HarnessError("launch authorization binding set differs")
+    for name, identity in bindings.items():
+        valid = (
+            isinstance(identity, str)
+            and (
+                _is_lower_hex(identity, 64)
+                or (name == "source_commit" and _is_lower_hex(identity, 40))
+            )
+        )
+        if not valid:
+            raise HarnessError("launch authorization candidate bindings are incomplete")
+    return record
+
+
+def _legacy_contains_forbidden_empirical_value(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            normalized = str(key).lower()
+            if any(part in normalized for part in _LEGACY_FORBIDDEN_KEY_PARTS):
+                return True
+            if _legacy_contains_forbidden_empirical_value(nested):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_legacy_contains_forbidden_empirical_value(item) for item in value)
+    if isinstance(value, str):
+        normalized = value.lower()
+        return any(part in normalized for part in _LEGACY_FORBIDDEN_VALUE_PARTS)
+    return False
+
+
+def _require_exact_environment_schema(
+    card: Mapping[str, Any], expected_fields: frozenset[str]
+) -> None:
+    environment = card.get("environment_variables")
+    if not isinstance(environment, Mapping) or set(environment) != expected_fields:
+        raise HarnessError("run-card environment schema differs")
+    if any(value is None or not isinstance(value, str) or not value for value in environment.values()):
+        raise HarnessError("run-card environment identity is null or absent")
+
+
+def _require_exact_depth_schema(
+    depth: Mapping[str, Any], expected_fields: frozenset[str], *, label: str
+) -> None:
+    if set(depth) != expected_fields:
+        raise HarnessError(f"{label} depth schema differs")
+    nullable = {
+        "capsule_record_path",
+        "capsule_record_sha256",
+        "deployment_acceptance_path",
+        "deployment_acceptance_sha256",
+    }
+    for key in expected_fields - nullable:
+        if depth.get(key) is None:
+            raise HarnessError(f"{label} depth identity is null or absent: {key}")
+    if label == "empirical":
+        mode = depth.get("runtime_mode")
+        capsule_values = (
+            depth.get("capsule_record_path"),
+            depth.get("capsule_record_sha256"),
+            depth.get("deployment_acceptance_path"),
+            depth.get("deployment_acceptance_sha256"),
+        )
+        if mode == "canonical_host_v1" and any(value is not None for value in capsule_values):
+            raise HarnessError("canonical empirical depth schema carries capsule evidence")
+        if mode == "capsule_v1" and any(value is None for value in capsule_values):
+            raise HarnessError("capsule empirical depth schema lacks accepted evidence")
+        if mode not in {"canonical_host_v1", "capsule_v1"}:
+            raise HarnessError("empirical runtime mode is invalid")
+        runtime_paths = depth.get("runtime_paths")
+        if not isinstance(runtime_paths, Mapping) or set(runtime_paths) != {
+            "checkpoint",
+            "cache_directory",
+            "manifest",
+            "validation",
+            "data",
+            "empirical_contract",
+            "empirical_runtime_release",
+        }:
+            raise HarnessError("empirical runtime path schema differs")
+
+
+def classify_run_card(card: Mapping[str, Any]) -> RunCardClassification:
+    """Classify authority and receipt semantics from closed card/depth/env schemas."""
+
+    schema = card.get("schema")
+    arm = card.get("arm")
+    environment = card.get("environment")
+    if arm not in LOCKED_ARMS or environment not in LOCKED_ENVS:
+        raise HarnessError("run-card schema has an invalid arm or environment")
+    depth = card.get("depth_inputs")
+    if schema == LEGACY_RUN_CARD_SCHEMA:
+        if _legacy_contains_forbidden_empirical_value(card):
+            raise HarnessError("legacy run card contains a forbidden empirical field family")
+        if arm == "dino_pinned":
+            if depth is not None:
+                raise HarnessError("legacy dino_pinned card carries depth inputs")
+            _require_exact_environment_schema(card, BASE_ENVIRONMENT_FIELDS)
+            depth_kind = "none"
+        else:
+            if not isinstance(depth, Mapping):
+                raise HarnessError("legacy run card lacks native depth inputs")
+            _require_exact_depth_schema(depth, NATIVE_DEPTH_INPUT_FIELDS, label="legacy native")
+            _require_exact_environment_schema(card, NATIVE_ENVIRONMENT_FIELDS)
+            depth_kind = "native_v1"
+        return RunCardClassification(
+            schema=str(schema),
+            arm=str(arm),
+            environment=str(environment),
+            depth_kind=depth_kind,
+            expected_empirical_adapter_mode=None,
+            empirical_provenance=None,
+        )
+    if schema != RUN_CARD_SCHEMA:
+        raise HarnessError("unsupported run-card schema")
+    if set(_CANDIDATE_AUTHORITY_FIELDS) - set(card):
+        raise HarnessError("candidate run-card authority schema is incomplete")
+    subject = card.get("launch_authorization_subject")
+    pointer = card.get("launch_authorization")
+    bindings = card.get("authorization_bindings")
+    if (
+        not isinstance(subject, str)
+        or not subject
+        or not isinstance(pointer, Mapping)
+        or set(pointer) != {"status", "path", "sha256"}
+        or pointer.get("status") != "AUTHORIZED"
+        or not isinstance(pointer.get("path"), str)
+        or not _is_lower_hex(pointer.get("sha256"), 64)
+        or not isinstance(bindings, Mapping)
+        or set(bindings) != AUTHORIZATION_BINDING_FIELDS
+        or any(value is None for value in bindings.values())
+    ):
+        raise HarnessError("candidate run-card authority identity is null or absent")
+    if arm == "dino_pinned":
+        if depth is not None:
+            raise HarnessError("candidate dino_pinned card carries depth inputs")
+        _require_exact_environment_schema(card, BASE_ENVIRONMENT_FIELDS)
+        return RunCardClassification(str(schema), str(arm), str(environment), "none", None, None)
+    if not isinstance(depth, Mapping):
+        raise HarnessError("candidate depth schema is absent")
+    if set(depth) == NATIVE_DEPTH_INPUT_FIELDS:
+        _require_exact_depth_schema(depth, NATIVE_DEPTH_INPUT_FIELDS, label="candidate native")
+        _require_exact_environment_schema(card, NATIVE_ENVIRONMENT_FIELDS)
+        return RunCardClassification(str(schema), str(arm), str(environment), "native_v1", None, None)
+    _require_exact_depth_schema(depth, EMPIRICAL_DEPTH_INPUT_FIELDS, label="empirical")
+    _require_exact_environment_schema(card, EMPIRICAL_ENVIRONMENT_FIELDS)
+    if depth.get("contract_kind") != "empirical_lossy_cache":
+        raise HarnessError("candidate empirical contract identity is null or absent")
+    expected_mode = {
+        "dinocular": "proxy_depth_z",
+        "dinocular_zerodepth": "exact_constant_zero_numeric",
+    }.get(str(arm))
+    if environment != "pusht" or depth.get("adapter_mode") != expected_mode:
+        raise HarnessError("candidate empirical schema differs from arm/environment")
+    expected_encoder = {
+        "dinocular": "encoder=dinocular_pusht_empirical",
+        "dinocular_zerodepth": "encoder=dinocular_zerodepth_pusht_empirical",
+    }[str(arm)]
+    overrides = card.get("overrides")
+    if not isinstance(overrides, list) or expected_encoder not in overrides:
+        raise HarnessError("candidate empirical encoder contract differs")
+    return RunCardClassification(
+        schema=str(schema),
+        arm=str(arm),
+        environment=str(environment),
+        depth_kind="empirical_lossy_cache",
+        expected_empirical_adapter_mode=expected_mode,
+        empirical_provenance=depth,
+    )
+
+
+def run_card_receipt_expectations(
+    card: Mapping[str, Any],
+) -> tuple[str | None, Mapping[str, Any] | None]:
+    """Derive receipt expectations only from the validated closed card schema."""
+
+    classification = classify_run_card(card)
+    return (
+        classification.expected_empirical_adapter_mode,
+        classification.empirical_provenance,
+    )
+
+
+def require_run_card_authorization(
+    card: Mapping[str, Any], *, operation: str
+) -> Mapping[str, Any] | None:
+    """Require candidate authority while preserving exact disjoint native legacy cards."""
+
+    classification = classify_run_card(card)
+    if classification.schema == RUN_CARD_SCHEMA:
+        return require_launch_authorization(card, operation=operation)
+    return None
 
 
 def require_real_marvin_path(path: str, label: str) -> str:
@@ -302,9 +980,7 @@ def verify_hashed_path(record: Mapping[str, Any], label: str) -> dict[str, str]:
     expected = str(record.get("sha256"))
     if len(expected) != 64:
         raise HarnessError(f"{label}.sha256 is invalid")
-    artifact = Path(path)
-    if not artifact.is_file():
-        raise HarnessError(f"missing pinned {label}: {artifact}")
+    artifact = require_regular_file_no_alias(Path(path), f"pinned {label}")
     actual = sha256_file(artifact)
     if actual != expected:
         raise HarnessError(
@@ -351,7 +1027,9 @@ def derive_segment_sizing(
     target_steps: int,
     policy: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    summary_path = Path(summary_path).resolve()
+    summary_path = require_regular_file_no_alias(
+        summary_path, "segment sizing timing summary"
+    )
     summary = load_timing_summary(summary_path)
     key = f"{arm}/{environment}"
     rate = float(summary["rates"][key]["optimizer_steps_per_second"])
@@ -428,7 +1106,7 @@ def validate_segment_sizing(
 def source_evidence(
     spec: Mapping[str, Any], local_code_root: Path
 ) -> Mapping[str, Any]:
-    local_code_root = local_code_root.resolve()
+    local_code_root = local_code_root.expanduser()
     commit = subprocess.check_output(
         ["git", "-C", str(local_code_root), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -444,9 +1122,9 @@ def source_evidence(
     for relative in files:
         if not isinstance(relative, str) or Path(relative).is_absolute():
             raise HarnessError(f"invalid source hash path: {relative!r}")
-        path = local_code_root / relative
-        if not path.is_file():
-            raise HarnessError(f"missing run-card source file: {path}")
+        path = require_regular_file_no_alias(
+            local_code_root / relative, f"run-card source file {relative}"
+        )
         hashes[relative] = sha256_file(path)
     artifacts = {
         name: verify_hashed_path(record, name)
@@ -461,8 +1139,77 @@ def source_evidence(
     }
 
 
+def load_native_contract_index(path: str | Path) -> Mapping[str, Any]:
+    """Load only an accepted native-v1 index without touching empirical readiness."""
+
+    index_path = require_regular_file_no_alias(Path(path), "native/mixed index")
+    index = load_yaml(index_path)
+    if index.get("schema") == CONTRACT_INDEX_SCHEMA:
+        return load_contract_index(index_path)
+    if index.get("schema") != "dino-wm-depth-consumption-index-v2":
+        raise HarnessError("unsupported depth contract index schema")
+    native = index.get("native_v1")
+    if not isinstance(native, Mapping) or native.get("status") != "READY":
+        raise HarnessError("accepted native-v1 index artifact is not ready")
+    if native.get("delegated_environments") != ["wall", "rope", "granular"]:
+        raise HarnessError("native-v1 delegation scope differs")
+    native_sha = native.get("index_sha256")
+    if not _is_lower_hex(native_sha, 64):
+        raise HarnessError("native-v1 index identity is unavailable")
+    native_path = require_regular_file_no_alias(
+        Path(str(native.get("index_path"))), "native-v1 index reference"
+    )
+    if sha256_file(native_path) != native_sha:
+        raise HarnessError("native-v1 index SHA-256 differs")
+    loaded = load_contract_index(native_path)
+    if loaded.get("schema") != CONTRACT_INDEX_SCHEMA:
+        raise HarnessError("native-v1 reference does not identify a native index")
+    return loaded
+
+
 def load_contract_index(path: str | Path) -> Mapping[str, Any]:
-    index = load_yaml(path)
+    index_path = require_regular_file_no_alias(Path(path), "depth contract index")
+    index = load_yaml(index_path)
+    if index.get("schema") == "dino-wm-depth-consumption-index-v2":
+        native_record = index.get("native_v1")
+        release_record = index.get("empirical_runtime_release")
+        if not isinstance(native_record, Mapping) or not isinstance(
+            release_record, Mapping
+        ):
+            raise HarnessError("mixed v2 index lacks native-v1 or empirical release readiness")
+        if native_record.get("status") != "READY":
+            raise HarnessError(
+                "mixed dispatcher code is ready but accepted native-v1 index artifact is not ready"
+            )
+        if release_record.get("status") != "READY":
+            raise HarnessError(
+                "mixed dispatcher code is ready but accepted empirical runtime release is not ready"
+            )
+        native_sha = native_record.get("index_sha256")
+        if not _is_lower_hex(native_sha, 64):
+            raise HarnessError("mixed dispatcher native-v1 index identity is unavailable")
+        native_path = require_regular_file_no_alias(
+            Path(str(native_record.get("index_path"))), "mixed dispatcher native-v1 index"
+        )
+        if sha256_file(native_path) != native_sha:
+            raise HarnessError("mixed dispatcher native-v1 index SHA-256 differs")
+        release_sha = release_record.get("release_sha256")
+        if not _is_lower_hex(release_sha, 64):
+            raise HarnessError("mixed dispatcher empirical release identity is unavailable")
+        release_path = require_regular_file_no_alias(
+            Path(str(release_record.get("release_path"))),
+            "mixed dispatcher empirical release",
+        )
+        if sha256_file(release_path) != release_sha:
+            raise HarnessError("mixed dispatcher empirical release SHA-256 differs")
+        try:
+            loaded = load_depth_consumption_index(index_path)
+        except EmpiricalDepthContractError as exc:
+            raise HarnessError(str(exc)) from exc
+        native_index = load_contract_index(native_path)
+        if native_index.get("schema") != CONTRACT_INDEX_SCHEMA:
+            raise HarnessError("mixed dispatcher must delegate to an unchanged native-v1 index")
+        return LoadedMixedContractIndex(empirical=loaded, native_v1=native_index)
     if index.get("schema") != CONTRACT_INDEX_SCHEMA:
         raise HarnessError("unsupported depth contract index schema")
     native = index.get("native_contract")
@@ -519,9 +1266,113 @@ def load_contract_index(path: str | Path) -> Mapping[str, Any]:
     return index
 
 
+def legacy_depth_inputs(
+    index: Mapping[str, Any], producer_name: str, environment: str
+) -> Mapping[str, Any]:
+    """Select only the unchanged native-v1 route for legacy comparisons."""
+
+    if isinstance(index, LoadedMixedContractIndex):
+        return depth_inputs(index.native_v1, producer_name, environment)
+    if index.get("schema") == "dino-wm-depth-consumption-index-v2":
+        raise HarnessError("legacy native-v1 depth index is unavailable")
+    return depth_inputs(index, producer_name, environment)
+
+
 def depth_inputs(
     index: Mapping[str, Any], producer_name: str, environment: str
 ) -> Mapping[str, Any]:
+    mixed: LoadedDepthConsumptionIndex | None = None
+    native_index: Mapping[str, Any] | None = None
+    if isinstance(index, LoadedMixedContractIndex):
+        mixed = index.empirical
+        native_index = index.native_v1
+    elif isinstance(index, LoadedDepthConsumptionIndex):
+        mixed = index
+    elif index.get("schema") == "dino-wm-depth-consumption-index-v2":
+        raise HarnessError("v2 depth inputs require immutable typed loader output")
+    if mixed is not None:
+        entry = mixed.get("entries", {}).get(f"{environment}/{producer_name}")
+        if not isinstance(entry, Mapping):
+            native_record = mixed.get("native_v1")
+            delegated = (
+                native_record.get("delegated_environments")
+                if isinstance(native_record, Mapping)
+                else None
+            )
+            if (
+                not isinstance(delegated, (list, tuple))
+                or tuple(delegated) != ("wall", "rope", "granular")
+                or environment not in delegated
+            ):
+                raise HarnessError(
+                    f"depth consumption entry {environment}/{producer_name} is absent"
+                )
+            if not isinstance(native_index, Mapping):
+                raise HarnessError(
+                    f"depth consumption entry {environment}/{producer_name} is absent"
+                )
+            return depth_inputs(native_index, producer_name, environment)
+        if entry.get("contract_kind") == "empirical_lossy_cache":
+            mode = "proxy_depth_z"
+            release = mixed.get("empirical_runtime_release")
+            try:
+                runtime = mixed.runtime_binding(f"{environment}/{producer_name}")
+            except EmpiricalDepthContractError as exc:
+                raise HarnessError(str(exc)) from exc
+            runtime_paths = runtime.runtime_paths
+            if (
+                not isinstance(release, Mapping)
+                or release.get("status") != "READY"
+                or runtime.mode not in {"canonical_host_v1", "capsule_v1"}
+                or set(runtime_paths)
+                != {
+                    "checkpoint",
+                    "cache_directory",
+                    "manifest",
+                    "validation",
+                    "data",
+                    "empirical_contract",
+                    "empirical_runtime_release",
+                }
+            ):
+                raise HarnessError(
+                    "empirical runtime release or accepted deployment evidence is not ready"
+                )
+            return {
+                "producer": producer_name,
+                "contract_kind": "empirical_lossy_cache",
+                "empirical_contract_path": entry["contract_path"],
+                "empirical_contract_sha256": entry["contract_sha256"],
+                "empirical_runtime_release_path": release["release_path"],
+                "empirical_runtime_release_sha256": release["release_sha256"],
+                "runtime_mode": runtime.mode,
+                "runtime_paths": dict(runtime_paths),
+                "capsule_record_path": runtime.capsule_record_path,
+                "capsule_record_sha256": runtime.capsule_record_sha256,
+                "deployment_acceptance_path": runtime.deployment_acceptance_path,
+                "deployment_acceptance_sha256": runtime.deployment_acceptance_sha256,
+                "producer_sha256": entry["producer_sha256"],
+                "cache_dir": entry["cache_dir"],
+                "cache_manifest_sha256": entry["manifest_sha256"],
+                "manifest_id": entry["manifest_id"],
+                "validation_path": entry["validation_path"],
+                "validation_sha256": entry["validation_sha256"],
+                "validation_schema": entry["validation_schema"],
+                "data_path": entry["data_path"],
+                "data_sha256": entry["data_sha256"],
+                "source_index_sha256": entry["source_index_sha256"],
+                "wire_format_sha256": entry["wire_format_sha256"],
+                "checkpoint_path": entry["checkpoint_path"],
+                "checkpoint_sha256": entry["checkpoint_sha256"],
+                "adapter_id": entry["adapter_id"],
+                "adapter_mode": mode,
+                "assumption_tags": list(entry["assumption_tags"]),
+                "non_equivalence_statement": EMPIRICAL_NON_EQUIVALENCE,
+                "execution_authority_granted": False,
+                "neutrality_claimed": False,
+                "rgb_only_claimed": False,
+            }
+        raise HarnessError("v2 native entries require the unchanged native-v1 dispatcher")
     producer = index["producers"].get(producer_name)
     if not isinstance(producer, Mapping):
         raise HarnessError(f"producer {producer_name!r} is absent")
@@ -542,6 +1393,99 @@ def depth_inputs(
     }
 
 
+def depth_artifact_records(value: Mapping[str, Any]) -> Mapping[str, Mapping[str, Any]]:
+    """Return the exact discriminated artifact set for live verification."""
+
+    records: dict[str, Mapping[str, Any]]
+    if value.get("contract_kind") == "empirical_lossy_cache":
+        records = {
+            "depth cache manifest": {
+                "path": str(Path(str(value["cache_dir"])) / "manifest.json"),
+                "sha256": value["cache_manifest_sha256"],
+            },
+            "depth validation": {
+                "path": value["validation_path"],
+                "sha256": value["validation_sha256"],
+            },
+            "empirical depth contract": {
+                "path": value["empirical_contract_path"],
+                "sha256": value["empirical_contract_sha256"],
+            },
+            "empirical runtime release": {
+                "path": value["empirical_runtime_release_path"],
+                "sha256": value["empirical_runtime_release_sha256"],
+            },
+            "empirical checkpoint": {
+                "path": value["checkpoint_path"],
+                "sha256": value["checkpoint_sha256"],
+            },
+        }
+        if value.get("runtime_mode") == "capsule_v1":
+            records.update(
+                {
+                    "empirical capsule record": {
+                        "path": value["capsule_record_path"],
+                        "sha256": value["capsule_record_sha256"],
+                    },
+                    "empirical deployment acceptance": {
+                        "path": value["deployment_acceptance_path"],
+                        "sha256": value["deployment_acceptance_sha256"],
+                    },
+                }
+            )
+    else:
+        records = {
+            "depth cache manifest": {
+                "path": str(Path(str(value["cache_dir"])) / "manifest.json"),
+                "sha256": value["cache_manifest_sha256"],
+            },
+            "depth validation": {
+                "path": value["validation_path"],
+                "sha256": value["validation_sha256"],
+            },
+            "native depth contract": {
+                "path": value["native_contract_path"],
+                "sha256": value["native_contract_sha256"],
+            },
+        }
+    return records
+
+
+def validate_empirical_depth_inputs(
+    value: Mapping[str, Any], *, arm: str, environment: str
+) -> None:
+    """Gate the amended PushT cells without changing any other environment."""
+
+    if arm == "dino_pinned":
+        raise HarnessError("dino_pinned must not carry an empirical depth contract")
+    if environment != "pusht":
+        raise HarnessError("empirical MapAnything consumption is authorized for PushT only")
+    if arm not in {"dinocular", "dinocular_zerodepth"}:
+        raise HarnessError(f"unsupported empirical PushT arm {arm!r}")
+    contract_sha = value.get("empirical_contract_sha256")
+    if not _is_lower_hex(contract_sha, 64):
+        raise HarnessError("empirical depth inputs lack a contract SHA-256")
+    try:
+        validate_empirical_provenance(
+            value, expected_contract_sha256=str(contract_sha)
+        )
+    except EmpiricalDepthContractError as exc:
+        raise HarnessError(f"invalid empirical depth provenance: {exc}") from exc
+    expected_mode = (
+        "exact_constant_zero_numeric"
+        if arm == "dinocular_zerodepth"
+        else "proxy_depth_z"
+    )
+    if value.get("adapter_mode") != expected_mode:
+        raise HarnessError("empirical adapter mode differs from the locked PushT arm")
+    if value.get("adapter_id") != EMPIRICAL_ADAPTER_ID:
+        raise HarnessError("empirical adapter identity differs")
+    if value.get("assumption_tags") != [EMPIRICAL_ASSUMPTION]:
+        raise HarnessError("empirical recovered-contract assumption differs")
+    if value.get("non_equivalence_statement") != EMPIRICAL_NON_EQUIVALENCE:
+        raise HarnessError("empirical non-equivalence disclosure differs")
+
+
 def run_card_digest(card: Mapping[str, Any]) -> str:
     value = copy.deepcopy(dict(card))
     value.pop("run_card_sha256", None)
@@ -555,8 +1499,7 @@ def finalize_run_card(card: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def validate_run_card(card: Mapping[str, Any]) -> None:
-    if card.get("schema") != RUN_CARD_SCHEMA:
-        raise HarnessError("unsupported run-card schema")
+    classification = classify_run_card(card)
     if card.get("run_card_sha256") != run_card_digest(card):
         raise HarnessError(f"run-card content hash mismatch for {card.get('run_id')}")
     require_real_marvin_path(str(card.get("run_dir")), "run_dir")
@@ -573,6 +1516,17 @@ def validate_run_card(card: Mapping[str, Any]) -> None:
     elif card.get("kind") in {"p2a-producer-pilot", "p2a-open-loop"}:
         if card.get("assumption_tags", []) != []:
             raise HarnessError("DA3 P2a card has unexpected assumption provenance")
+    depth_inputs_value = card.get("depth_inputs")
+    if isinstance(depth_inputs_value, Mapping) and depth_inputs_value.get(
+        "contract_kind"
+    ) == "empirical_lossy_cache":
+        validate_empirical_depth_inputs(
+            depth_inputs_value,
+            arm=str(card.get("arm")),
+            environment=str(card.get("environment")),
+        )
+        if card.get("assumption_tags") != [EMPIRICAL_ASSUMPTION]:
+            raise HarnessError("empirical PushT card lacks exact assumption provenance")
     if card.get("kind") in {"p3-training", "p4-open-loop"}:
         heldout = card.get("heldout_loss_manifest")
         if (
@@ -616,11 +1570,22 @@ def validate_run_card(card: Mapping[str, Any]) -> None:
             or card.get("schedule_policy") != "fixed_learning_rates"
         ):
             raise HarnessError("P3/P4 optimizer or schedule policy differs")
-        expected_boundary = {
-            "dino_pinned": "not_applicable",
-            "dinocular": "informative_depth_and_mask",
-            "dinocular_zerodepth": "manifest_neutral_depth_and_mask",
-        }.get(card.get("arm"))
+        empirical_pusht = (
+            isinstance(card.get("depth_inputs"), Mapping)
+            and card["depth_inputs"].get("contract_kind")
+            == "empirical_lossy_cache"
+        )
+        if empirical_pusht:
+            expected_boundary = {
+                "dinocular": "empirical_proxy_depth_and_payload_presence_mask",
+                "dinocular_zerodepth": "exact_constant_zero_numeric_and_audit_mask",
+            }.get(card.get("arm"))
+        else:
+            expected_boundary = {
+                "dino_pinned": "not_applicable",
+                "dinocular": "informative_depth_and_mask",
+                "dinocular_zerodepth": "manifest_neutral_depth_and_mask",
+            }.get(card.get("arm"))
         if card.get("encoder_boundary") != expected_boundary:
             raise HarnessError("P3/P4 encoder boundary policy differs")
     if card.get("kind") == "p4-open-loop":
@@ -642,12 +1607,14 @@ def verify_evaluation_bindings(
     fixed = card.get("fixed_manifest")
     if not isinstance(fixed, Mapping):
         raise HarnessError("evaluation card has no fixed manifest record")
-    manifest_path = Path(str(fixed.get("path")))
-    metadata_path = Path(str(fixed.get("metadata_path")))
+    manifest_path = require_regular_file_no_alias(
+        Path(str(fixed.get("path"))), "evaluation fixed manifest"
+    )
+    metadata_path = require_regular_file_no_alias(
+        Path(str(fixed.get("metadata_path"))), "evaluation fixed manifest metadata"
+    )
     if (
-        not manifest_path.is_file()
-        or sha256_file(manifest_path) != fixed.get("sha256")
-        or not metadata_path.is_file()
+        sha256_file(manifest_path) != fixed.get("sha256")
         or sha256_file(metadata_path) != fixed.get("metadata_sha256")
     ):
         raise HarnessError(
@@ -667,10 +1634,10 @@ def verify_evaluation_bindings(
     reference = card.get("training_run_card")
     if not isinstance(reference, Mapping):
         raise HarnessError("evaluation card has no hashed training run-card reference")
-    training_path = Path(str(reference.get("path")))
-    if not training_path.is_file() or sha256_file(training_path) != reference.get(
-        "file_sha256"
-    ):
+    training_path = require_regular_file_no_alias(
+        Path(str(reference.get("path"))), "evaluation training run card"
+    )
+    if sha256_file(training_path) != reference.get("file_sha256"):
         raise HarnessError("training run-card file hash differs from evaluation card")
     training = load_yaml(training_path)
     validate_run_card(training)
@@ -704,9 +1671,13 @@ def verify_evaluation_bindings(
         raise HarnessError("evaluation card is not exactly bound to its training card")
     if card.get("kind") == "p4-open-loop":
         completion = card["training_completion_receipt"]
-        if Path(str(completion.get("path"))).resolve() != Path(
-            str(training["run_dir"])
-        ).resolve() / "final_acceptance.json" or completion.get(
+        training_run_dir = require_directory_no_alias(
+            Path(str(training["run_dir"])), "evaluation training run directory"
+        )
+        completion_path = require_regular_file_no_alias(
+            Path(str(completion.get("path"))), "evaluation completion reference"
+        )
+        if completion_path != training_run_dir / "final_acceptance.json" or completion.get(
             "training_run_card_sha256"
         ) != training.get("run_card_sha256"):
             raise HarnessError("P4 completion receipt reference differs from P3")
@@ -753,7 +1724,7 @@ def write_matrix(
         references.append(
             {
                 "run_id": run_id,
-                "path": str(card_path.resolve()),
+                "path": str(card_path.absolute()),
                 "file_sha256": file_sha,
                 "run_card_sha256": card["run_card_sha256"],
             }
@@ -771,7 +1742,8 @@ def write_matrix(
 
 
 def load_matrix(path: str | Path) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
-    matrix = load_yaml(path)
+    matrix_path = require_regular_file_no_alias(path, "run matrix")
+    matrix = load_yaml(matrix_path)
     if matrix.get("schema") != MATRIX_SCHEMA:
         raise HarnessError("unsupported run matrix schema")
     expected = copy.deepcopy(dict(matrix))
@@ -785,10 +1757,10 @@ def load_matrix(path: str | Path) -> tuple[Mapping[str, Any], list[Mapping[str, 
         if reference_id in seen:
             raise HarnessError(f"duplicate matrix run ID: {reference_id}")
         seen.add(reference_id)
-        path_value = Path(str(reference.get("path")))
-        if not path_value.is_file() or sha256_file(path_value) != reference.get(
-            "file_sha256"
-        ):
+        path_value = require_regular_file_no_alias(
+            Path(str(reference.get("path"))), f"matrix run card {reference_id}"
+        )
+        if sha256_file(path_value) != reference.get("file_sha256"):
             raise HarnessError(f"run-card file hash mismatch: {path_value}")
         card = load_yaml(path_value)
         validate_run_card(card)

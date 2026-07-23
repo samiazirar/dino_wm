@@ -10,6 +10,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from empirical_depth_contract import (
+    EmpiricalDepthContractError,
+    validate_empirical_provenance,
+)
+
 
 CHECKPOINT_HISTORY_SCHEMA = "dino-wm.step-checkpoint-history.v1"
 TRAINING_RECORD_SCHEMA = "dino-wm.p3-training-step.v1"
@@ -1297,6 +1302,7 @@ def validate_validation_records(
     immutable_run_card_sha256: str,
     manifest_sha256: str,
     require_complete: bool = False,
+    expected_empirical_adapter_mode: str | None = None,
 ) -> None:
     mapping = percent_step_map(target_steps)
     seen = set()
@@ -1313,6 +1319,8 @@ def validate_validation_records(
         "depth_producer_sha256",
         "depth_cache_manifest_sha256",
         "depth_native_contract_sha256",
+        "depth_empirical_contract_sha256",
+        "depth_empirical_provenance",
         "depth_validation_sha256",
         "depth_checkpoint_sha256",
     )
@@ -1399,13 +1407,75 @@ def validate_validation_records(
             raise P3CompletionError(
                 "held-out loss has invalid checkpoint history reference"
             )
-        depth_values = [
-            row.get(field) for field in immutable_fields if field.startswith("depth_")
-        ]
-        if any(value is not None for value in depth_values) and not all(
-            is_sha256(value) for value in depth_values
-        ):
-            raise P3CompletionError("held-out loss has incomplete depth provenance")
+        depth_fields = {
+            field: row.get(field)
+            for field in immutable_fields
+            if field.startswith("depth_")
+        }
+        empirical_provenance = depth_fields["depth_empirical_provenance"]
+        if isinstance(empirical_provenance, Mapping):
+            scalar_fields = (
+                "depth_producer_sha256",
+                "depth_cache_manifest_sha256",
+                "depth_empirical_contract_sha256",
+                "depth_validation_sha256",
+                "depth_checkpoint_sha256",
+            )
+            if depth_fields["depth_native_contract_sha256"] is not None or not all(
+                is_sha256(depth_fields[field]) for field in scalar_fields
+            ):
+                raise P3CompletionError("held-out loss has incomplete empirical depth provenance")
+            try:
+                validate_empirical_provenance(
+                    empirical_provenance,
+                    expected_contract_sha256=str(
+                        depth_fields["depth_empirical_contract_sha256"]
+                    ),
+                )
+            except EmpiricalDepthContractError as exc:
+                raise P3CompletionError(
+                    f"held-out loss empirical provenance differs: {exc}"
+                ) from exc
+            aligned = {
+                "producer_sha256": "depth_producer_sha256",
+                "cache_manifest_sha256": "depth_cache_manifest_sha256",
+                "empirical_contract_sha256": "depth_empirical_contract_sha256",
+                "validation_sha256": "depth_validation_sha256",
+                "checkpoint_sha256": "depth_checkpoint_sha256",
+            }
+            if any(
+                empirical_provenance.get(field) != depth_fields[scalar]
+                for field, scalar in aligned.items()
+            ):
+                raise P3CompletionError("held-out loss empirical provenance is not scalar-aligned")
+            if (
+                expected_empirical_adapter_mode is not None
+                and empirical_provenance.get("adapter_mode")
+                != expected_empirical_adapter_mode
+            ):
+                raise P3CompletionError(
+                    "held-out loss empirical adapter mode differs from the run-card arm"
+                )
+        elif empirical_provenance is not None:
+            raise P3CompletionError("held-out loss empirical provenance must be an object")
+        else:
+            native_fields = (
+                "depth_producer_sha256",
+                "depth_cache_manifest_sha256",
+                "depth_native_contract_sha256",
+                "depth_validation_sha256",
+                "depth_checkpoint_sha256",
+            )
+            any_depth = any(
+                value is not None
+                for field, value in depth_fields.items()
+                if field != "depth_empirical_provenance"
+            )
+            if any_depth and (
+                depth_fields["depth_empirical_contract_sha256"] is not None
+                or not all(is_sha256(depth_fields[field]) for field in native_fields)
+            ):
+                raise P3CompletionError("held-out loss has incomplete depth provenance")
         if row.get("previous_record_sha256") != prior:
             raise P3CompletionError("held-out loss ledger hash chain is broken")
         if row.get("record_sha256") != _record_digest(row):
@@ -1420,6 +1490,7 @@ def append_validation_record(
     value: Mapping[str, Any],
     *,
     target_steps: int,
+    expected_empirical_adapter_mode: str | None = None,
 ) -> Mapping[str, Any]:
     path = Path(path)
     rows = load_jsonl(path, allow_missing=True)
@@ -1446,6 +1517,7 @@ def append_validation_record(
         target_steps=target_steps,
         immutable_run_card_sha256=str(record["immutable_run_card_sha256"]),
         manifest_sha256=str(record["manifest_sha256"]),
+        expected_empirical_adapter_mode=expected_empirical_adapter_mode,
     )
     append_jsonl(path, record)
     return record
@@ -1454,6 +1526,7 @@ def append_validation_record(
 def validate_final_receipt(
     receipt: Mapping[str, Any],
     *,
+    expected_empirical_adapter_mode: str | None,
     expected: Mapping[str, Any] | None = None,
 ) -> None:
     if (
@@ -1507,18 +1580,68 @@ def validate_final_receipt(
         )
     if not isinstance(receipt.get("checkpoint"), str) or not receipt["checkpoint"]:
         raise P3CompletionError("final acceptance checkpoint path is invalid")
-    depth_fields = (
+    depth_identity_fields = (
         "depth_producer_sha256",
         "depth_cache_manifest_sha256",
-        "depth_native_contract_sha256",
         "depth_validation_sha256",
         "depth_checkpoint_sha256",
     )
-    depth_values = [receipt.get(field) for field in depth_fields]
-    if any(value is not None for value in depth_values) and not all(
-        is_sha256(value) for value in depth_values
-    ):
+    depth_values = [receipt.get(field) for field in depth_identity_fields]
+    has_depth = any(value is not None for value in depth_values)
+    if has_depth and not all(is_sha256(value) for value in depth_values):
         raise P3CompletionError("final acceptance has incomplete depth provenance")
+    native_contract = receipt.get("depth_native_contract_sha256")
+    empirical_contract = receipt.get("depth_empirical_contract_sha256")
+    empirical_provenance = receipt.get("depth_empirical_provenance")
+    if has_depth:
+        if is_sha256(native_contract):
+            if empirical_contract is not None or empirical_provenance is not None:
+                raise P3CompletionError("native final acceptance carries empirical provenance")
+        elif is_sha256(empirical_contract):
+            if native_contract is not None or not isinstance(empirical_provenance, Mapping):
+                raise P3CompletionError("empirical final acceptance provenance is incomplete")
+            try:
+                validate_empirical_provenance(
+                    empirical_provenance,
+                    expected_contract_sha256=str(empirical_contract),
+                )
+            except EmpiricalDepthContractError as exc:
+                raise P3CompletionError(
+                    f"final acceptance empirical provenance differs: {exc}"
+                ) from exc
+            aligned = {
+                "producer_sha256": "depth_producer_sha256",
+                "cache_manifest_sha256": "depth_cache_manifest_sha256",
+                "empirical_contract_sha256": "depth_empirical_contract_sha256",
+                "validation_sha256": "depth_validation_sha256",
+                "checkpoint_sha256": "depth_checkpoint_sha256",
+            }
+            if any(
+                empirical_provenance.get(field) != receipt.get(scalar)
+                for field, scalar in aligned.items()
+            ):
+                raise P3CompletionError(
+                    "final acceptance empirical provenance is not scalar-aligned"
+                )
+            if (
+                expected_empirical_adapter_mode is None
+                or empirical_provenance.get("adapter_mode")
+                != expected_empirical_adapter_mode
+            ):
+                raise P3CompletionError(
+                    "final acceptance empirical adapter mode differs"
+                )
+        else:
+            raise P3CompletionError("final acceptance has no discriminated depth contract")
+    elif any(
+        value is not None
+        for value in (native_contract, empirical_contract, empirical_provenance)
+    ):
+        raise P3CompletionError("depth-free final acceptance carries depth provenance")
+    if expected_empirical_adapter_mode is not None and not is_sha256(empirical_contract):
+        raise P3CompletionError(
+            "final acceptance empirical adapter mode differs"
+        )
     if not is_source_commit(receipt.get("source_commit")):
         raise P3CompletionError("final acceptance source commit is invalid")
     validate_final_sampler(
@@ -1562,8 +1685,16 @@ def validate_final_receipt(
             )
 
 
-def write_final_receipt(path: str | Path, receipt: Mapping[str, Any]) -> str:
-    validate_final_receipt(receipt)
+def write_final_receipt(
+    path: str | Path,
+    receipt: Mapping[str, Any],
+    *,
+    expected_empirical_adapter_mode: str | None,
+) -> str:
+    validate_final_receipt(
+        receipt,
+        expected_empirical_adapter_mode=expected_empirical_adapter_mode,
+    )
     text = json.dumps(dict(receipt), indent=2, sort_keys=True, allow_nan=False) + "\n"
     immutable_write_text(path, text)
     return sha256_file(path)
@@ -1572,11 +1703,16 @@ def write_final_receipt(path: str | Path, receipt: Mapping[str, Any]) -> str:
 def load_final_receipt(
     run_dir: str | Path,
     *,
+    expected_empirical_adapter_mode: str | None,
     expected: Mapping[str, Any] | None = None,
 ) -> tuple[Mapping[str, Any], Path, str]:
     path = Path(run_dir) / "final_acceptance.json"
     receipt = load_json(path)
-    validate_final_receipt(receipt, expected=expected)
+    validate_final_receipt(
+        receipt,
+        expected_empirical_adapter_mode=expected_empirical_adapter_mode,
+        expected=expected,
+    )
     return receipt, path, sha256_file(path)
 
 

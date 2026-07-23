@@ -17,6 +17,7 @@ from harness_common import (  # noqa: E402
     HarnessError,
     canonical_json_bytes,
     load_yaml,
+    require_run_card_authorization,
     sha256_file,
     validate_run_card,
     verify_evaluation_bindings,
@@ -40,6 +41,7 @@ def load_verified(path: Path):
 
 def verify(args: argparse.Namespace) -> None:
     card = load_verified(args.run_card)
+    require_run_card_authorization(card, operation="run_matrix")
     verify_live_card(card)
     verify_evaluation_bindings(card)
     for key, expected in card["environment_variables"].items():
@@ -113,6 +115,7 @@ def _prepare_run_dir(card) -> Path:
 
 def execute(args: argparse.Namespace) -> None:
     card = load_verified(args.run_card)
+    require_run_card_authorization(card, operation="run_matrix")
     for key, expected in card["environment_variables"].items():
         if os.environ.get(key) != str(expected):
             raise HarnessError(f"runtime environment differs from run card for {key}")

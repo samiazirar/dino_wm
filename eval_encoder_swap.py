@@ -26,6 +26,10 @@ from p3_completion import (
 from tools.harness_common import (
     HarnessError,
     build_evaluation_provenance,
+    require_directory_no_alias,
+    require_regular_file_no_alias,
+    require_run_card_authorization,
+    run_card_receipt_expectations,
     validate_run_card,
     validate_evaluation_provenance,
     verify_evaluation_bindings,
@@ -380,16 +384,27 @@ def _verify_training_completion(
 ) -> tuple[Mapping[str, Any], Path]:
     import torch
 
-    progress_path = training_run_dir / "progress.json"
+    try:
+        training_run_dir = require_directory_no_alias(
+            training_run_dir, "evaluation training directory"
+        )
+        progress_path = require_regular_file_no_alias(
+            training_run_dir / "progress.json", "evaluation training progress"
+        )
+    except HarnessError as exc:
+        raise EvaluationContractError(str(exc)) from exc
     progress = json.loads(progress_path.read_text(encoding="utf-8"))
     if progress.get("status") != "TARGET_REACHED" or int(
         progress.get("global_step", -1)
     ) != int(card["target_steps"]):
         raise EvaluationContractError("training run has not reached its exact target")
-    checkpoint_path = Path(progress["checkpoint"])
-    if not checkpoint_path.is_file() or sha256_file(checkpoint_path) != progress.get(
-        "checkpoint_sha256"
-    ):
+    try:
+        checkpoint_path = require_regular_file_no_alias(
+            Path(progress["checkpoint"]), "evaluation training checkpoint"
+        )
+    except HarnessError as exc:
+        raise EvaluationContractError(str(exc)) from exc
+    if sha256_file(checkpoint_path) != progress.get("checkpoint_sha256"):
         raise EvaluationContractError("final training checkpoint hash mismatch")
     if progress.get("source_commit") != card.get("source_commit"):
         raise EvaluationContractError("training/evaluation source commit mismatch")
@@ -428,9 +443,13 @@ def _verify_training_completion(
             )
         except P3CompletionError as exc:
             raise EvaluationContractError(str(exc)) from exc
-        chain = json.loads(
-            (training_run_dir / "chain.json").read_text(encoding="utf-8")
-        )
+        try:
+            chain_path = require_regular_file_no_alias(
+                training_run_dir / "chain.json", "evaluation training chain"
+            )
+        except HarnessError as exc:
+            raise EvaluationContractError(str(exc)) from exc
+        chain = json.loads(chain_path.read_text(encoding="utf-8"))
         jobs = chain.get("jobs")
         tail_job_id = (
             str(jobs[-1].get("job_id"))
@@ -485,6 +504,9 @@ def _verify_training_completion(
             "validation_batch.manifest_key": validation_manifest_key,
         }
         depth = card.get("depth_inputs")
+        expected_empirical_adapter_mode, empirical_provenance = (
+            run_card_receipt_expectations(training_card)
+        )
         expected.update(
             {
                 "depth_producer_sha256": depth.get("producer_sha256")
@@ -496,6 +518,14 @@ def _verify_training_completion(
                 "depth_native_contract_sha256": depth.get("native_contract_sha256")
                 if depth
                 else None,
+                "depth_empirical_contract_sha256": depth.get("empirical_contract_sha256")
+                if depth
+                else None,
+                "depth_empirical_provenance": (
+                    dict(empirical_provenance)
+                    if empirical_provenance is not None
+                    else None
+                ),
                 "depth_validation_sha256": depth.get("validation_sha256")
                 if depth
                 else None,
@@ -505,10 +535,16 @@ def _verify_training_completion(
             }
         )
         try:
-            receipt, receipt_path, receipt_sha256 = load_final_receipt(
-                training_run_dir, expected=expected
+            require_regular_file_no_alias(
+                training_run_dir / "final_acceptance.json",
+                "evaluation final acceptance receipt",
             )
-        except P3CompletionError as exc:
+            receipt, receipt_path, receipt_sha256 = load_final_receipt(
+                training_run_dir,
+                expected_empirical_adapter_mode=expected_empirical_adapter_mode,
+                expected=expected,
+            )
+        except (HarnessError, P3CompletionError) as exc:
             raise EvaluationContractError(str(exc)) from exc
         final_event = chain.get("events", [])[-1]
         if (
@@ -568,13 +604,25 @@ def _validate_existing_result_provenance(
 def evaluate(args: argparse.Namespace) -> None:
     import torch
 
-    if sha256_file(args.manifest) != args.manifest_sha256:
+    try:
+        manifest_path = require_regular_file_no_alias(
+            args.manifest, "evaluation fixed manifest"
+        )
+        run_card_path = require_regular_file_no_alias(
+            args.run_card, "evaluation run card"
+        )
+        training_run_dir = require_directory_no_alias(
+            args.training_run_dir, "evaluation training directory"
+        )
+    except HarnessError as exc:
+        raise EvaluationContractError(str(exc)) from exc
+    if sha256_file(manifest_path) != args.manifest_sha256:
         raise EvaluationContractError("fixed manifest SHA-256 mismatch")
-    records = _load_jsonl(args.manifest)
+    records = _load_jsonl(manifest_path)
     keys = [str(record.get("key")) for record in records]
     if len(keys) != len(set(keys)) or not keys:
         raise EvaluationContractError("fixed manifest has duplicate or empty coverage")
-    card = __import__("yaml").safe_load(args.run_card.read_text(encoding="utf-8"))
+    card = __import__("yaml").safe_load(run_card_path.read_text(encoding="utf-8"))
     if not isinstance(card, Mapping) or card.get("kind") not in {
         "p4-open-loop",
         "p2a-open-loop",
@@ -584,10 +632,17 @@ def evaluate(args: argparse.Namespace) -> None:
         )
     try:
         validate_run_card(card)
+        require_run_card_authorization(card, operation="evaluation")
         training_card, _metadata = verify_evaluation_bindings(card)
     except HarnessError as exc:
         raise EvaluationContractError(str(exc)) from exc
-    if args.training_run_dir.resolve() != Path(card["training_run_dir"]).resolve():
+    try:
+        card_training_run_dir = require_directory_no_alias(
+            Path(card["training_run_dir"]), "run-card training directory"
+        )
+    except HarnessError as exc:
+        raise EvaluationContractError(str(exc)) from exc
+    if training_run_dir != card_training_run_dir:
         raise EvaluationContractError("CLI training directory differs from run card")
     if card.get("fixed_manifest", {}).get("sha256") != args.manifest_sha256:
         raise EvaluationContractError("run card identifies a different fixed manifest")
@@ -604,19 +659,19 @@ def evaluate(args: argparse.Namespace) -> None:
         )
 
     progress, checkpoint_path = _verify_training_completion(
-        card, training_card, args.training_run_dir
+        card, training_card, training_run_dir
     )
     result_provenance = _result_provenance(
         card,
         training_card,
-        run_card_path=args.run_card,
+        run_card_path=run_card_path,
         checkpoint_sha256=str(progress["checkpoint_sha256"]),
         manifest_sha256=args.manifest_sha256,
         slurm_job_id=os.environ.get("SLURM_JOB_ID"),
     )
 
     cfg, model, trajectory_dataset = _load_eval_model(
-        args.training_run_dir, checkpoint_path, args.device
+        training_run_dir, checkpoint_path, args.device
     )
     if (
         str(cfg.env.name) not in {environment, "deformable_env"}

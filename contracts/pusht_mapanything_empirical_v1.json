@@ -1,0 +1,124 @@
+{
+  "adapter": {
+    "fallback_policy": {
+      "alternate_cache": "forbidden",
+      "dynamic_reproduction": "forbidden",
+      "isolated_frame_producer": "forbidden",
+      "missing_depth_to_zero": "forbidden",
+      "rgb_only_substitution": "forbidden"
+    },
+    "id": "mapanything_pusht_empirical_lossy_v1",
+    "informative_mode": {
+      "additional_clipping": "none",
+      "cast": "float16_to_float32",
+      "checkpoint_mean_std_normalization": "none",
+      "decode": "zstd_then_little_endian_float16",
+      "invalid_policy": "fail_on_missing_nonfinite_or_out_of_range",
+      "payload_presence_mask": "all_ones_only_after_payload_validation",
+      "range_check": "exact_closed_interval_[0,1]_no_tolerance",
+      "reconstruction": "proxy_depth_z=wire_float32*1.5746406149864196",
+      "spatial_operation": "identity_on_materialized_224x224"
+    },
+    "zero_intervention_mode": {
+      "boundary_mask": 0.0,
+      "boundary_value": 0.0,
+      "label": "constant_zero_numeric_intervention_not_native_neutral",
+      "neutrality_claimed": false,
+      "requires_same_cache_identity_and_coverage": true,
+      "rgb_only_claimed": false
+    }
+  },
+  "assumption_tags": [
+    "[ASSUMPTION: RECOVERED-CONTRACT]"
+  ],
+  "authority": {
+    "authorization_basis": "owner_advisor_authorized_report_39",
+    "execution_authority_granted": false,
+    "route": "mapanything_primary_for_pusht"
+  },
+  "cache": {
+    "data_path": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/pusht.lmdb/data.mdb",
+    "data_sha256": "68fe99e9f566eadcaa61e092b042962060fdc82c39ee8e71dcd7b9ef05247adb",
+    "directory": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/pusht.lmdb",
+    "environment": "pusht",
+    "manifest_id": "b87fe658-4731-4e8e-8c88-38f4fac6344c",
+    "manifest_path": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/pusht.lmdb/manifest.json",
+    "manifest_sha256": "9f35d303a5c604d5870ebdc6aedcefe9860bd0ab2763648c75b11e3b4f50b691",
+    "producer_sha256": "6996aa719531feb09f8dc858e66c2b703dc14393533f2d6dc073fd98937fe4e5",
+    "source_index_sha256": "ed6eecd62e455ffd35551074787f36b6c08039776b58a9dc6f22d17266ead6bd",
+    "validation": {
+      "path": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/validation.json",
+      "schema": "dinocular-mapanything-cache-validation-v1",
+      "sha256": "ed3d63388a81581d20d560266a0d5e210b6672144fcb2cbb6a2e7ffef5736df9",
+      "state": "PASS"
+    },
+    "wire_format_sha256": "47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded"
+  },
+  "checkpoint": {
+    "backend": "df2_dino_rope_convs_de",
+    "checkpoint_key": "student",
+    "factory": "DFormerv2_S",
+    "feature_key": "x_norm_patchtokens",
+    "input_shape": [
+      1,
+      224,
+      224
+    ],
+    "path": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/checkpoints/dinov2_depthembed_dropout_fullpr.pth",
+    "sha256": "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc",
+    "state_prefix": "module.backbone."
+  },
+  "empirical_use_allowed": true,
+  "lossless_to_original_training_input": false,
+  "native_equivalence_claimed": false,
+  "result_disclosure": {
+    "required_adapter_id": "mapanything_pusht_empirical_lossy_v1",
+    "required_assumption_tags": [
+      "[ASSUMPTION: RECOVERED-CONTRACT]"
+    ],
+    "required_cache_identity_fields": true,
+    "required_contract_sha256": true,
+    "required_non_equivalence_statement": "This is a clipped later-producer empirical proxy and constant-zero numeric intervention, not original-producer recovery, checkpoint-native or neutral depth, RGB-only input, physical/metric depth, or a MapAnything-versus-Depth-Anything-3 claim."
+  },
+  "schema": "dinocular-empirical-cache-consumption-contract-v1",
+  "scientific_scope": {
+    "invalid_claims": [
+      "reproduction_of_original_student_training_depth",
+      "equality_to_unrecovered_original_mapanything_invocation",
+      "checkpoint_native_input_equivalence",
+      "lossless_recovery_of_raw_depth_z",
+      "metric_depth_or_physical_unit_recovery",
+      "native_neutral_or_rgb_only_equivalence",
+      "mapanything_versus_depth_anything_3"
+    ],
+    "non_equivalence_statement": "This is a clipped later-producer empirical proxy and constant-zero numeric intervention, not original-producer recovery, checkpoint-native or neutral depth, RGB-only input, physical/metric depth, or a MapAnything-versus-Depth-Anything-3 claim.",
+    "valid_claim": "Under [ASSUMPTION: RECOVERED-CONTRACT], the exact selected frozen DINOcular checkpoint is driven by the exact accepted PushT MapAnything cache through the exact frozen empirical adapter; outcomes measure only that operational proxy-valued input versus the paired constant-zero numeric intervention."
+  },
+  "status": "complete",
+  "wire_semantics": {
+    "calibration": {
+      "hi": 1.5746406149864196,
+      "key_sha256": "40eb3b62c3f77bee5d4399c46c2efba0672c05ed03ecbca2d91c5106f308115d",
+      "lo": 0.0,
+      "operation": "wire=clip((later_depth_z-lo)/(hi-lo),0,1)",
+      "scope": "pusht_training_only"
+    },
+    "geometry": "already_materialized_224x224_bilinear_depth",
+    "irreversibilities": [
+      "clipping",
+      "float16_quantization_after_normalization",
+      "bilinear_resampling_and_downsampling",
+      "original_invocation_and_scale_not_recovered"
+    ],
+    "stored_dtype": "little_endian_float16",
+    "stored_quantity": "clipped_normalized_later_mapanything_depth_z_proxy",
+    "stored_range": [
+      0.0,
+      1.0
+    ],
+    "stored_shape": [
+      224,
+      224
+    ]
+  }
+}
