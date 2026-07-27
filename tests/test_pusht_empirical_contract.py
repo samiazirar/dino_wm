@@ -62,6 +62,16 @@ WIRE_SHA = "47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded"
 CALIBRATION_SHA = "40eb3b62c3f77bee5d4399c46c2efba0672c05ed03ecbca2d91c5106f308115d"
 MANIFEST_ID = "b87fe658-4731-4e8e-8c88-38f4fac6344c"
 
+ACCEPTED_CONTRACT_SHA256 = (
+    "a0ec83bd8eab0b41e8072643b79b4380c836c0db6d90a1147f10c0a99e64b0d0"
+)
+ACCEPTED_RELEASE_SHA256 = (
+    "556e53f36cb80a5076a8269fc7dba5ce4be96d3da12c0843d94e21a7d6e05397"
+)
+ACCEPTED_ACCEPTANCE_SHA256 = (
+    "b2933fd7683dfdb956cbd8d9e86868a301783880a029adb00f089d19fe66104e"
+)
+
 
 def _runtime_binding(prefix: str = "/empirical", mode: str = "canonical_host_v1") -> dict:
     return {
@@ -658,7 +668,7 @@ def test_locked_36_cells_and_targets_are_unchanged() -> None:
     assert LOCKED_TARGETS == {"pusht": 123858, "wall": 143910, "rope": 53500, "granular": 53500}
 
 
-def test_real_study_spec_selects_mixed_v2_index_and_declares_blocked_artifacts() -> None:
+def test_real_study_spec_selects_mixed_v2_index_with_pusht_release_accepted_and_native_blocked() -> None:
     root = Path(__file__).resolve().parents[1]
     spec = yaml.safe_load((root / "conf/study_matrix.yaml").read_text(encoding="utf-8"))
     assert spec["contracts_index"].endswith("/depth_consumption_index_v2.yaml")
@@ -667,8 +677,87 @@ def test_real_study_spec_selects_mixed_v2_index_and_declares_blocked_artifacts()
     )
     assert index["native_v1"]["status"] == "BLOCKED_MISSING_ACCEPTED_ARTIFACT"
     assert index["native_v1"]["index_sha256"] is None
-    assert index["empirical_runtime_release"]["status"] == "BLOCKED_MISSING_ACCEPTED_ARTIFACT"
-    assert index["empirical_runtime_release"]["release_sha256"] is None
+    release = index["empirical_runtime_release"]
+    assert release["status"] == "READY"
+    assert release["release_sha256"] == ACCEPTED_RELEASE_SHA256
+    assert release["independent_acceptance_status"] == "READY"
+    assert release["independent_acceptance_sha256"] == ACCEPTED_ACCEPTANCE_SHA256
+
+
+def test_countable_pusht_path_pins_only_committed_accepted_release_and_acceptance() -> None:
+    root = Path(__file__).resolve().parents[1]
+    committed_release = root / "releases/pusht_empirical_runtime_release_v1.json"
+    committed_acceptance = (
+        root / "acceptances/pusht_empirical_runtime_release_acceptance_v1.json"
+    )
+    assert committed_release.is_file(), (
+        "accepted PushT runtime release must be committed in source"
+    )
+    assert committed_acceptance.is_file(), (
+        "accepted PushT runtime acceptance must be committed in source"
+    )
+    assert sha256_file(committed_release) == ACCEPTED_RELEASE_SHA256
+    assert sha256_file(committed_acceptance) == ACCEPTED_ACCEPTANCE_SHA256
+
+    index = yaml.safe_load(
+        (root / "contracts/depth_consumption_index_v2.yaml").read_text(encoding="utf-8")
+    )
+    release_record = index["empirical_runtime_release"]
+    assert release_record["status"] == "READY"
+    assert release_record["release_sha256"] == ACCEPTED_RELEASE_SHA256
+    assert release_record["independent_acceptance_status"] == "READY"
+    assert release_record["independent_acceptance_sha256"] == ACCEPTED_ACCEPTANCE_SHA256
+
+    release_doc = json.loads(committed_release.read_text(encoding="utf-8"))
+    acceptance_doc = json.loads(committed_acceptance.read_text(encoding="utf-8"))
+    assert release_doc["schema"] == "dino-wm-empirical-runtime-release-v1"
+    assert release_doc["state"] == "INDEPENDENTLY_ACCEPTED"
+    assert release_doc["runtime_mode"] == "canonical_host_v1"
+    assert release_doc["empirical_contract_sha256"] == ACCEPTED_CONTRACT_SHA256
+    assert release_doc["independent_acceptance"]["sha256"] == ACCEPTED_ACCEPTANCE_SHA256
+    assert acceptance_doc["schema"] == "dino-wm-empirical-runtime-release-acceptance-v1"
+    assert acceptance_doc["state"] == "INDEPENDENTLY_ACCEPTED"
+    assert (
+        acceptance_doc["bindings"]["empirical_contract_sha256"]
+        == ACCEPTED_CONTRACT_SHA256
+    )
+    assert acceptance_doc["bindings"]["runtime_mode"] == release_doc["runtime_mode"]
+
+    assert index["native_v1"]["status"] == "BLOCKED_MISSING_ACCEPTED_ARTIFACT"
+    assert index["native_v1"]["index_sha256"] is None
+    entry = index["entries"]["pusht/mapanything_recovered_framewise"]
+    assert entry["contract_sha256"] == ACCEPTED_CONTRACT_SHA256
+    assert entry["execution_authority_granted"] is False
+
+
+def test_countable_pusht_path_rejects_absent_or_uncommitted_release_evidence(
+    tmp_path: Path,
+) -> None:
+    contract_path = (
+        Path(__file__).resolve().parents[1]
+        / "contracts/pusht_mapanything_empirical_v1.json"
+    )
+    contract = load_empirical_depth_contract(
+        str(contract_path), ACCEPTED_CONTRACT_SHA256
+    )
+
+    absent_release = tmp_path / "absent-release.json"
+    with pytest.raises(EmpiricalDepthContractError, match="absent"):
+        load_empirical_runtime_release(
+            absent_release, ACCEPTED_RELEASE_SHA256, contract=contract
+        )
+
+    forged_release = tmp_path / "forged-release.json"
+    forged_release.write_text("{}", encoding="utf-8")
+    with pytest.raises(EmpiricalDepthContractError, match="identity differs"):
+        load_empirical_runtime_release(
+            forged_release, ACCEPTED_RELEASE_SHA256, contract=contract
+        )
+
+    with pytest.raises(DepthContractError):
+        load_empirical_runtime_release(
+            forged_release, None, contract=contract
+        )
 
 
 def test_mixed_dispatch_uses_empirical_only_for_pusht_and_delegates_native_records(

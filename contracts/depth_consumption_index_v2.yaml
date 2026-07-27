@@ -10,12 +10,12 @@ native_v1:
     - rope
     - granular
 empirical_runtime_release:
-  status: BLOCKED_MISSING_ACCEPTED_ARTIFACT
+  status: READY
   release_path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/releases/pusht_empirical_runtime_release_v1.json
-  release_sha256: null
-  independent_acceptance_status: BLOCKED_MISSING_ACCEPTED_ARTIFACT
+  release_sha256: 556e53f36cb80a5076a8269fc7dba5ce4be96d3da12c0843d94e21a7d6e05397
+  independent_acceptance_status: READY
   independent_acceptance_path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/acceptances/pusht_empirical_runtime_release_acceptance_v1.json
-  independent_acceptance_sha256: null
+  independent_acceptance_sha256: b2933fd7683dfdb956cbd8d9e86868a301783880a029adb00f089d19fe66104e
 entries:
   pusht/mapanything_recovered_framewise:
     contract_kind: empirical_lossy_cache

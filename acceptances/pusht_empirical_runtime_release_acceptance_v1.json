@@ -1,0 +1,25 @@
+{
+  "bindings": {
+    "canonical_paths": {
+      "cache_directory": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/pusht.lmdb",
+      "checkpoint": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/checkpoints/dinov2_depthembed_dropout_fullpr.pth",
+      "data": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/pusht.lmdb/data.mdb",
+      "manifest": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/pusht.lmdb/manifest.json",
+      "validation": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/depth_cache_mapanything_singleton/validation.json"
+    },
+    "empirical_contract_sha256": "a0ec83bd8eab0b41e8072643b79b4380c836c0db6d90a1147f10c0a99e64b0d0",
+    "identities": {
+      "checkpoint_sha256": "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc",
+      "data_sha256": "68fe99e9f566eadcaa61e092b042962060fdc82c39ee8e71dcd7b9ef05247adb",
+      "manifest_id": "b87fe658-4731-4e8e-8c88-38f4fac6344c",
+      "manifest_sha256": "9f35d303a5c604d5870ebdc6aedcefe9860bd0ab2763648c75b11e3b4f50b691",
+      "producer_sha256": "6996aa719531feb09f8dc858e66c2b703dc14393533f2d6dc073fd98937fe4e5",
+      "source_index_sha256": "ed6eecd62e455ffd35551074787f36b6c08039776b58a9dc6f22d17266ead6bd",
+      "validation_sha256": "ed3d63388a81581d20d560266a0d5e210b6672144fcb2cbb6a2e7ffef5736df9",
+      "wire_format_sha256": "47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded"
+    },
+    "runtime_mode": "canonical_host_v1"
+  },
+  "schema": "dino-wm-empirical-runtime-release-acceptance-v1",
+  "state": "INDEPENDENTLY_ACCEPTED"
+}
