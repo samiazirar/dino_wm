@@ -123,8 +123,13 @@ trap forward_usr1 USR1
 trap forward_term TERM
 
 set +e
-wait "$TRAIN_PID"
-TRAIN_STATUS=$?
+# Re-wait past EINTR: SLURM USR1 wakes `wait` (returns 138) before python finishes
+# checkpointing. Proven repair, see /tmp/dinocular_marvin_campaign_relaunch_state.md.
+while :; do
+    wait "$TRAIN_PID"
+    TRAIN_STATUS=$?
+    kill -0 "$TRAIN_PID" 2>/dev/null || break
+done
 set -e
 if [ "$TRAIN_STATUS" -ne 0 ]; then
     printf 'Training process failed with status %s\n' "$TRAIN_STATUS" >&2
