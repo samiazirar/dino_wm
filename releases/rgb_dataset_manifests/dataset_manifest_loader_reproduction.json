@@ -1,0 +1,80 @@
+{
+  "data_root": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/raw",
+  "environments": [
+    "wall",
+    "rope",
+    "granular"
+  ],
+  "manifest_schema": "dino-wm.rgb-dataset-manifest.v1",
+  "results": {
+    "granular": {
+      "checks": {
+        "train_episode_set_match_manifest": true,
+        "train_valid_episodes_disjoint": true,
+        "train_valid_episodes_partition": true,
+        "train_window_count_match_locked_recipe": true,
+        "train_window_count_match_manifest": true,
+        "valid_episode_set_match_manifest": true,
+        "valid_window_count_match_manifest": true
+      },
+      "data_root": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/raw",
+      "environment": "granular",
+      "loader_train_episode_count": 900,
+      "loader_train_window_count": 17100,
+      "loader_valid_episode_count": 100,
+      "loader_valid_window_count": 1900,
+      "locked_train_window_count": 17100,
+      "manifest_path": "/tmp/dwm_manifest/run1/dataset_manifest_granular.json",
+      "manifest_sha256": "8433070978de0eab5199dd112f0caf5552b8bf160c50464a305391926e65dc24",
+      "numpy_version": "1.26.4",
+      "torch_version": "2.3.1"
+    },
+    "rope": {
+      "checks": {
+        "train_episode_set_match_manifest": true,
+        "train_valid_episodes_disjoint": true,
+        "train_valid_episodes_partition": true,
+        "train_window_count_match_locked_recipe": true,
+        "train_window_count_match_manifest": true,
+        "valid_episode_set_match_manifest": true,
+        "valid_window_count_match_manifest": true
+      },
+      "data_root": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/raw",
+      "environment": "rope",
+      "loader_train_episode_count": 900,
+      "loader_train_window_count": 17100,
+      "loader_valid_episode_count": 100,
+      "loader_valid_window_count": 1900,
+      "locked_train_window_count": 17100,
+      "manifest_path": "/tmp/dwm_manifest/run1/dataset_manifest_rope.json",
+      "manifest_sha256": "f7e51a2a87b9c197a7c4b5416a765f7a5b73ffb67b8dde1d7614e772cfab194f",
+      "numpy_version": "1.26.4",
+      "torch_version": "2.3.1"
+    },
+    "wall": {
+      "checks": {
+        "train_episode_set_match_manifest": true,
+        "train_valid_episodes_disjoint": true,
+        "train_valid_episodes_partition": true,
+        "train_window_count_match_locked_recipe": true,
+        "train_window_count_match_manifest": true,
+        "valid_episode_set_match_manifest": true,
+        "valid_window_count_match_manifest": true
+      },
+      "data_root": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/data/raw",
+      "environment": "wall",
+      "loader_train_episode_count": 1728,
+      "loader_train_window_count": 70848,
+      "loader_valid_episode_count": 192,
+      "loader_valid_window_count": 7872,
+      "locked_train_window_count": 70848,
+      "manifest_path": "/tmp/dwm_manifest/run1/dataset_manifest_wall.json",
+      "manifest_sha256": "130f28f3e354da64ef36b2bf64d3516722f2aa02d78edd3620cf660c435f3066",
+      "numpy_version": "1.26.4",
+      "torch_version": "2.3.1"
+    }
+  },
+  "schema": "dino-wm.rgb-dataset-manifest-reproduction.v1",
+  "source_commit": "00e46eb0ded3b8c379ec6ebdb74c8991604f4b8f",
+  "state": "PASS"
+}
