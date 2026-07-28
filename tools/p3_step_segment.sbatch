@@ -16,7 +16,13 @@ set -euo pipefail
 : "${P3_CHAIN_MANIFEST:?P3_CHAIN_MANIFEST is required}"
 PROJECT=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm
 SIF=$PROJECT/containers/dinocular-wm-p0-20260714.sif
-SUBMITTER=$PROJECT/code/dino_wm/tools/submit_p3_chain.py
+CODE_ROOT=$(python3 - "$P3_CHAIN_MANIFEST" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["code_root"])
+PY
+)
+SUBMITTER=$CODE_ROOT/tools/submit_p3_chain.py
 CACHE_ROOT=$PROJECT/cache/p3-resume/$SLURM_JOB_ID
 export TRITON_CACHE_DIR=$CACHE_ROOT/triton
 export XDG_CACHE_HOME=$CACHE_ROOT/xdg
@@ -51,7 +57,7 @@ mapfile -t OVERRIDES < <(
 )
 
 TRAIN_ARGS=(
-    python "$PROJECT/code/dino_wm/train.py"
+    python "$CODE_ROOT/train.py"
     "training.target_steps=$TARGET_STEPS"
     "training.segment_steps=$SEGMENT_STEPS"
     "training.checkpoint_every_steps=$CHECKPOINT_EVERY"
@@ -74,11 +80,11 @@ export STRICT_P2_ENV=$P2_ENV
 export STRICT_P2_ARM=$P2_ARM
 export STRICT_P2_CONTAINER=$SIF
 export STRICT_P2_CONTAINER_SHA256=$SIF_SHA256
-export STRICT_P2_SLURM_WRAPPER=$PROJECT/code/dino_wm/tools/p3_step_segment.sbatch
+export STRICT_P2_SLURM_WRAPPER=$CODE_ROOT/tools/p3_step_segment.sbatch
 export STRICT_P2_IMMUTABLE_RUN_CARD=$RUN_CARD
 export STRICT_P2_IMMUTABLE_RUN_CARD_SHA256=$RUN_CARD_SHA256
 
-source "$PROJECT/code/dino_wm/tools/dinocular_container_env.sh"
+source "$CODE_ROOT/tools/dinocular_container_env.sh"
 build_dinocular_container_env "$P2_ARM"
 
 nvidia-smi
@@ -108,7 +114,7 @@ setsid /usr/bin/apptainer exec --nv --writable-tmpfs \
     --env DINOV2_REPO="$PROJECT/code/dinov2" \
     --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
     "${DINOCULAR_CONTAINER_ENV[@]}" \
-    --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+    --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \
     "$SIF" \
     "${TRAIN_ARGS[@]}" &
 TRAIN_PID=$!
@@ -169,7 +175,7 @@ if [ "$RUN_KIND" = p3-training ] && [ "$PROGRESS_STATUS" = TARGET_REACHED ]; the
         --env DINOV2_REPO="$PROJECT/code/dinov2" \
         --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
         "${DINOCULAR_CONTAINER_ENV[@]}" \
-        --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+        --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \
         "$SIF" \
         "${TRAIN_ARGS[@]}" "training.final_acceptance=true"
 fi
@@ -178,20 +184,20 @@ case "$RUN_KIND" in
     p2-geometry)
         /usr/bin/apptainer exec --nv --writable-tmpfs \
             --bind "$PROJECT:$PROJECT" \
-            --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+            --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \
             --env DATASET_DIR="$PROJECT/data/raw" \
             --env DINOV2_REPO="$PROJECT/code/dinov2" \
             --env DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth" \
             "${DINOCULAR_CONTAINER_ENV[@]}" \
-            "$SIF" python "$PROJECT/code/dino_wm/tools/p2_harness_gate.py" geometry \
+            "$SIF" python "$CODE_ROOT/tools/p2_harness_gate.py" geometry \
             --run-card "$RUN_CARD" --run-dir "$RUN_DIR"
         ;;
     p2-timing)
         /usr/bin/apptainer exec --nv --writable-tmpfs \
             --bind "$PROJECT:$PROJECT" \
-            --env PYTHONPATH="$PROJECT/code/dino_wm:/opt/dinov2" \
+            --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \
             "${DINOCULAR_CONTAINER_ENV[@]}" \
-            "$SIF" python "$PROJECT/code/dino_wm/tools/p2_harness_gate.py" timing \
+            "$SIF" python "$CODE_ROOT/tools/p2_harness_gate.py" timing \
             --run-card "$RUN_CARD" --run-dir "$RUN_DIR"
         ;;
     *) ;;
