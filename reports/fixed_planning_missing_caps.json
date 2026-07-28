@@ -1,0 +1,20 @@
+{
+  "schema": "dinocular.deformable-planning-cap-receipt.v1",
+  "selection_seed": 20260714,
+  "state": "MISSING_FIXED_INPUT",
+  "environments": {
+    "granular": {
+      "input": "finite_mpc_iteration_cap",
+      "reason": "NO_NUMERIC_VALUE_IN_ACCEPTED_SOURCE"
+    },
+    "rope": {
+      "input": "finite_mpc_iteration_cap",
+      "reason": "NO_NUMERIC_VALUE_IN_ACCEPTED_SOURCE"
+    }
+  },
+  "searched_once": [
+    "accepted local planning prompt and evidence packet",
+    "accepted Marvin source, environment, planning, and staged materializer files",
+    "accepted lmgpu source roots"
+  ]
+}

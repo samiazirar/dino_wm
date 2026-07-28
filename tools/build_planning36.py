@@ -226,7 +226,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                 }
             )
         target_ids: list[str] = []
-        if not task_missing:
+        if target_path.is_file():
             try:
                 target_ids = _target_ids(target_path, environment)
             except MaterializationError as exc:
