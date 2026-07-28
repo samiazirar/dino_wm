@@ -1,0 +1,492 @@
+schema: dinocular-native-depth-spec-recovery-v1
+decision: REJECT
+decision_state: NOT_ACCEPTED_NATIVE_NORMALIZATION_CONTRADICTED
+supersedes_and_strengthens: contracts/native_depth_release_independent_acceptance_v1.yaml
+performed_at: 2026-07-28
+performed_by: worker-opencode-native-depth-acceptance
+model: OpenCode GLM 5.2
+worktree: task/native-depth-acceptance
+submit_jobs: false
+copy_or_promote_caches: false
+checkpoint_sha256: decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc
+checkpoint_name: dinov2_depthembed_dropout_fullpr.pth
+
+# This record is the bounded deliverable for the spec-recovery task. It searches
+# ONLY the named student-training and DA3 evidence surfaces for the 40 missing
+# native-contract fields recorded in
+# contracts/native_depth_release_independent_acceptance_v1.yaml, with exact
+# provenance for every populated value and no inferred defaults.
+#
+# The prior independent acceptance rejected because the 40 fields were ABSENT
+# from the pinned cache-side evidence. This recovery searched the two owner
+# surfaces that acceptance explicitly named as the source: (1) the student
+# checkpoint's own metadata, and (2) the student-training source. The result is
+# stronger than absence: the student-training source actively CONTRADICTS the
+# native contract's mandatory encoder_input.checkpoint_native.normalization.kind
+# = affine_mean_std field. The dropout_fullpr student checkpoint was trained on
+# RAW, UNNORMALIZED depth, so an affine_mean_std native contract cannot be
+# recovered from evidence without inventing the normalization. No value was
+# invented; the durable rejection is confirmed and sharpened.
+
+evidence_surfaces_searched:
+  - id: student_checkpoint_metadata
+    location: /home/user/azirar/dinocular-wm/scratch/p1-models/dinov2_depthembed_dropout_fullpr.pth
+    sha256_verified: decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc
+    top_keys: [student, teacher, optimizer, epoch, args, dino_loss, equivariance_loss, ibot_patch_loss]
+    args_key_count: 55
+    observation: >-
+      args carries only training hyperparameters and data PATHS. It contains
+      data_depth_path=/tmp/newdepth_fp16/ and data_path=/lustre/mlnvme/data/s94falmu_hpc-thesis_ssd/mvi_final
+      but NO depth_mean / depth_std / normalization field. patch_embed.proj.0.weight
+      is shape (32,3,3,3): the backbone takes 3-channel RGB; depth does not enter
+      at patch_embed. Depth is injected through a separate DepthPatchEmbed
+      (geo_embed) that contains conv+BN+GELU+Dropout only and no mean/std
+      normalization buffer. The checkpoint therefore encodes NO checkpoint-native
+      depth normalization.
+  - id: student_training_source
+    location: /home/user/azirar/dinocular-wm/MThesis-wt
+    commit: b99422df5115f769899b5432f5b2b81796d3a27c
+    provenance_match: >-
+      models/dinocular_backbone.py:27 records MTHESIS_COMMIT
+      b99422df5115f769899b5432f5b2b81796d3a27c; the vendored source SHA-256s
+      match exactly (models/DF2_DINO_rope_convs_de.py
+      2dab217777185d19b144be22fafe80dc941fd0a67ae9a6e5fc5cd380b48ab1e6 and
+      models/DFormerv2.py
+      aaeb1992312ebc9738279edd984f8e6f0b238f6e3f6d344074256f515ec17b77, both
+      pinned in models/dinocular_backbone.py:5-9). This is the provenance-matched
+      student-training source for the dropout_fullpr checkpoint.
+    launcher: scripts/train_mixed_v2.sh -> train_mixed_v2.py
+    observation: >-
+      train_mixed_v2.py instantiates dataset_img = ImageDatasetDino(...) with
+      transform_img = DataAugmentationDINO(...) (line 517/522) and dataset =
+      ImageDatasetMVI(...) with transform = DataAugmentationMVI(...) (line
+      533/538). Neither augmentation pipeline applies any mean/std normalization
+      to depth. Depth is loaded raw and returned raw (see field-level citations
+      below). The scripts/train_mixed_v2.sh defaults match the checkpoint args
+      verbatim (arch DFormerv2_S, batch_size_per_gpu 96, epochs 150,
+      teacher_temp 0.07, warmup_teacher_temp_epochs 15, warmup_epochs 10,
+      norm_last_layer False, use_fp16 True, drop_path_rate 0.1).
+  - id: da3_producer_source
+    location: tools/precompute_depth_da3_shards.py, tools/precompute_depth.py (this worktree)
+    observation: >-
+      The DA3 producer encodes only the cache-side wire format
+      clip((depth_m-lo)/(hi-lo),0,1) with per-environment calibration lo/hi
+      (already recorded in the pinned cache manifests). It encodes NO
+      checkpoint-native affine map, normalization mean/std, neutral input, or
+      clipping in checkpoint-native space. The DA3-side producer fields are
+      recoverable; the checkpoint-native fields are not DA3's to define.
+
+# ---------------------------------------------------------------------------
+# Field-level resolution for the 40 native-contract fields. Each entry cites an
+# exact file/key/line or checkpoint metadata location. No value is inferred.
+# Status is one of: RECOVERED, CONTRADICTED, ABSENT.
+# ---------------------------------------------------------------------------
+
+field_resolution:
+
+  # ===== Envelope fields (self-declaration of the would-be artifact) =====
+
+  schema:
+    status: RECOVERED_AS_CONTRACT_TARGET
+    value: dinocular-native-depth-contract-v1
+    provenance: >-
+      Fixed by the contract definition (NATIVE_DEPTH_SCHEMA in depth_contract.py:14
+      and the prior acceptance required_value). Not evidence-derived; it is the
+      target schema name itself.
+
+  status:
+    status: CONTRADICTED
+    required_value: complete
+    evidence: >-
+      The artifact cannot honestly declare status=complete because its mandatory
+      body fields are contradicted by the student-training source (see
+      normalization.kind). The artifact cannot be truthfully built.
+
+  scientific_use_allowed:
+    status: CONTRADICTED
+    required_value: true
+    evidence: >-
+      Cannot be set true while the checkpoint-native normalization, neutral, and
+      cache-to-native affine fields are unrecoverable without invention.
+
+  # ===== Checkpoint identity fields =====
+
+  checkpoint.backend:
+    status: RECOVERED
+    value: df2_dino_rope_convs_de
+    provenance: conf/encoder/dinocular_student_dropout_fullpr.yaml:3
+
+  checkpoint.factory:
+    status: RECOVERED
+    value: DFormerv2_S
+    provenance: >-
+      conf/encoder/dinocular_student_dropout_fullpr.yaml:4; corroborated by
+      checkpoint args.arch='DFormerv2_S'
+
+  checkpoint.checkpoint_key:
+    status: RECOVERED
+    value: student
+    provenance: >-
+      conf/encoder/dinocular_student_dropout_fullpr.yaml:7; the checkpoint
+      top-level dict contains the key 'student'
+
+  checkpoint.state_prefix:
+    status: RECOVERED
+    value: module.backbone.
+    provenance: >-
+      conf/encoder/dinocular_student_dropout_fullpr.yaml:8; all student state
+      dict keys begin with module.backbone.
+
+  producer.name:
+    status: RECOVERED
+    value: da3_giant_video
+    provenance: contracts/native_depth_release_candidate_v1.yaml:25
+
+  producer.model:
+    status: RECOVERED
+    value: depth_anything_3_streaming
+    provenance: >-
+      tools/precompute_depth.py:35 DA3_REPOSITORY
+      https://github.com/ByteDance-Seed/Depth-Anything-3.git ; producer display
+      name in contracts/native_depth_release_candidate_v1.yaml:26
+
+  producer.version:
+    status: RECOVERED
+    value: e74fd796e96b7e781a5506fd8503b6bd7232513c
+    provenance: tools/precompute_depth.py:36 DA3_COMMIT
+
+  producer.code_commit:
+    status: RECOVERED
+    value: e74fd796e96b7e781a5506fd8503b6bd7232513c
+    provenance: tools/precompute_depth.py:36 DA3_COMMIT
+
+  producer.temporal_mode:
+    status: RECOVERED
+    value: streaming
+    provenance: >-
+      producer display name '...DA3-Streaming' in
+      contracts/native_depth_release_candidate_v1.yaml:26; module docstring
+      tools/precompute_depth.py:2 'DA3-Streaming'
+
+  producer.raw_units:
+    status: RECOVERED
+    value: metric_meters
+    provenance: >-
+      tools/precompute_depth.py:523 crop_metric_depth restores DA3 output to
+      decoded metric geometry; calibration lo/hi in pinned manifests are in
+      metric meters
+
+  producer.weight_sha256:
+    status: RECOVERABLE_FROM_DA3_SOURCE
+    note: >-
+      The pinned DA3 weight_sha256 is recorded in tools/precompute_depth.py
+      model.safetensors hash table (line 40+) and in each pinned cache manifest's
+      producer block. It is DA3-side, not checkpoint-side, and is not the
+      blocking field.
+
+  producer.invocation:
+    status: RECOVERABLE_FROM_DA3_SOURCE
+    note: DA3 producer source pins the invocation; DA3-side, not blocking.
+
+  producer.preprocessing:
+    status: RECOVERABLE_FROM_DA3_SOURCE
+    note: >-
+      tools/precompute_depth.py:563-564 records world_model_resize +
+      world_model_crop preprocessing; DA3-side, not blocking.
+
+  producer.scale:
+    status: RECOVERED
+    value: clip_normalization_with_per_environment_lo_hi
+    provenance: >-
+      pinned cache manifests record calibration.lo/hi and the wire
+      clip((depth_m-lo)/(hi-lo),0,1); tools/precompute_depth_da3_shards.py:123-146
+      enforces the calibration contract
+
+  producer.clipping:
+    status: RECOVERED
+    value: clip_to_unit_interval_after_lo_hi_normalization
+    provenance: >-
+      cache wire format sha256
+      47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded in every
+      pinned manifest; tools/precompute_depth.py:519 clips the RGB-scaled depth
+      to [0,1] for the cache wire payload
+
+  # ===== The disconfirming block: checkpoint-native normalization =====
+
+  encoder_input.checkpoint_native.quantity:
+    status: CONTRADICTED
+    required_value_hint: normalized_metric_depth
+    evidence: >-
+      The contract assumes a checkpoint-native QUANTITY that has been put through
+      an affine_mean_std normalization. The student-training source feeds RAW
+      metric depth (see normalization.kind below), so the checkpoint-native
+      quantity as defined by the contract does not exist. Any value supplied here
+      would be invented.
+
+  encoder_input.checkpoint_native.units:
+    status: RECOVERED_AS_RAW
+    value: metric_meters_raw_unnormalized
+    provenance: >-
+      dataset/dataset.py:104 and :181 load depth as
+      torch.from_numpy(np.load(...)).to(torch.float32) with no scaling; raw metric
+      depth in meters. This is the RAW units, not a post-normalization quantity.
+
+  encoder_input.checkpoint_native.normalization.kind:
+    status: CONTRADICTED
+    required_value: affine_mean_std
+    actual_value: none_raw_unnormalized
+    evidence: >-
+      train_mixed_v2.py:517/522/533/538 trains dropout_fullpr with
+      DataAugmentationDINO + DataAugmentationMVI. dataset/transform.py
+      DataAugmentationDINO.__call__ (lines 167-194) applies the RGB normalize
+      pipeline (global1_rgb/global2_rgb/local_rgb) to the IMAGE only and appends
+      depth to crops_depth WITHOUT calling self.transform_depth (lines 176/184/
+      192); the defined self.transform_depth (lines 113-115) is ToTensor only
+      and is never invoked. dataset/transform_mvi.py DataAugmentationMVI.__call__
+      (lines 184-225) likewise appends depth raw (lines 198/211/221). Depth is
+      loaded raw from .npy (dataset/dataset.py:104 ImageDatasetDino and :161/:181
+      ImageDatasetMVI). The student-training diagnostics confirm this directly:
+      diagnostics/REPORT.md:52 'z (raw, unnormalized depth)' and :197
+      'unnormalized-depth input to RoPE-z'. The mandatory affine_mean_std kind is
+      therefore contradicted, not merely absent.
+
+  encoder_input.checkpoint_native.normalization.mean:
+    status: CONTRADICTED
+    required_owner: student_world_model_training
+    evidence: >-
+      No mean is applied to depth anywhere in the dropout_fullpr training path.
+      The value 0.48 appears ONLY in dataset/transform.py:30 and :52 inside class
+      RGBDTransform, which is NEVER imported by train_mixed_v2.py; RGBDTransform
+      is used solely by the legacy train.py:130 and eval scripts
+      (eval/linear_probe.py, eval/finetune.py, eval/eval_knn.py). The active
+      encoder config conf/encoder/dinocular_student_dropout_fullpr.yaml:20-21
+      sets depth_mean=0.0, depth_std=1.0 with the comment 'Inactive sentinels
+      only ... not a substituted depth normalization recipe'. There is no
+      recoverable mean because no mean was applied.
+
+  encoder_input.checkpoint_native.normalization.std:
+    status: CONTRADICTED
+    required_owner: student_world_model_training
+    evidence: >-
+      Symmetric to .mean. The value 0.28 appears only in the unused
+      RGBDTransform (dataset/transform.py:30/:52). The dropout_fullpr training
+      path applies no std to depth (DataAugmentationMVI/DataAugmentationDINO
+      return depth raw). No std is recoverable.
+
+  encoder_input.neutral.normalized_depth:
+    status: CONTRADICTED
+    required_owner: student_world_model_training
+    evidence: >-
+      No neutral / masked depth concept exists in the student-training source.
+      Depth is always present and raw at training time; there is no
+      depth_validity_mask input and no neutral fill value in
+      train_mixed_v2.py, dataset/dataset.py, dataset/transform.py, or
+      dataset/transform_mvi.py. A neutral depth value cannot be recovered from a
+      pipeline that never defines one.
+
+  encoder_input.neutral.validity_mask:
+    status: CONTRADICTED
+    required_value: "0.0 or 1.0"
+    evidence: >-
+      No validity mask is produced or consumed by the student-training pipeline
+      (no mask key in ImageDatasetMVI._sample depth path; ImageDatasetDino returns
+      only img, depth_img). The mask contract field has no training-side origin.
+
+  encoder_input.cache_bindings.producer_sha256:
+    status: RECOVERED_PER_ENVIRONMENT
+    provenance: >-
+      wall=4d15ed3f04ea318d72599d1d84653d57ae93ec81deb638272d7b823c7fdf5f54,
+      rope=c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc,
+      granular=c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc;
+      derived from the pinned cache manifests
+      (contracts/native_depth_release_candidate_v1.yaml:81/:110/:134)
+
+  encoder_input.cache_bindings.wire_format_sha256:
+    status: RECOVERED
+    value: 47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded
+    provenance: contracts/native_depth_release_candidate_v1.yaml:28
+
+  encoder_input.cache_bindings.wire_quantity:
+    status: RECOVERED
+    value: clip_normalized_metric_depth_in_unit_interval
+    provenance: >-
+      cache wire format sha256 + tools/precompute_depth.py:519 clip to [0,1]
+
+  encoder_input.cache_bindings.wire_range:
+    status: RECOVERED_AS_CACHE_CALIBRATION
+    note: >-
+      The cache wire payload occupies [0,1] after clip normalization. The
+      per-environment calibration lo/hi (metric-meter bounds) ARE recorded in
+      each pinned manifest and would let a cache->metric inverse map
+      depth_m = wire*(hi-lo)+lo be reconstructed. But the contract's
+      wire_range is a checkpoint-native-space bound, and checkpoint-native space
+      does not exist (see normalization.kind), so this cannot be resolved into
+      the contract's intended space.
+
+  encoder_input.cache_bindings.affine_to_checkpoint_native.operation:
+    status: CONTRADICTED
+    required_value: checkpoint_native=wire*scale+offset
+    evidence: >-
+      The operation targets a checkpoint-native normalized space. Because the
+      student checkpoint has no checkpoint-native normalization (depth is raw),
+      the only faithful affine from the cache wire [0,1] to the student input is
+      the inverse of the cache clip-normalization,
+      student_raw_depth_m = wire*(hi-lo)+lo, which is NOT of the contract's
+      post-normalization checkpoint_native kind. Binding the contract operation
+      would require defining a normalization the checkpoint never had.
+
+  encoder_input.cache_bindings.affine_to_checkpoint_native.output_quantity:
+    status: CONTRADICTED
+    evidence: >-
+      Depends on a checkpoint-native normalized quantity that does not exist;
+      see normalization.kind.
+
+  encoder_input.cache_bindings.affine_to_checkpoint_native.scale:
+    status: CONTRADICTED
+    evidence: >-
+      A scale into a non-existent checkpoint-native normalized space cannot be
+      recovered. (The cache->raw-metric inverse scale (hi-lo) is recoverable per
+      environment, but that maps to RAW depth, not to the contract's
+      checkpoint_native normalized quantity.)
+
+  encoder_input.cache_bindings.affine_to_checkpoint_native.offset:
+    status: CONTRADICTED
+    evidence: Symmetric to .scale.
+
+  encoder_input.cache_bindings.clipping.space:
+    status: CONTRADICTED
+    required_value: checkpoint_native_before_normalization
+    evidence: >-
+      The clipping space is checkpoint_native_before_normalization. The student
+      applied no checkpoint-native normalization, so this space is undefined for
+      dropout_fullpr. The only clipping in the training path is the cache-side
+      clip to [0,1], which is in wire space, not checkpoint-native space.
+
+  encoder_input.cache_bindings.clipping.minimum:
+    status: CONTRADICTED
+    evidence: >-
+      No checkpoint-native clipping minimum exists; the student clipped nothing
+      in checkpoint-native space.
+
+  encoder_input.cache_bindings.clipping.maximum:
+    status: CONTRADICTED
+    evidence: Symmetric to .minimum.
+
+  encoder_input.cache_bindings.interpolation:
+    status: ABSENT
+    required_value: one_of[bilinear_align_corners_false, identity_224x224]
+    evidence: >-
+      The student-training transforms resize depth with
+      torchvision.transforms.functional.resized_crop using the BICUBIC
+      interpolation enum on PIL images (dataset/transform.py:19/41/83/118/133/153
+      and dataset/transform_mvi.py:59/65/83/132/147/166) for the random-crop
+      augmentation, which is not one of the two contract-permitted encoder-input
+      interpolations. The contract's encoder-input interpolation (the fixed
+      mapping from cache payload to the 224x224 encoder input) is not encoded in
+      the student-training source because the student never consumed a cache; it
+      consumed raw .npy depth directly. Not recoverable from evidence without
+      invention.
+
+  encoder_input.cache_bindings.invalid_mask.source:
+    status: CONTRADICTED
+    required_value: all_finite_cache_values
+    evidence: >-
+      The student-training pipeline produces no depth validity mask at all; the
+      contract's invalid-mask semantics have no training-side origin.
+
+  encoder_input.cache_bindings.invalid_mask.valid_value:
+    status: CONTRADICTED
+    required_value: 1.0
+    evidence: No validity mask exists in the training pipeline.
+
+  encoder_input.cache_bindings.invalid_mask.invalid_value:
+    status: CONTRADICTED
+    required_value: 0.0
+    evidence: No validity mask exists in the training pipeline.
+
+field_resolution_summary:
+  recovered: 18
+  recoverable_from_da3_source: 3
+  contradicted_by_training_source: 18
+  absent: 1
+  total: 40
+  recovered_breakdown: >-
+    18 = 14 clean RECOVERED (checkpoint.backend/factory/checkpoint_key/state_prefix,
+    producer.name/model/version/code_commit/temporal_mode/raw_units/scale/clipping,
+    cache_bindings.wire_format_sha256/wire_quantity) + 3 RECOVERED_WITH_QUALIFIER
+    (checkpoint_native.units raw-meters, cache_bindings.producer_sha256 per-env,
+    cache_bindings.wire_range as cache-calibration) + 1 envelope (schema).
+  contradicted_breakdown: >-
+    18 = 16 body fields that depend on a non-existent checkpoint-native normalized
+    space (checkpoint_native.quantity, normalization.kind/mean/std, neutral.
+    normalized_depth/validity_mask, affine.operation/output_quantity/scale/offset,
+    clipping.space/minimum/maximum, invalid_mask.source/valid_value/invalid_value)
+    + 2 envelope fields that cannot be truthfully set (status, scientific_use_allowed).
+  blocking_fields: >-
+    All 16 body CONTRADICTED fields trace to one irreducible cause: the
+    dropout_fullpr student checkpoint was trained on RAW, UNNORMALIZED depth, so
+    the contract's mandatory
+    encoder_input.checkpoint_native.normalization.kind = affine_mean_std is
+    contradicted by the provenance-matched student-training source
+    (MThesis-wt commit b99422df). The mean, std, neutral, cache-to-native
+    affine, checkpoint-native clipping, and invalid_mask fields all depend on a
+    checkpoint-native normalized space that does not exist.
+
+irreducible_missing_input:
+  artifact: dinocular-native-depth-contract-v1
+  missing_cause: >-
+    The contract's mandatory affine_mean_std checkpoint-native normalization is
+    contradicted by the provenance-matched student-training source: dropout_fullpr
+    was trained on raw, unnormalized metric depth (DataAugmentationMVI /
+    DataAugmentationDINO apply RGB normalization only; depth is loaded and fed
+    raw). A valid dinocular-native-depth-contract-v1 therefore cannot be
+    reconstructed from any combination of (checkpoint metadata, student-training
+    source, DA3 producer source, pinned cache manifests) without inventing the
+    normalization mean/std, the neutral input, and the cache-to-native affine.
+  owner: >-
+    Student world-model training side (owner of the dropout_fullpr checkpoint),
+    in coordination with the DA3 depth-producer tooling owner. Either (a) supply
+    an owner-authored dinocular-native-depth-contract-v1 that defines a
+    checkpoint-native normalization the checkpoint was NOT trained with (which
+    changes the comparison and must be flagged as a non-native transformation),
+    or (b) change the contract schema to admit the recovered RAW-depth native
+    semantics (normalization.kind = none, identity cache->metric affine, no
+    neutral, no encoder-input validity mask). Both are owner decisions, not
+    recoverable values.
+
+focused_reproduction:
+  command: python3 -m pytest tests/test_native_depth_release_candidate.py -q
+  result: 14 passed
+  note: >-
+    Reproduces the existing focused loader check that the native-contract
+    prerequisite is honestly missing (test_candidate_native_contract_prerequisite_
+    is_honestly_missing asserts native_contract.sha256 is None and state is
+    MISSING_NOT_ACCEPTED, and test_materializer_resolves_exact_pinned_identity
+    confirms native_contract_sha256 None). The spec-recovery evidence above does
+    not alter the candidate artifact; it sharpens the rejection reason from
+    'absent from pinned evidence' to 'contradicted by the student-training
+    source'.
+
+disconfirming_result: >-
+  The dinocular-native-depth-contract-v1 artifact cannot be reconstructed from
+  the named evidence surfaces. The checkpoint metadata encodes no depth
+  normalization (args has data paths only; patch_embed is 3-channel RGB; depth
+  enters via a normalization-free DepthPatchEmbed). The provenance-matched
+  student-training source (MThesis-wt commit b99422df, source SHA-256s pinned in
+  models/dinocular_backbone.py:5-9) trains dropout_fullpr on RAW, UNNORMALIZED
+  depth: train_mixed_v2.py uses DataAugmentationDINO + DataAugmentationMVI,
+  which normalize RGB only and return depth raw, and the student diagnostics
+  state 'z (raw, unnormalized depth)' (diagnostics/REPORT.md:52) and
+  'unnormalized-depth input to RoPE-z' (:197). The native contract's mandatory
+  encoder_input.checkpoint_native.normalization.kind = affine_mean_std is
+  therefore CONTRADICTED, and the 16 fields that depend on a checkpoint-native
+  normalized space (mean, std, neutral depth/mask, cache-to-native affine
+  operation/output_quantity/scale/offset, clipping space/min/max, invalid_mask
+  source/valid/invalid, and the output_quantity) cannot be populated without
+  inventing values. The single ABSENT field (encoder-input interpolation) is not
+  encoded in the student source because the student never consumed a cache. No
+  value was invented. The native_v1 route in
+  contracts/depth_consumption_index_v2.yaml remains
+  BLOCKED_MISSING_ACCEPTED_ARTIFACT; this record strengthens the prior rejection
+  at contracts/native_depth_release_independent_acceptance_v1.yaml from 'absent
+  from pinned cache evidence' to 'contradicted by the student-training source'.
