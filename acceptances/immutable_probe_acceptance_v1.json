@@ -1,0 +1,10 @@
+{
+  "authorization_subject": "pusht-empirical-candidate-v1",
+  "bindings": {
+    "empirical_runtime_release_sha256": "556e53f36cb80a5076a8269fc7dba5ce4be96d3da12c0843d94e21a7d6e05397",
+    "immutable_execution_acceptance_sha256": "297d3187b009661c44d426a894ef17122847f8162022ef04f34626190157d24d"
+  },
+  "schema": "dino-wm-immutable-probe-acceptance-v1",
+  "state": "INDEPENDENTLY_ACCEPTED",
+  "verdict": "PASS"
+}

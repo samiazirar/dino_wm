@@ -1,0 +1,11 @@
+{
+  "authorization_subject": "pusht-empirical-candidate-v1",
+  "bindings": {
+    "contracts_index_sha256": "d5035eb66a8a07e66dba7253dcfea643977e94d07afc3594a3f39defca35dee8",
+    "empirical_contract_sha256": "a0ec83bd8eab0b41e8072643b79b4380c836c0db6d90a1147f10c0a99e64b0d0",
+    "source_release_sha256": "3b34b52f8bc07281f70f8de606fd4579f3320de0acf76977d5e97a687364cf9b"
+  },
+  "schema": "dino-wm-empirical-implementation-acceptance-v1",
+  "state": "INDEPENDENTLY_ACCEPTED",
+  "verdict": "PASS"
+}
