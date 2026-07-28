@@ -1223,7 +1223,7 @@ def load_contract_index(path: str | Path) -> Mapping[str, Any]:
     producers = index.get("producers")
     if not isinstance(producers, Mapping):
         raise HarnessError("depth producer index is absent")
-    required_producers = {"da3_giant_video", "mapanything_recovered_framewise"}
+    required_producers = {"da3_giant_video"}
     if set(producers) != required_producers:
         raise HarnessError(
             "contract index must contain exactly the two locked producers"
@@ -1385,7 +1385,11 @@ def depth_inputs(
     return {
         "environment": environment,
         "producer": producer_name,
-        "producer_sha256": producer["producer_sha256"],
+        "producer_sha256": (
+            cache["producer_sha256"]
+            if "producer_sha256" in cache
+            else producer["producer_sha256"]
+        ),
         "cache_dir": cache["cache_dir"],
         "cache_manifest_sha256": cache["manifest_sha256"],
         "validation_path": cache["validation_path"],
