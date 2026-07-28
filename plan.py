@@ -1,5 +1,6 @@
 import os
 import gym
+import hashlib
 import json
 import hydra
 import random
@@ -332,9 +333,13 @@ class PlanWorkspace:
             obs_g=self.obs_g,
             actions=actions_init,
         )
-        logs, successes, _, _ = self.evaluator.eval_actions(
+        logs, successes, _, e_states = self.evaluator.eval_actions(
             actions.detach(), action_len, save_video=True, filename="output_final"
         )
+        e_final_state = self.evaluator._get_traj_last(
+            e_states, action_len * self.frameskip + 1
+        )[:, 0]
+        self.final_eval_results = self.env.eval_state(self.state_g, e_final_state)
         logs = {f"final_eval/{k}": v for k, v in logs.items()}
         self.wandb_run.log(logs)
         logs_entry = {
@@ -410,6 +415,97 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
     return model
 
 
+def load_step_model(training_run_dir, model_ckpt, device):
+    """Reconstruct and strictly load a deterministic P3 step checkpoint."""
+    from eval_encoder_swap import _load_eval_model
+
+    train_cfg, model, dset = _load_eval_model(
+        Path(training_run_dir), Path(model_ckpt), str(device)
+    )
+    print(f"Loaded strict deterministic step checkpoint: {model_ckpt}")
+    return train_cfg, model, dset
+
+
+def write_planning_results(card_path, eval_results):
+    card_path = Path(card_path)
+    with card_path.open("r", encoding="utf-8") as handle:
+        card = json.load(handle)
+    target_ids = card["target_ids"]
+    if set(eval_results) not in (
+        {"success", "state_dist"},
+        {"success", "chamfer_distance"},
+    ):
+        raise ValueError("planning result endpoints differ from the fixed contract")
+    if any(len(values) != len(target_ids) for values in eval_results.values()):
+        raise ValueError("planning result cardinality differs from fixed targets")
+
+    runtime = card["runtime"]
+    base_stream = card["planner"]["base_stream"]
+    rows = []
+    for index, target_id in enumerate(target_ids):
+        stream = json.dumps(
+            {
+                "base_stream": base_stream,
+                "environment": card["environment"],
+                "replan_count": card["planner"].get("replan_count"),
+                "selection_seed": card["selection_seed"],
+                "target_id": target_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        row = {
+            "schema": card["result_contract"]["schema"],
+            "environment": card["environment"],
+            "arm": card["arm"],
+            "seed": card["seed"],
+            "target_id": target_id,
+            "target_manifest_sha256": card["target_manifest"]["sha256"],
+            "planner_protocol": card["planner"],
+            "planner_base_stream_sha256": hashlib.sha256(stream).hexdigest(),
+            "stopping_rule": {
+                key: card["planner"][key]
+                for key in (
+                    "max_iter",
+                    "stop_on_success",
+                    "evaluation_cap",
+                    "executed_action_count",
+                    "endpoint",
+                    "best_so_far",
+                )
+                if key in card["planner"]
+            },
+            "hardware": runtime["marvin"],
+        }
+        if "state_dist" in eval_results:
+            row["success"] = bool(eval_results["success"][index])
+            row["terminal_state_error"] = float(eval_results["state_dist"][index])
+        else:
+            row["chamfer_distance"] = float(
+                eval_results["chamfer_distance"][index]
+            )
+            row["terminal_state_chamfer_after_action_20"] = row[
+                "chamfer_distance"
+            ]
+        rows.append(row)
+
+    text = "".join(
+        json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in rows
+    )
+    result_path = Path(card["result_contract"]["path"])
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    if result_path.exists():
+        if result_path.read_text(encoding="utf-8") != text:
+            raise ValueError("immutable planning result differs")
+        return
+    temporary = result_path.with_name(f".{result_path.name}.tmp.{os.getpid()}")
+    with temporary.open("x", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, result_path)
+
+
 class DummyWandbRun:
     def __init__(self):
         self.mode = "disabled"
@@ -438,25 +534,29 @@ def planning_main(cfg_dict):
     else:
         wandb_run = None
 
-    ckpt_base_path = cfg_dict["ckpt_base_path"]
-    model_path = f"{ckpt_base_path}/outputs/{cfg_dict['model_name']}/"
-    with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
-        model_cfg = OmegaConf.load(f)
-
     seed(cfg_dict["seed"])
-    _, dset = hydra.utils.call(
-        model_cfg.env.dataset,
-        num_hist=model_cfg.num_hist,
-        num_pred=model_cfg.num_pred,
-        frameskip=model_cfg.frameskip,
-    )
-    dset = dset["valid"]
-
-    num_action_repeat = model_cfg.num_action_repeat
-    model_ckpt = (
-        Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
-    )
-    model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
+    step_checkpoint_path = cfg_dict.get("step_checkpoint_path")
+    if step_checkpoint_path:
+        model_cfg, model, dset = load_step_model(
+            cfg_dict["training_run_dir"], step_checkpoint_path, device
+        )
+    else:
+        ckpt_base_path = cfg_dict["ckpt_base_path"]
+        model_path = f"{ckpt_base_path}/outputs/{cfg_dict['model_name']}/"
+        with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
+            model_cfg = OmegaConf.load(f)
+        _, dset = hydra.utils.call(
+            model_cfg.env.dataset,
+            num_hist=model_cfg.num_hist,
+            num_pred=model_cfg.num_pred,
+            frameskip=model_cfg.frameskip,
+        )
+        dset = dset["valid"]
+        num_action_repeat = model_cfg.num_action_repeat
+        model_ckpt = (
+            Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
+        )
+        model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
 
     # use dummy vector env for wall and deformable envs
     if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
@@ -490,6 +590,10 @@ def planning_main(cfg_dict):
     )
 
     logs = plan_workspace.perform_planning()
+    if cfg_dict.get("planning_card_path"):
+        write_planning_results(
+            cfg_dict["planning_card_path"], plan_workspace.final_eval_results
+        )
     return logs
 
 

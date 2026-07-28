@@ -67,6 +67,16 @@ TASK_PLANNER = {
         "best_so_far": False,
     },
 }
+MARVIN_RUNTIME = {
+    "partition": "sgpu_short",
+    "time": "07:55:00",
+    "nodes": 1,
+    "tasks": 1,
+    "gpu_type": "A100",
+    "gpus": 1,
+    "cpus_per_task": 16,
+    "memory": "128G",
+}
 
 
 class MaterializationError(RuntimeError):
@@ -109,10 +119,19 @@ def _evaluation_card(path: Path) -> Mapping[str, Any]:
     return value
 
 
-def _write_immutable(path: Path, text: str, executable: bool = False) -> None:
+def _write_immutable(
+    path: Path, text: str, executable: bool = False, generated: bool = False
+) -> None:
     if path.exists():
         if path.read_text(encoding="utf-8") != text:
-            raise MaterializationError(f"immutable artifact differs: {path}")
+            if not generated:
+                raise MaterializationError(f"immutable artifact differs: {path}")
+            temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -252,7 +271,10 @@ def _wrapper(card_path: Path, card: Mapping[str, Any], card_file_sha256: str) ->
             or not isinstance(events[-1], dict)
         ):
             fail("training chain is not an accepted completed chain")
-        if receipt.get("schema") != contract["final_acceptance"]["schema"]:
+        if (
+            receipt.get("schema") != contract["final_acceptance"]["schema"]
+            or receipt.get("state") != "PASS"
+        ):
             fail("final acceptance schema differs")
         checkpoint_text = progress.get("checkpoint")
         checkpoint_sha256 = progress.get("checkpoint_sha256")
@@ -263,6 +285,15 @@ def _wrapper(card_path: Path, card: Mapping[str, Any], card_file_sha256: str) ->
         checkpoint_path = Path(checkpoint_text)
         if not checkpoint_path.is_file() or sha256(checkpoint_path) != checkpoint_sha256:
             fail("final checkpoint is absent or differs from accepted chain")
+        if (
+            receipt.get("checkpoint") != str(checkpoint_path)
+            or receipt.get("checkpoint_sha256") != checkpoint_sha256
+            or receipt.get("global_step") != progress.get("global_step")
+            or receipt.get("immutable_run_card_sha256")
+            != progress.get("immutable_run_card_sha256")
+            or receipt.get("container_sha256") != card["container"]["sha256"]
+        ):
+            fail("final acceptance and progress checkpoint identities differ")
         receipt_sha256 = sha256(receipt_path)
         final_event = events[-1]
         if (
@@ -317,35 +348,91 @@ def _wrapper(card_path: Path, card: Mapping[str, Any], card_file_sha256: str) ->
                 os.fsync(handle.fileno())
             os.replace(temporary, binding_path)
 
-        checkpoints_dir = checkpoint_path.parent
-        model_dir = checkpoints_dir.parent
-        if checkpoints_dir.name != "checkpoints" or not checkpoint_path.name.startswith("model_") or checkpoint_path.suffix != ".pth":
-            fail("final checkpoint does not use the planning loader layout")
-        outputs_dir = model_dir
-        while outputs_dir.name != "outputs" and outputs_dir != outputs_dir.parent:
-            outputs_dir = outputs_dir.parent
-        if outputs_dir.name != "outputs":
-            fail("final checkpoint has no outputs model root")
-        model_name = str(model_dir.relative_to(outputs_dir))
-        model_epoch = checkpoint_path.name[len("model_") : -len(".pth")]
+        training_run_dir = chain_path.parent
+        expected_steps_dir = training_run_dir / "checkpoints" / "steps"
+        if (
+            checkpoint_path.parent != expected_steps_dir
+            or checkpoint_path.suffix != ".pth"
+            or not checkpoint_path.name.startswith("step_")
+            or len(checkpoint_path.stem) != len("step_000000000")
+            or not checkpoint_path.stem[len("step_"):].isdigit()
+            or int(checkpoint_path.stem[len("step_"):])
+            != int(progress.get("global_step", -1))
+        ):
+            fail("final checkpoint is not the accepted deterministic step checkpoint")
         command = list(card["plan_command"])
         command.extend(
             [
-                f"ckpt_base_path={outputs_dir.parent}",
-                f"model_name={model_name}",
-                f"model_epoch={model_epoch}",
+                f"+training_run_dir={training_run_dir}",
+                f"+step_checkpoint_path={checkpoint_path}",
+                f"+planning_card_path={card_path}",
             ]
         )
         os.chdir(card["code_root"])
         os.execvp(command[0], command)
         """
     ).strip()
+    output_dir = Path(card["result_contract"]["path"]).parent
+    logs_dir = output_dir / "logs"
+    container = card["container"]
+    project_root = Path(str(container["path"])).parent.parent
+    arm = card["arm"]
     return f"""#!/bin/bash
-# Immutable no-submit wrapper for {card["lineage_id"]}.
+# Submit-ready deterministic planning wrapper for {card["lineage_id"]}.
+#SBATCH --job-name=plan-{card["environment"]}-{arm}-s{card["seed"]}
+#SBATCH --partition={MARVIN_RUNTIME["partition"]}
+#SBATCH --time={MARVIN_RUNTIME["time"]}
+#SBATCH --nodes={MARVIN_RUNTIME["nodes"]}
+#SBATCH --ntasks={MARVIN_RUNTIME["tasks"]}
+#SBATCH --gpus={MARVIN_RUNTIME["gpus"]}
+#SBATCH --cpus-per-task={MARVIN_RUNTIME["cpus_per_task"]}
+#SBATCH --mem={MARVIN_RUNTIME["memory"]}
+#SBATCH --output={logs_dir}/planning.%j.out
+#SBATCH --error={logs_dir}/planning.%j.err
 set -euo pipefail
+PROJECT={json.dumps(str(project_root))}
+CODE_ROOT={json.dumps(str(card["code_root"]))}
+SIF={json.dumps(str(container["path"]))}
+SIF_SHA256={json.dumps(str(container["sha256"]))}
+ARM={json.dumps(arm)}
+OUTPUT_DIR={json.dumps(str(output_dir))}
+LOGS_DIR={json.dumps(str(logs_dir))}
 export PLANNING_CARD={json.dumps(str(card_path))}
 export PLANNING_CARD_SHA256={json.dumps(card_file_sha256)}
-python - <<'PY'
+test -f "$SIF"
+test "$(sha256sum -- "$SIF" | cut -d' ' -f1)" = "$SIF_SHA256"
+test -d "$CODE_ROOT"
+export TRITON_CACHE_DIR="$PROJECT/cache/planning/${{SLURM_JOB_ID}}/triton"
+export XDG_CACHE_HOME="$PROJECT/cache/planning/${{SLURM_JOB_ID}}/xdg"
+export HF_HOME="$PROJECT/cache/planning/${{SLURM_JOB_ID}}/hf"
+export TORCH_HOME="$PROJECT/env/torch"
+export PYTHONNOUSERSITE=1
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export WANDB_MODE=disabled
+export DINOV2_REPO="$PROJECT/code/dinov2"
+export DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth"
+mkdir -p "$LOGS_DIR" "$OUTPUT_DIR" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$HF_HOME"
+source "$CODE_ROOT/tools/dinocular_container_env.sh"
+build_dinocular_container_env "$ARM"
+/usr/bin/apptainer exec --nv --writable-tmpfs \\
+    --bind "$PROJECT:$PROJECT" \\
+    --env PLANNING_CARD="$PLANNING_CARD" \\
+    --env PLANNING_CARD_SHA256="$PLANNING_CARD_SHA256" \\
+    --env SLURM_JOB_ID="$SLURM_JOB_ID" \\
+    --env TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \\
+    --env XDG_CACHE_HOME="$XDG_CACHE_HOME" \\
+    --env HF_HOME="$HF_HOME" \\
+    --env TORCH_HOME="$TORCH_HOME" \\
+    --env PYTHONNOUSERSITE=1 \\
+    --env HF_HUB_OFFLINE=1 \\
+    --env TRANSFORMERS_OFFLINE=1 \\
+    --env WANDB_MODE=disabled \\
+    --env DINOV2_REPO="$DINOV2_REPO" \\
+    --env DINOV2_VITS14_WEIGHTS="$DINOV2_VITS14_WEIGHTS" \\
+    "${{DINOCULAR_CONTAINER_ENV[@]}}" \\
+    --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \\
+    "$SIF" python - <<'PY'
 {resolver}
 PY
 """
@@ -434,6 +521,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                     "environment": environment,
                     "arm": arm,
                     "seed": seed,
+                    "selection_seed": SELECTION_SEED,
                     "target_ids": target_ids,
                     "target_count": len(target_ids),
                     "target_manifest": task_targets[environment]["target_manifest"],
@@ -494,6 +582,19 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                     "source_commit": evaluation_card.get("source_commit"),
                     "code_root": evaluation_card.get("code_root"),
                     "container": evaluation_card.get("container"),
+                    "runtime": {
+                        "checkpoint_loader": {
+                            "kind": "deterministic_step_state_dict",
+                            "implementation": "eval_encoder_swap._load_eval_model",
+                            "strict_state_dict": True,
+                        },
+                        "marvin": {
+                            **MARVIN_RUNTIME,
+                            "container_sha256": evaluation_card.get(
+                                "container", {}
+                            ).get("sha256"),
+                        },
+                    },
                     "plan_command": [
                         "python",
                         "plan.py",
@@ -533,7 +634,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                 )
                 card["card_sha256"] = hashlib.sha256(_canonical(card)).hexdigest()
                 text = json.dumps(card, indent=2, sort_keys=True) + "\n"
-                _write_immutable(card_path, text)
+                _write_immutable(card_path, text, generated=True)
                 card_file_sha256 = _sha256(card_path)
                 wrapper_path = (
                     output_path.parent / "direct_planning_no_submit.sbatch"
@@ -542,6 +643,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                     wrapper_path,
                     _wrapper(card_path, card, card_file_sha256),
                     True,
+                    generated=True,
                 )
                 records[lineage] = {
                     "environment": environment,
@@ -578,7 +680,9 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
     }
     manifest_path = args.out_root / "planning_launch_manifest.json"
     _write_immutable(
-        manifest_path, json.dumps(result, indent=2, sort_keys=True) + "\n"
+        manifest_path,
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        generated=True,
     )
     receipt = {
         "status": result["state"],
