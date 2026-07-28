@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import os
 from pathlib import Path
 import pickle
 import stat
+import textwrap
 from typing import Any, Mapping, Sequence
 
 
@@ -40,6 +40,30 @@ PLANNER = {
     "objective_alpha": 1,
     "action_bounds": "repository_unchanged",
     "base_stream": "sha256(20260714,environment,target_id,replan_index)",
+}
+TASK_PLANNER = {
+    "pusht": {"max_iter": 60},
+    "wall": {"max_iter": 60},
+    "rope": {
+        "max_iter": 4,
+        "stop_on_success": False,
+        "evaluation_cap": "predeclared_20_high_level_actions",
+        "replan_count": 4,
+        "executed_actions_per_replan": 5,
+        "executed_action_count": 20,
+        "endpoint": "terminal_state_chamfer_after_action_20",
+        "best_so_far": False,
+    },
+    "granular": {
+        "max_iter": 4,
+        "stop_on_success": False,
+        "evaluation_cap": "predeclared_20_high_level_actions",
+        "replan_count": 4,
+        "executed_actions_per_replan": 5,
+        "executed_action_count": 20,
+        "endpoint": "terminal_state_chamfer_after_action_20",
+        "best_so_far": False,
+    },
 }
 
 
@@ -140,65 +164,176 @@ def _missing(path: Path, input_name: str) -> Mapping[str, Any]:
     return {"input": input_name, "expected_path": str(path), "reason": "ABSENT"}
 
 
-def _lineage_evidence(record: Mapping[str, Any]) -> tuple[dict[str, Any], list[Mapping[str, Any]]]:
-    missing = []
-    training_dir = Path(str(record["training_run_dir"]))
-    chain_path = training_dir / "chain.json"
-    receipt_path = training_dir / "final_acceptance.json"
-    prediction_path = Path(str(record["evaluation_run_dir"])) / "episode_errors.jsonl"
-    for path, name in (
-        (chain_path, "accepted_training_chain"),
-        (receipt_path, "training_final_acceptance"),
-        (prediction_path, "held_out_prediction_result"),
-    ):
-        if not path.is_file():
-            missing.append(_missing(path, name))
-    if missing:
-        return {}, missing
-    chain = _object(chain_path)
-    receipt = _object(receipt_path)
-    progress = chain.get("final_progress")
-    jobs = chain.get("jobs")
-    if (
-        chain.get("schema") != "dino-wm.p3-slurm-chain.v1"
-        or chain.get("status") != "PASSED"
-        or not isinstance(progress, Mapping)
-        or progress.get("status") != "TARGET_REACHED"
-        or not isinstance(jobs, list)
-        or not jobs
-    ):
-        raise MaterializationError(f"accepted training chain is invalid: {chain_path}")
-    checkpoint = Path(str(progress.get("checkpoint", "")))
-    if not checkpoint.is_file():
-        return {}, [_missing(checkpoint, "final_training_checkpoint")]
-    return {
-        "chain": {"path": str(chain_path), "sha256": _sha256(chain_path)},
-        "final_acceptance": {
-            "path": str(receipt_path),
-            "sha256": _sha256(receipt_path),
-            "schema": receipt.get("schema"),
-        },
-        "checkpoint": {
-            "path": str(checkpoint),
-            "sha256": _sha256(checkpoint),
-        },
-        "prediction_result": {
-            "path": str(prediction_path),
-            "sha256": _sha256(prediction_path),
-        },
-        "training_tail_job_id": str(jobs[-1].get("job_id")),
-    }, []
-
-
 def _wrapper(card_path: Path, card: Mapping[str, Any], card_file_sha256: str) -> str:
-    command = " ".join(json.dumps(str(item)) for item in card["plan_command"])
+    resolver = textwrap.dedent(
+        r"""
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+
+        def fail(message):
+            raise SystemExit(f"planning runtime evidence refused: {message}")
+
+        def sha256(path):
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+
+        def object_at(path, label):
+            if not path.is_file():
+                fail(f"{label} is absent: {path}")
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                fail(f"{label} is unreadable: {exc}")
+            if not isinstance(value, dict):
+                fail(f"{label} is not an object")
+            return value
+
+        card_path = Path(os.environ["PLANNING_CARD"])
+        expected_card_sha256 = os.environ["PLANNING_CARD_SHA256"]
+        if not card_path.is_file() or sha256(card_path) != expected_card_sha256:
+            fail("planning card file hash differs")
+        card = object_at(card_path, "planning card")
+        contract = card["runtime_evidence_contract"]
+        chain_path = Path(contract["accepted_training_chain"]["path"])
+        receipt_path = Path(contract["final_acceptance"]["path"])
+        prediction_path = Path(contract["held_out_prediction"]["path"])
+        evaluation_card_path = Path(card["evaluation_card"]["path"])
+        launch_manifest_path = Path(card["evaluation_launch_manifest"]["path"])
+        target_manifest_path = Path(card["target_manifest"]["path"])
+        if (
+            not evaluation_card_path.is_file()
+            or sha256(evaluation_card_path) != card["evaluation_card"]["sha256"]
+        ):
+            fail("evaluation card hash differs")
+        if (
+            not launch_manifest_path.is_file()
+            or sha256(launch_manifest_path)
+            != card["evaluation_launch_manifest"]["sha256"]
+        ):
+            fail("evaluation launch manifest hash differs")
+        if (
+            not target_manifest_path.is_file()
+            or sha256(target_manifest_path) != card["target_manifest"]["sha256"]
+        ):
+            fail("fixed target manifest hash differs")
+        chain = object_at(chain_path, "accepted training chain")
+        receipt = object_at(receipt_path, "final acceptance")
+        progress = chain.get("final_progress")
+        jobs = chain.get("jobs")
+        events = chain.get("events")
+        if (
+            chain.get("schema") != contract["accepted_training_chain"]["schema"]
+            or chain.get("status") != "PASSED"
+            or not isinstance(progress, dict)
+            or progress.get("status") != "TARGET_REACHED"
+            or not isinstance(jobs, list)
+            or not jobs
+            or not isinstance(events, list)
+            or not events
+            or not isinstance(events[-1], dict)
+        ):
+            fail("training chain is not an accepted completed chain")
+        if receipt.get("schema") != contract["final_acceptance"]["schema"]:
+            fail("final acceptance schema differs")
+        checkpoint_text = progress.get("checkpoint")
+        checkpoint_sha256 = progress.get("checkpoint_sha256")
+        if not isinstance(checkpoint_text, str) or not checkpoint_text:
+            fail("final checkpoint path is absent from accepted chain")
+        if not isinstance(checkpoint_sha256, str) or len(checkpoint_sha256) != 64:
+            fail("final checkpoint hash is absent from accepted chain")
+        checkpoint_path = Path(checkpoint_text)
+        if not checkpoint_path.is_file() or sha256(checkpoint_path) != checkpoint_sha256:
+            fail("final checkpoint is absent or differs from accepted chain")
+        receipt_sha256 = sha256(receipt_path)
+        final_event = events[-1]
+        if (
+            chain.get("final_acceptance_receipt") != str(receipt_path)
+            or chain.get("final_acceptance_receipt_sha256") != receipt_sha256
+            or final_event.get("final_acceptance_receipt") != str(receipt_path)
+            or final_event.get("final_acceptance_receipt_sha256") != receipt_sha256
+            or final_event.get("checkpoint") != str(checkpoint_path)
+            or final_event.get("checkpoint_sha256") != checkpoint_sha256
+        ):
+            fail("chain, final event, acceptance, and checkpoint do not hash-bind")
+        if not prediction_path.is_file() or prediction_path.stat().st_size == 0:
+            fail(f"held-out prediction output is absent or empty: {prediction_path}")
+        prediction_sha256 = sha256(prediction_path)
+        binding = {
+            "schema": "dinocular.planning-runtime-evidence-binding.v1",
+            "lineage_id": card["lineage_id"],
+            "planning_card": {
+                "path": str(card_path),
+                "sha256": expected_card_sha256,
+            },
+            "accepted_training_chain": {
+                "path": str(chain_path),
+                "sha256": sha256(chain_path),
+            },
+            "final_acceptance": {
+                "path": str(receipt_path),
+                "sha256": receipt_sha256,
+            },
+            "final_checkpoint": {
+                "path": str(checkpoint_path),
+                "sha256": checkpoint_sha256,
+            },
+            "held_out_prediction": {
+                "path": str(prediction_path),
+                "sha256": prediction_sha256,
+            },
+        }
+        binding_path = Path(contract["binding_receipt_path"])
+        text = json.dumps(binding, indent=2, sort_keys=True) + "\n"
+        binding_path.parent.mkdir(parents=True, exist_ok=True)
+        if binding_path.exists():
+            if binding_path.read_text(encoding="utf-8") != text:
+                fail("immutable runtime evidence binding differs")
+        else:
+            temporary = binding_path.with_name(
+                f".{binding_path.name}.tmp.{os.getpid()}"
+            )
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, binding_path)
+
+        checkpoints_dir = checkpoint_path.parent
+        model_dir = checkpoints_dir.parent
+        if checkpoints_dir.name != "checkpoints" or not checkpoint_path.name.startswith("model_") or checkpoint_path.suffix != ".pth":
+            fail("final checkpoint does not use the planning loader layout")
+        outputs_dir = model_dir
+        while outputs_dir.name != "outputs" and outputs_dir != outputs_dir.parent:
+            outputs_dir = outputs_dir.parent
+        if outputs_dir.name != "outputs":
+            fail("final checkpoint has no outputs model root")
+        model_name = str(model_dir.relative_to(outputs_dir))
+        model_epoch = checkpoint_path.name[len("model_") : -len(".pth")]
+        command = list(card["plan_command"])
+        command.extend(
+            [
+                f"ckpt_base_path={outputs_dir.parent}",
+                f"model_name={model_name}",
+                f"model_epoch={model_epoch}",
+            ]
+        )
+        os.chdir(card["code_root"])
+        os.execvp(command[0], command)
+        """
+    ).strip()
     return f"""#!/bin/bash
 # Immutable no-submit wrapper for {card["lineage_id"]}.
 set -euo pipefail
-CARD={json.dumps(str(card_path))}
-test "$(sha256sum "$CARD" | awk '{{print $1}}')" = {card_file_sha256}
-cd {json.dumps(str(card["code_root"]))}
-{command}
+export PLANNING_CARD={json.dumps(str(card_path))}
+export PLANNING_CARD_SHA256={json.dumps(card_file_sha256)}
+python - <<'PY'
+{resolver}
+PY
 """
 
 
@@ -209,7 +344,6 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
     records: dict[str, Any] = {}
     expected_outputs: dict[str, Any] = {}
     missing_tasks: dict[str, Any] = {}
-    missing_lineages: dict[str, Any] = {}
     task_targets: dict[str, Any] = {}
 
     for environment in ENVIRONMENTS:
@@ -217,14 +351,6 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
         task_missing: list[Mapping[str, Any]] = []
         if not target_path.is_file():
             task_missing.append(_missing(target_path, "fixed_target_manifest"))
-        if environment in ("rope", "granular"):
-            task_missing.append(
-                {
-                    "input": "finite_mpc_iteration_cap",
-                    "expected_path": None,
-                    "reason": "UNKNOWN_IN_FIXED_EVIDENCE",
-                }
-            )
         target_ids: list[str] = []
         if target_path.is_file():
             try:
@@ -282,11 +408,12 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                 if task_missing:
                     continue
                 source = evaluation["records"][lineage]
-                evidence, lineage_missing = _lineage_evidence(source)
-                if lineage_missing:
-                    missing_lineages[lineage] = lineage_missing
-                    continue
                 evaluation_card = _object(Path(source["evaluation_card"]))
+                task_planner = TASK_PLANNER[environment]
+                training_dir = Path(str(source["training_run_dir"]))
+                prediction_path = (
+                    Path(str(source["evaluation_run_dir"])) / "episode_errors.jsonl"
+                )
                 card = {
                     "schema": CARD_SCHEMA,
                     "lineage_id": lineage,
@@ -296,7 +423,12 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                     "target_ids": target_ids,
                     "target_count": len(target_ids),
                     "target_manifest": task_targets[environment]["target_manifest"],
-                    "planner": {**PLANNER, "max_iter": 60},
+                    "planner": {**PLANNER, **task_planner},
+                    "protocol_interpretation": (
+                        "predeclared evaluation cap"
+                        if environment in ("rope", "granular")
+                        else "repository unchanged"
+                    ),
                     "result_contract": {
                         "schema": "dinocular.planning-target-result.v1",
                         "path": str(output_path),
@@ -304,28 +436,50 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         "endpoint": (
                             ["success", "terminal_state_error"]
                             if environment in ("pusht", "wall")
-                            else ["chamfer_distance"]
+                            else ["terminal_state_chamfer_after_action_20"]
                         ),
                     },
                     "evaluation_launch_manifest": {
                         "path": str(args.evaluation_launch_manifest),
                         "sha256": _sha256(args.evaluation_launch_manifest),
                     },
-                    "evaluation_record": copy.deepcopy(source),
-                    "accepted_training_evidence": evidence,
+                    "evaluation_card": {
+                        "path": str(source["evaluation_card"]),
+                        "sha256": _sha256(Path(source["evaluation_card"])),
+                    },
+                    "runtime_evidence_contract": {
+                        "resolution": "strict_at_wrapper_launch",
+                        "accepted_training_chain": {
+                            "path": str(training_dir / "chain.json"),
+                            "schema": "dino-wm.p3-slurm-chain.v1",
+                            "required_status": "PASSED",
+                            "required_progress_status": "TARGET_REACHED",
+                        },
+                        "final_acceptance": {
+                            "path": str(training_dir / "final_acceptance.json"),
+                            "schema": "dino-wm.p3-final-acceptance.v1",
+                        },
+                        "final_checkpoint": {
+                            "path_source": "accepted_training_chain.final_progress.checkpoint",
+                            "sha256_source": "accepted_training_chain.final_progress.checkpoint_sha256",
+                        },
+                        "held_out_prediction": {
+                            "path": str(prediction_path),
+                            "sha256_resolution": "compute_at_wrapper_launch",
+                        },
+                        "binding_receipt_path": str(
+                            args.out_root
+                            / "runtime_evidence"
+                            / f"seed{seed}"
+                            / environment
+                            / arm
+                            / "binding.json"
+                        ),
+                        "launch_policy": "refuse_unless_all_evidence_exists_and_hash_binds",
+                    },
                     "source_commit": evaluation_card.get("source_commit"),
                     "code_root": evaluation_card.get("code_root"),
                     "container": evaluation_card.get("container"),
-                    "model_data_depth_identities": {
-                        key: evaluation_card.get(key)
-                        for key in (
-                            "source_file_sha256",
-                            "artifacts",
-                            "config_sha256",
-                            "depth_inputs",
-                            "fixed_manifest",
-                        )
-                    },
                     "plan_command": [
                         "python",
                         "plan.py",
@@ -339,7 +493,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         f"n_evals={len(target_ids)}",
                         f"seed={SELECTION_SEED}",
                         "goal_H=5",
-                        "planner.max_iter=60",
+                        f"planner.max_iter={task_planner['max_iter']}",
                         "planner.n_taken_actions=5",
                         "planner.sub_planner.horizon=5",
                         "planner.sub_planner.num_samples=100",
@@ -349,6 +503,17 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         "objective.alpha=1",
                     ],
                 }
+                if environment in ("rope", "granular"):
+                    card["plan_command"].append("+planner.stop_on_success=false")
+                serialized = _canonical(card).decode("utf-8")
+                if (
+                    "null" in serialized
+                    or "PENDING" in serialized
+                    or "UNKNOWN_IN_FIXED_EVIDENCE" in serialized
+                ):
+                    raise MaterializationError(
+                        f"{lineage} planning card contains an unresolved binding"
+                    )
                 card_path = args.out_root / "cards" / (
                     f"planning-{environment}-{arm}-s{seed}.json"
                 )
@@ -393,7 +558,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
         "planner": PLANNER,
         "tasks": task_targets,
         "missing_tasks": missing_tasks,
-        "missing_lineages": missing_lineages,
+        "missing_lineages": {},
         "expected_outputs": expected_outputs,
         "records": records,
     }
@@ -405,15 +570,17 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
         "status": result["state"],
         "manifest": str(manifest_path),
         "manifest_sha256": _sha256(manifest_path),
+        "lineage_count": result["lineage_count"],
         "card_count": len(records),
         "wrapper_count": len(records),
+        "expected_lineage_count": result["expected_lineage_count"],
         "expected_result_count": result["expected_result_count"],
         "materialized_result_count": result["materialized_result_count"],
         "missing_tasks": {
             task: value["missing_inputs"]
             for task, value in missing_tasks.items()
         },
-        "missing_lineage_count": len(missing_lineages),
+        "missing_lineage_count": 0,
     }
     print(json.dumps(receipt, sort_keys=True))
     return receipt
