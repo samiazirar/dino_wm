@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stdout
 import csv
+from decimal import Decimal, InvalidOperation
 import hashlib
 import io
 import json
@@ -13,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 from typing import Any, Mapping, Sequence
@@ -20,9 +22,17 @@ from typing import Any, Mapping, Sequence
 LAUNCH_SCHEMA = "dinocular.fixed-evaluation-launch-artifacts.v1"
 BUNDLE_SCHEMA = "dinocular.combined-result-bundle.v1"
 PLANNING_LAUNCH_SCHEMA = "dinocular.fixed-planning-launch-artifacts.v1"
+COMPLETION_SCHEMA = "dino-wm.p3-completion-summary.v1"
+CONVERGENCE_SCHEMA = "dinocular.common-convergence.v1"
 ENVIRONMENTS = ("pusht", "wall", "rope", "granular")
 ARMS = ("dino_pinned", "dinocular", "dinocular_zerodepth")
 SEEDS = (1, 2, 3)
+TARGETS = {"pusht": 123858, "wall": 143910, "rope": 53500, "granular": 53500}
+PLATEAU_RULE = {
+    "early": [76, 77, 78, 79, 80],
+    "late": [96, 97, 98, 99, 100],
+    "relative_absolute_threshold": 0.02,
+}
 HORIZONS = {
     "pusht": (1, 5, 10, 25),
     "wall": (1, 5, 10),
@@ -53,6 +63,341 @@ def _load_object(path: Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise BuildError(f"expected a JSON object at {path}")
     return value
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _snapshot_key(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _completion_snapshot(
+    path: Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if not path.is_absolute():
+        raise BuildError("completion summary path must be absolute")
+    try:
+        path_stat = path.lstat()
+    except OSError as exc:
+        raise BuildError(f"cannot stat completion summary {path}: {exc}") from exc
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise BuildError("completion summary must be a regular file, not an alias")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            content = handle.read()
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise BuildError(f"cannot read completion summary {path}: {exc}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _snapshot_key(path_stat) != _snapshot_key(before)
+        or _snapshot_key(before) != _snapshot_key(after)
+        or len(content) != before.st_size
+    ):
+        raise BuildError("completion summary was mutable while being read")
+    try:
+        summary = json.loads(
+            content.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant {value}")
+            ),
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise BuildError(f"completion summary is not strict JSON: {exc}") from exc
+    if not isinstance(summary, Mapping):
+        raise BuildError("completion summary must be a JSON object")
+    return summary, {
+        "path": str(path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "snapshot": _snapshot_key(after),
+    }
+
+
+def _decimal_json_number(value: Any, label: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BuildError(f"{label} must be a JSON number")
+    try:
+        number = Decimal(_canonical_json_bytes(value).decode("utf-8"))
+    except (InvalidOperation, ValueError) as exc:
+        raise BuildError(f"{label} must be a finite JSON number") from exc
+    if not number.is_finite():
+        raise BuildError(f"{label} must be a finite JSON number")
+    return number
+
+
+def _plateau_from_curve(
+    curve: Any, *, lineage: str, target_steps: int
+) -> Mapping[str, Any]:
+    if not isinstance(curve, list) or len(curve) != 100:
+        raise BuildError(f"completion cell {lineage} lacks exact 1..100 curve coverage")
+    by_percent: dict[int, Decimal] = {}
+    previous_step = 0
+    for expected_percent, row in enumerate(curve, 1):
+        if not isinstance(row, Mapping):
+            raise BuildError(f"completion cell {lineage} has malformed curve row")
+        percent = row.get("percent")
+        global_step = row.get("global_step")
+        if (
+            isinstance(percent, bool)
+            or percent != expected_percent
+            or isinstance(global_step, bool)
+            or not isinstance(global_step, int)
+            or global_step <= previous_step
+            or global_step > target_steps
+        ):
+            raise BuildError(f"completion cell {lineage} curve coordinates differ")
+        by_percent[expected_percent] = _decimal_json_number(
+            row.get("mean_loss"), f"completion cell {lineage} mean_loss"
+        )
+        previous_step = global_step
+    if previous_step != target_steps:
+        raise BuildError(f"completion cell {lineage} curve does not reach its target")
+    early = sum(
+        (by_percent[percent] for percent in PLATEAU_RULE["early"]), Decimal(0)
+    ) / Decimal(5)
+    late = sum(
+        (by_percent[percent] for percent in PLATEAU_RULE["late"]), Decimal(0)
+    ) / Decimal(5)
+    if early <= Decimal(0):
+        raise BuildError(f"completion cell {lineage} has non-positive early mean")
+    relative_change = abs(late - early) / early
+    return {
+        "early_mean_76_80": float(early),
+        "late_mean_96_100": float(late),
+        "relative_absolute_change": float(relative_change),
+        "threshold": 0.02,
+        "plateaued": relative_change <= Decimal("0.02"),
+    }
+
+
+def _validate_completion_summary(
+    summary: Mapping[str, Any],
+) -> tuple[dict[tuple[str, str, int], Mapping[str, Any]], list[Mapping[str, Any]]]:
+    unsigned = dict(summary)
+    claimed_summary_sha256 = unsigned.pop("summary_sha256", None)
+    try:
+        calculated_summary_sha256 = hashlib.sha256(
+            _canonical_json_bytes(unsigned)
+        ).hexdigest()
+    except (TypeError, ValueError) as exc:
+        raise BuildError(f"completion summary is not canonical JSON: {exc}") from exc
+    if (
+        summary.get("schema") != COMPLETION_SCHEMA
+        or summary.get("state") != "PASS"
+        or summary.get("cell_count") != 36
+        or summary.get("plateau_rule") != PLATEAU_RULE
+        or summary.get("p4_blocked_by_plateau") is not False
+        or claimed_summary_sha256 != calculated_summary_sha256
+    ):
+        raise BuildError("completion summary header or immutable hash differs")
+
+    raw_cells = summary.get("cells")
+    if not isinstance(raw_cells, list) or len(raw_cells) != 36:
+        raise BuildError("completion summary must contain exactly 36 cells")
+    expected_axes = {
+        (environment, arm, seed)
+        for environment in ENVIRONMENTS
+        for arm in ARMS
+        for seed in SEEDS
+    }
+    cells: dict[tuple[str, str, int], Mapping[str, Any]] = {}
+    run_ids: set[str] = set()
+    for cell in raw_cells:
+        if not isinstance(cell, Mapping):
+            raise BuildError("completion summary contains a malformed cell")
+        environment = cell.get("environment")
+        arm = cell.get("arm")
+        seed = cell.get("seed")
+        if (
+            environment not in ENVIRONMENTS
+            or arm not in ARMS
+            or isinstance(seed, bool)
+            or seed not in SEEDS
+        ):
+            raise BuildError("completion summary cell coverage is not exact")
+        axis = (environment, arm, seed)
+        if axis not in expected_axes or axis in cells:
+            raise BuildError("completion summary cell coverage is not exact")
+        lineage = f"{environment}/{arm}/s{seed}"
+        run_id = cell.get("run_id")
+        target_steps = cell.get("target_steps")
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or run_id in run_ids
+            or target_steps != TARGETS[str(environment)]
+        ):
+            raise BuildError(f"completion cell identity or target differs: {lineage}")
+        expected_plateau = _plateau_from_curve(
+            cell.get("curve"), lineage=lineage, target_steps=int(target_steps)
+        )
+        if cell.get("plateau") != expected_plateau:
+            raise BuildError(f"completion cell plateau verdict differs: {lineage}")
+        cells[axis] = cell
+        run_ids.add(run_id)
+    if set(cells) != expected_axes:
+        raise BuildError("completion summary task/system/seed coverage is not exact")
+
+    raw_comparisons = summary.get("comparisons")
+    if not isinstance(raw_comparisons, list) or len(raw_comparisons) != 36:
+        raise BuildError("completion summary must contain exactly 36 comparisons")
+    arm_pairs = tuple(
+        (left, right)
+        for index, left in enumerate(ARMS)
+        for right in ARMS[index + 1 :]
+    )
+    expected_comparisons = {
+        (environment, seed, left, right)
+        for environment in ENVIRONMENTS
+        for seed in SEEDS
+        for left, right in arm_pairs
+    }
+    comparisons: dict[tuple[str, int, str, str], Mapping[str, Any]] = {}
+    for comparison in raw_comparisons:
+        if not isinstance(comparison, Mapping):
+            raise BuildError("completion summary contains a malformed comparison")
+        key = (
+            comparison.get("environment"),
+            comparison.get("seed"),
+            comparison.get("left"),
+            comparison.get("right"),
+        )
+        if (
+            comparison.get("environment") not in ENVIRONMENTS
+            or isinstance(comparison.get("seed"), bool)
+            or comparison.get("seed") not in SEEDS
+            or comparison.get("left") not in ARMS
+            or comparison.get("right") not in ARMS
+        ):
+            raise BuildError("completion summary comparison coverage is not exact")
+        if key not in expected_comparisons or key in comparisons:
+            raise BuildError("completion summary comparison coverage is not exact")
+        environment, seed, left, right = key
+        expected_status = (
+            "optimization-conclusive"
+            if cells[(environment, left, seed)]["plateau"]["plateaued"] is True
+            and cells[(environment, right, seed)]["plateau"]["plateaued"] is True
+            else "optimization-inconclusive"
+        )
+        if (
+            set(comparison)
+            != {"environment", "seed", "left", "right", "optimization_status"}
+            or comparison.get("optimization_status") != expected_status
+        ):
+            raise BuildError(
+                "completion summary comparison verdict differs: "
+                f"{environment}/s{seed}/{left}/{right}"
+            )
+        comparisons[key] = comparison
+    if set(comparisons) != expected_comparisons:
+        raise BuildError("completion summary comparison coverage is not exact")
+
+    expected_non_plateaued = sorted(
+        str(cell["run_id"])
+        for cell in cells.values()
+        if cell["plateau"]["plateaued"] is not True
+    )
+    if summary.get("non_plateaued_cells") != expected_non_plateaued:
+        raise BuildError("completion summary non-plateaued cell index differs")
+    relevant_comparisons = [
+        comparisons[(environment, seed, "dino_pinned", "dinocular")]
+        for environment in ("pusht", "wall")
+        for seed in SEEDS
+    ]
+    return cells, relevant_comparisons
+
+
+def _assert_completion_unchanged(path: Path, snapshot: Mapping[str, Any]) -> None:
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise BuildError(f"completion summary disappeared during build: {exc}") from exc
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or _snapshot_key(current) != snapshot["snapshot"]
+        or _sha256(path) != snapshot["sha256"]
+    ):
+        raise BuildError("completion summary changed during build")
+
+
+def _common_convergence_artifact(
+    completion_path: Path,
+    completion: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
+    comparisons: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    relevant_cells = [
+        cells[(environment, arm, seed)]
+        for environment in ("pusht", "wall")
+        for arm in ("dino_pinned", "dinocular")
+        for seed in SEEDS
+    ]
+    return {
+        "schema": CONVERGENCE_SCHEMA,
+        "state": "PASS",
+        "completion_summary": {
+            "path": str(completion_path),
+            "schema": completion["schema"],
+            "sha256": snapshot["sha256"],
+            "summary_sha256": completion["summary_sha256"],
+        },
+        "scope": {
+            "environments": ["pusht", "wall"],
+            "arms": ["dino_pinned", "dinocular"],
+            "seeds": list(SEEDS),
+            "targets": {name: TARGETS[name] for name in ("pusht", "wall")},
+            "plateau_rule": PLATEAU_RULE,
+        },
+        "cells": [
+            {
+                "environment": cell["environment"],
+                "arm": cell["arm"],
+                "seed": cell["seed"],
+                "run_id": cell["run_id"],
+                "target_steps": cell["target_steps"],
+                "curve": cell["curve"],
+                "plateau": cell["plateau"],
+            }
+            for cell in relevant_cells
+        ],
+        "comparisons": list(comparisons),
+        "common_convergence": all(
+            cell["plateau"]["plateaued"] is True for cell in relevant_cells
+        ),
+        "non_plateaued_cells": [
+            cell["run_id"]
+            for cell in relevant_cells
+            if cell["plateau"]["plateaued"] is not True
+        ],
+        "optimization_inconclusive_comparisons": [
+            {
+                "environment": comparison["environment"],
+                "seed": comparison["seed"],
+                "left": comparison["left"],
+                "right": comparison["right"],
+            }
+            for comparison in comparisons
+            if comparison["optimization_status"] == "optimization-inconclusive"
+        ],
+    }
 
 
 def _discover(manifest_path: Path) -> tuple[Mapping[str, Any], dict[str, Path]]:
@@ -369,6 +714,11 @@ def _build(
     manifest: Mapping[str, Any],
     inputs: Mapping[str, Path],
     out_dir: Path,
+    completion_path: Path,
+    completion: Mapping[str, Any],
+    completion_snapshot: Mapping[str, Any],
+    completion_cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
+    completion_comparisons: Sequence[Mapping[str, Any]],
     planning_manifest_path: Path | None = None,
     planning_manifest: Mapping[str, Any] | None = None,
     planning_outputs: Mapping[str, tuple[Path, int]] | None = None,
@@ -409,6 +759,17 @@ def _build(
         planning_collection_path = None
         planning_collection = None
         planning_rows: list[dict[str, Any]] = []
+        convergence_path = stage / "common_convergence.json"
+        _write_json(
+            convergence_path,
+            _common_convergence_artifact(
+                completion_path,
+                completion,
+                completion_snapshot,
+                completion_cells,
+                completion_comparisons,
+            ),
+        )
         if planning_outputs is not None:
             planning_collection_path = stage / "planning_collection.json"
             planning_args = argparse.Namespace(
@@ -500,6 +861,7 @@ def _build(
             table_csv,
             table_tex,
             *figures,
+            convergence_path,
             *planning_artifacts,
         ]
         bundle_manifest = {
@@ -520,6 +882,12 @@ def _build(
                 and planning_manifest is not None
                 else None
             ),
+            "completion_summary": {
+                "path": str(completion_path),
+                "sha256": completion_snapshot["sha256"],
+                "schema": completion["schema"],
+                "summary_sha256": completion["summary_sha256"],
+            },
             "collector": {
                 "bootstrap_seed": BOOTSTRAP_SEED,
                 "bootstrap_replicates": BOOTSTRAP_REPLICATES,
@@ -543,6 +911,7 @@ def _build(
             },
         }
         _write_json(stage / "result_bundle_manifest.json", bundle_manifest)
+        _assert_completion_unchanged(completion_path, completion_snapshot)
         os.replace(stage, out_dir)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -558,12 +927,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launch-manifest", type=Path, required=True)
     parser.add_argument("--planning-launch-manifest", type=Path)
+    parser.add_argument("--completion-summary", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    completion, completion_snapshot = _completion_snapshot(args.completion_summary)
+    completion_cells, completion_comparisons = _validate_completion_summary(
+        completion
+    )
     manifest, inputs = _discover(args.launch_manifest)
     planning_manifest = None
     planning_outputs = None
@@ -583,6 +957,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest,
         inputs,
         args.out_dir,
+        args.completion_summary,
+        completion,
+        completion_snapshot,
+        completion_cells,
+        completion_comparisons,
         args.planning_launch_manifest,
         planning_manifest,
         planning_outputs,
