@@ -31,6 +31,8 @@ except ImportError:
 
 
 RESULT_SCHEMA = "dino-wm-open-loop-episode-errors-v1"
+PLANNING_RESULT_SCHEMA = "dinocular.planning-target-result.v1"
+PLANNING_COLLECTION_SCHEMA = "dinocular.planning-collection.v1"
 DECISION_SCHEMA = "dino-wm-p2a-producer-decision-v1"
 PRODUCERS = ("da3_giant_video", "mapanything_recovered_framewise")
 P2A_HORIZONS = (5, 10)
@@ -44,6 +46,13 @@ P4_HORIZONS = {
     "wall": (1, 5, 10),
     "rope": (1, 2, 3),
     "granular": (1, 2, 3),
+}
+PLANNING_TARGET_COUNTS = {"pusht": 50, "wall": 50, "rope": 10, "granular": 10}
+PLANNING_ENDPOINTS = {
+    "pusht": ("success", "terminal_state_error"),
+    "wall": ("success", "terminal_state_error"),
+    "rope": ("chamfer_distance",),
+    "granular": ("chamfer_distance",),
 }
 
 
@@ -542,6 +551,181 @@ def open_loop(args: argparse.Namespace) -> None:
     print(json.dumps(output, indent=2, sort_keys=True))
 
 
+def _read_planning(paths: Iterable[Path]) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    for path in paths:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise CollectionError(
+                        f"invalid planning JSONL at {path}:{line_number}: {exc}"
+                    ) from exc
+                if not isinstance(row, Mapping) or row.get("schema") != PLANNING_RESULT_SCHEMA:
+                    raise CollectionError(
+                        f"invalid planning record at {path}:{line_number}"
+                    )
+                rows.append(row)
+    return rows
+
+
+def _planning_value(row: Mapping[str, Any], endpoint: str) -> float:
+    value = row.get(endpoint)
+    if endpoint == "success":
+        if not isinstance(value, bool):
+            raise CollectionError("planning success must be boolean")
+        return float(value)
+    if (
+        not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise CollectionError(f"invalid planning endpoint {endpoint}")
+    return float(value)
+
+
+def planning(args: argparse.Namespace) -> None:
+    if args.bootstrap != BOOTSTRAP_REPLICATES or args.seed != BOOTSTRAP_SEED:
+        raise CollectionError("planning requires the locked 10000-replicate bootstrap")
+    rows = _read_planning(args.inputs)
+    expected_total = sum(count * 9 for count in PLANNING_TARGET_COUNTS.values())
+    if len(rows) != expected_total:
+        raise CollectionError(
+            f"planning requires exactly {expected_total} records, found {len(rows)}"
+        )
+    indexed: dict[tuple[str, str, int, str], Mapping[str, Any]] = {}
+    targets: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        environment = str(row.get("environment"))
+        arm = str(row.get("arm"))
+        seed = int(row.get("seed", -1))
+        target_id = str(row.get("target_id", ""))
+        if (
+            environment not in PLANNING_TARGET_COUNTS
+            or arm not in P4_ARMS
+            or seed not in P4_SEEDS
+            or not target_id
+        ):
+            raise CollectionError("planning identity is outside the fixed matrix")
+        key = (environment, arm, seed, target_id)
+        if key in indexed:
+            raise CollectionError(f"duplicate planning record {key}")
+        indexed[key] = row
+        targets[environment].add(target_id)
+        for endpoint in PLANNING_ENDPOINTS[environment]:
+            _planning_value(row, endpoint)
+    for environment, count in PLANNING_TARGET_COUNTS.items():
+        if len(targets[environment]) != count:
+            raise CollectionError(
+                f"{environment} requires {count} common targets, "
+                f"found {len(targets[environment])}"
+            )
+        for arm in P4_ARMS:
+            for seed in P4_SEEDS:
+                present = {
+                    key[3] for key in indexed if key[:3] == (environment, arm, seed)
+                }
+                if present != targets[environment]:
+                    raise CollectionError(
+                        f"planning targets are not paired for {environment}/{arm}/s{seed}"
+                    )
+        for target_id in targets[environment]:
+            contracts = {
+                tuple(
+                    json.dumps(indexed[(environment, arm, seed, target_id)].get(field), sort_keys=True)
+                    for field in (
+                        "target_manifest_sha256",
+                        "planner_protocol",
+                        "planner_base_stream_sha256",
+                        "stopping_rule",
+                        "hardware",
+                    )
+                )
+                for arm in P4_ARMS
+                for seed in P4_SEEDS
+            }
+            if len(contracts) != 1:
+                raise CollectionError(
+                    f"planning pairing contract differs for {environment}/{target_id}"
+                )
+
+    summaries: dict[str, Any] = {}
+    contrasts: dict[str, Any] = {}
+    contrast_pairs = (
+        ("dinocular", "dino_pinned", "dinocular_minus_dinov2"),
+        ("dinocular", "dinocular_zerodepth", "dinocular_minus_zero_depth"),
+    )
+    for environment in PLANNING_TARGET_COUNTS:
+        target_ids = sorted(targets[environment])
+        for endpoint in PLANNING_ENDPOINTS[environment]:
+            for arm in P4_ARMS:
+                for seed in P4_SEEDS:
+                    values = [
+                        _planning_value(indexed[(environment, arm, seed, target)], endpoint)
+                        for target in target_ids
+                    ]
+                    summaries[f"{environment}/{endpoint}/{arm}/s{seed}"] = {
+                        "target_count": len(values),
+                        "mean": float(np.mean(values)),
+                    }
+            for left, right, label in contrast_pairs:
+                per_seed = {}
+                for seed in P4_SEEDS:
+                    deltas = [
+                        _planning_value(indexed[(environment, left, seed, target)], endpoint)
+                        - _planning_value(indexed[(environment, right, seed, target)], endpoint)
+                        for target in target_ids
+                    ]
+                    per_seed[str(seed)] = float(np.mean(deltas))
+                rng = np.random.default_rng(args.seed)
+                bootstrap = np.empty(args.bootstrap, dtype=np.float64)
+                for replicate in range(args.bootstrap):
+                    sampled_seeds = rng.choice(P4_SEEDS, size=len(P4_SEEDS), replace=True)
+                    sampled_targets = rng.choice(
+                        target_ids, size=len(target_ids), replace=True
+                    )
+                    bootstrap[replicate] = float(
+                        np.mean(
+                            [
+                                _planning_value(
+                                    indexed[(environment, left, int(seed), str(target))],
+                                    endpoint,
+                                )
+                                - _planning_value(
+                                    indexed[(environment, right, int(seed), str(target))],
+                                    endpoint,
+                                )
+                                for seed in sampled_seeds
+                                for target in sampled_targets
+                            ]
+                        )
+                    )
+                contrasts[f"{environment}/{endpoint}/{label}"] = {
+                    "per_seed_deltas": per_seed,
+                    "mean_seed_delta": float(np.mean(list(per_seed.values()))),
+                    "seed_delta_range": [
+                        min(per_seed.values()),
+                        max(per_seed.values()),
+                    ],
+                    "bootstrap_seed": args.seed,
+                    "replicates": args.bootstrap,
+                    "resampling": "crossed_training_seed_and_fixed_target",
+                    "percentile_95": np.percentile(
+                        bootstrap, [2.5, 97.5]
+                    ).tolist(),
+                }
+    output = {
+        "schema": PLANNING_COLLECTION_SCHEMA,
+        "state": "PASS",
+        "record_count": len(rows),
+        "summaries": summaries,
+        "paired_contrasts": contrasts,
+    }
+    _write_immutable(args.out, output)
+    print(json.dumps(output, indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -559,6 +743,12 @@ def build_parser() -> argparse.ArgumentParser:
     pooled.add_argument("--seed", type=int, required=True)
     pooled.add_argument("--out", type=Path, required=True)
     pooled.set_defaults(function=open_loop)
+    planning_parser = subparsers.add_parser("planning")
+    planning_parser.add_argument("--inputs", type=Path, nargs="+", required=True)
+    planning_parser.add_argument("--bootstrap", type=int, required=True)
+    planning_parser.add_argument("--seed", type=int, required=True)
+    planning_parser.add_argument("--out", type=Path, required=True)
+    planning_parser.set_defaults(function=planning)
     return parser
 
 

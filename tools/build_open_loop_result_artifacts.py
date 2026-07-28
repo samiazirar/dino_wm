@@ -18,7 +18,8 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 LAUNCH_SCHEMA = "dinocular.fixed-evaluation-launch-artifacts.v1"
-BUNDLE_SCHEMA = "dinocular.open-loop-result-bundle.v1"
+BUNDLE_SCHEMA = "dinocular.combined-result-bundle.v1"
+PLANNING_LAUNCH_SCHEMA = "dinocular.fixed-planning-launch-artifacts.v1"
 ENVIRONMENTS = ("pusht", "wall", "rope", "granular")
 ARMS = ("dino_pinned", "dinocular", "dinocular_zerodepth")
 SEEDS = (1, 2, 3)
@@ -97,16 +98,71 @@ def _discover(manifest_path: Path) -> tuple[Mapping[str, Any], dict[str, Path]]:
     return manifest, inputs
 
 
-def _readiness(inputs: Mapping[str, Path]) -> Mapping[str, Any]:
+def _planning_discover(path: Path) -> tuple[Mapping[str, Any], dict[str, tuple[Path, int]]]:
+    manifest = _load_object(path)
+    outputs = manifest.get("expected_outputs")
+    if (
+        manifest.get("schema") != PLANNING_LAUNCH_SCHEMA
+        or manifest.get("expected_lineage_count") != 36
+        or manifest.get("expected_result_count") != 1080
+        or not isinstance(outputs, Mapping)
+        or len(outputs) != 36
+    ):
+        raise BuildError("planning launch manifest is not the fixed 36-lineage campaign")
+    result = {}
+    for lineage, record in outputs.items():
+        if not isinstance(record, Mapping):
+            raise BuildError(f"invalid planning output record for {lineage}")
+        result[str(lineage)] = (
+            Path(str(record["path"])),
+            int(record["expected_count"]),
+        )
+    return manifest, result
+
+
+def _planning_available(outputs: Mapping[str, tuple[Path, int]]) -> tuple[int, list[str]]:
+    available = 0
+    missing = []
+    for lineage, (path, expected) in sorted(outputs.items()):
+        count = 0
+        if path.is_file():
+            with path.open("r", encoding="utf-8") as handle:
+                count = sum(1 for line in handle if line.strip())
+        available += min(count, expected)
+        if count != expected:
+            missing.append(f"{lineage}:{expected - min(count, expected)}")
+    return available, missing
+
+
+def _readiness(
+    inputs: Mapping[str, Path],
+    planning_outputs: Mapping[str, tuple[Path, int]] | None = None,
+) -> Mapping[str, Any]:
     available = sorted(key for key, path in inputs.items() if path.is_file())
     missing = sorted(set(inputs) - set(available))
+    planning_available, planning_missing = (
+        _planning_available(planning_outputs) if planning_outputs is not None else (0, [])
+    )
+    planning_expected = (
+        sum(value[1] for value in planning_outputs.values())
+        if planning_outputs is not None
+        else 0
+    )
     return {
-        "status": "WAITING_FOR_36_EVALUATIONS",
-        "expected_count": 36,
-        "available_count": len(available),
-        "missing_count": len(missing),
+        "status": (
+            "WAITING_FOR_PREDICTION_AND_PLANNING"
+            if planning_outputs is not None
+            else "WAITING_FOR_36_EVALUATIONS"
+        ),
+        "prediction_expected_count": 36,
+        "prediction_available_count": len(available),
+        "prediction_missing_count": len(missing),
         "available_lineages": available,
         "missing_lineages": missing,
+        "planning_expected_count": planning_expected,
+        "planning_available_count": planning_available,
+        "planning_missing_count": planning_expected - planning_available,
+        "planning_missing_lineages": planning_missing,
     }
 
 
@@ -266,11 +322,56 @@ def _render_figures(directory: Path, rows: Sequence[Mapping[str, Any]]) -> list[
     return figures
 
 
+def _render_planning_figures(
+    directory: Path, rows: Sequence[Mapping[str, Any]]
+) -> list[Path]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figures = []
+    for environment in ENVIRONMENTS:
+        endpoints = sorted(
+            {row["endpoint"] for row in rows if row["environment"] == environment}
+        )
+        figure, axes = plt.subplots(
+            1, len(endpoints), figsize=(4.2 * len(endpoints), 2.8), squeeze=False
+        )
+        for axis, endpoint in zip(axes[0], endpoints):
+            for arm in ARMS:
+                values = [
+                    float(row["mean"])
+                    for row in rows
+                    if row["environment"] == environment
+                    and row["endpoint"] == endpoint
+                    and row["arm"] == arm
+                ]
+                axis.plot(SEEDS, values, marker="o", label=arm.replace("_", " "))
+            axis.set(
+                xlabel="Training seed",
+                ylabel=endpoint.replace("_", " "),
+                title=environment.title(),
+            )
+            axis.set_xticks(SEEDS)
+            axis.grid(axis="y", alpha=0.25)
+        axes[0][-1].legend(frameon=False, fontsize=7)
+        figure.tight_layout()
+        path = directory / f"planning_{environment}.png"
+        figure.savefig(path, dpi=200)
+        plt.close(figure)
+        figures.append(path)
+    return figures
+
+
 def _build(
     manifest_path: Path,
     manifest: Mapping[str, Any],
     inputs: Mapping[str, Path],
     out_dir: Path,
+    planning_manifest_path: Path | None = None,
+    planning_manifest: Mapping[str, Any] | None = None,
+    planning_outputs: Mapping[str, tuple[Path, int]] | None = None,
 ) -> Mapping[str, Any]:
     try:
         from . import collect_runs
@@ -305,6 +406,35 @@ def _build(
             raise BuildError(f"collector rejected fixed outputs: {exc}") from exc
         collection = _load_object(collection_path)
         rows = _pooled_rows(collection)
+        planning_collection_path = None
+        planning_collection = None
+        planning_rows: list[dict[str, Any]] = []
+        if planning_outputs is not None:
+            planning_collection_path = stage / "planning_collection.json"
+            planning_args = argparse.Namespace(
+                inputs=[planning_outputs[key][0] for key in sorted(planning_outputs)],
+                bootstrap=BOOTSTRAP_REPLICATES,
+                seed=BOOTSTRAP_SEED,
+                out=planning_collection_path,
+            )
+            try:
+                with redirect_stdout(io.StringIO()):
+                    collect_runs.planning(planning_args)
+            except collect_runs.CollectionError as exc:
+                raise BuildError(f"planning collector rejected fixed outputs: {exc}") from exc
+            planning_collection = _load_object(planning_collection_path)
+            for key, value in sorted(planning_collection["summaries"].items()):
+                environment, endpoint, arm, seed = key.split("/")
+                planning_rows.append(
+                    {
+                        "environment": environment,
+                        "endpoint": endpoint,
+                        "arm": arm,
+                        "seed": seed,
+                        "target_count": value["target_count"],
+                        "mean": value["mean"],
+                    }
+                )
 
         table_json = stage / "open_loop_table.json"
         table_csv = stage / "open_loop_table.csv"
@@ -321,8 +451,57 @@ def _build(
         _render_csv(table_csv, rows)
         _render_latex(table_tex, rows)
         figures = _render_figures(stage, rows)
+        planning_artifacts: list[Path] = []
+        if planning_collection_path is not None:
+            planning_json = stage / "planning_table.json"
+            planning_csv = stage / "planning_table.csv"
+            planning_tex = stage / "planning_table.tex"
+            _write_json(
+                planning_json,
+                {
+                    "schema": "dinocular.planning-paper-table.v1",
+                    "rows": planning_rows,
+                    "paired_contrasts": planning_collection["paired_contrasts"],
+                },
+            )
+            _render_csv(planning_csv, planning_rows)
+            planning_tex.write_text(
+                "\n".join(
+                    [
+                        r"\begin{tabular}{llllr}",
+                        r"\toprule",
+                        r"Task & Endpoint & System & Seed & Mean \\",
+                        r"\midrule",
+                        *[
+                            f"{row['environment'].title()} & "
+                            f"{row['endpoint'].replace('_', ' ')} & "
+                            f"{row['arm'].replace('_', ' ')} & {row['seed']} & "
+                            f"{float(row['mean']):.4f} \\\\"
+                            for row in planning_rows
+                        ],
+                        r"\bottomrule",
+                        r"\end{tabular}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            planning_artifacts = [
+                planning_collection_path,
+                planning_json,
+                planning_csv,
+                planning_tex,
+                *_render_planning_figures(stage, planning_rows),
+            ]
 
-        artifacts = [collection_path, table_json, table_csv, table_tex, *figures]
+        artifacts = [
+            collection_path,
+            table_json,
+            table_csv,
+            table_tex,
+            *figures,
+            *planning_artifacts,
+        ]
         bundle_manifest = {
             "schema": BUNDLE_SCHEMA,
             "state": "PASS",
@@ -331,6 +510,16 @@ def _build(
                 "sha256": _sha256(manifest_path),
                 "schema": manifest["schema"],
             },
+            "planning_launch_manifest": (
+                {
+                    "path": str(planning_manifest_path),
+                    "sha256": _sha256(planning_manifest_path),
+                    "schema": planning_manifest["schema"],
+                }
+                if planning_manifest_path is not None
+                and planning_manifest is not None
+                else None
+            ),
             "collector": {
                 "bootstrap_seed": BOOTSTRAP_SEED,
                 "bootstrap_replicates": BOOTSTRAP_REPLICATES,
@@ -340,6 +529,14 @@ def _build(
                 key: {"path": str(path), "sha256": _sha256(path)}
                 for key, path in sorted(inputs.items())
             },
+            "planning_inputs": (
+                {
+                    key: {"path": str(value[0]), "sha256": _sha256(value[0])}
+                    for key, value in sorted(planning_outputs.items())
+                }
+                if planning_outputs is not None
+                else {}
+            ),
             "artifacts": {
                 path.name: {"sha256": _sha256(path), "bytes": path.stat().st_size}
                 for path in artifacts
@@ -360,6 +557,7 @@ def _build(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launch-manifest", type=Path, required=True)
+    parser.add_argument("--planning-launch-manifest", type=Path)
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser
 
@@ -367,11 +565,28 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     manifest, inputs = _discover(args.launch_manifest)
-    readiness = _readiness(inputs)
-    if readiness["missing_count"]:
+    planning_manifest = None
+    planning_outputs = None
+    if args.planning_launch_manifest is not None:
+        planning_manifest, planning_outputs = _planning_discover(
+            args.planning_launch_manifest
+        )
+    readiness = _readiness(inputs, planning_outputs)
+    if (
+        readiness["prediction_missing_count"]
+        or readiness["planning_missing_count"]
+    ):
         print(json.dumps(readiness, sort_keys=True))
         return 0
-    result = _build(args.launch_manifest, manifest, inputs, args.out_dir)
+    result = _build(
+        args.launch_manifest,
+        manifest,
+        inputs,
+        args.out_dir,
+        args.planning_launch_manifest,
+        planning_manifest,
+        planning_outputs,
+    )
     print(json.dumps(result, sort_keys=True))
     return 0
 
