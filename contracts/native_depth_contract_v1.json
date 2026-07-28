@@ -1,0 +1,124 @@
+{
+  "schema": "dinocular-native-depth-contract-v1",
+  "status": "complete",
+  "self_acceptance_recorded": false,
+  "execution_authority_granted": false,
+  "checkpoint": {
+    "name": "dinov2_depthembed_dropout_fullpr.pth",
+    "sha256": "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc",
+    "backend": "df2_dino_rope_convs_de",
+    "factory": "DFormerv2_S",
+    "checkpoint_key": "student",
+    "state_prefix": "module.backbone."
+  },
+  "producer": {
+    "name": "da3_giant_video",
+    "model": "depth_anything_3_streaming",
+    "version": "e74fd796e96b7e781a5506fd8503b6bd7232513c",
+    "code_commit": "e74fd796e96b7e781a5506fd8503b6bd7232513c",
+    "temporal_mode": "streaming",
+    "raw_units": "metric_meters",
+    "weight_sha256": "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc",
+    "invocation": {
+      "route": "DA3-Streaming"
+    },
+    "preprocessing": {
+      "operations": [
+        "world_model_resize",
+        "world_model_crop"
+      ]
+    },
+    "scale": {
+      "operation": "wire=clip((depth_m-lo)/(hi-lo),0,1)",
+      "calibration_scope": "per_environment"
+    },
+    "clipping": {
+      "space": "wire",
+      "minimum": 0.0,
+      "maximum": 1.0
+    }
+  },
+  "encoder_input": {
+    "checkpoint_native": {
+      "quantity": "raw_metric_depth",
+      "units": "metric_meters",
+      "normalization": {
+        "kind": "none_raw_metric"
+      }
+    },
+    "zero_depth": {
+      "payload_validation": "same_as_informative_depth",
+      "intervention": "exact_numeric_zero_at_encoder_boundary",
+      "learned_neutrality_claimed": false,
+      "rgb_equivalence_claimed": false
+    },
+    "cache_bindings": [
+      {
+        "environment": "wall",
+        "producer_sha256": "4d15ed3f04ea318d72599d1d84653d57ae93ec81deb638272d7b823c7fdf5f54",
+        "wire_format_sha256": "47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded",
+        "wire_quantity": "clip_normalized_metric_depth_in_unit_interval",
+        "wire_range": [
+          0.0,
+          1.0
+        ],
+        "affine_to_raw_metric": {
+          "operation": "raw_metric=wire*scale+offset",
+          "output_quantity": "raw_metric_depth",
+          "output_units": "metric_meters",
+          "scale": 0.5140116930007935,
+          "offset": 0.6311277413368225
+        },
+        "interpolation": "bilinear_align_corners_false",
+        "payload_validation": {
+          "source": "reject_nonfinite_then_all_ones",
+          "valid_value": 1.0
+        }
+      },
+      {
+        "environment": "rope",
+        "producer_sha256": "c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc",
+        "wire_format_sha256": "47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded",
+        "wire_quantity": "clip_normalized_metric_depth_in_unit_interval",
+        "wire_range": [
+          0.0,
+          1.0
+        ],
+        "affine_to_raw_metric": {
+          "operation": "raw_metric=wire*scale+offset",
+          "output_quantity": "raw_metric_depth",
+          "output_units": "metric_meters",
+          "scale": 1.3622990965843199,
+          "offset": 0.9579539752006531
+        },
+        "interpolation": "bilinear_align_corners_false",
+        "payload_validation": {
+          "source": "reject_nonfinite_then_all_ones",
+          "valid_value": 1.0
+        }
+      },
+      {
+        "environment": "granular",
+        "producer_sha256": "c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc",
+        "wire_format_sha256": "47a6d5944af9f3587ee7ef0b8154d157294e91db7e489c06b5b33bd3d9384ded",
+        "wire_quantity": "clip_normalized_metric_depth_in_unit_interval",
+        "wire_range": [
+          0.0,
+          1.0
+        ],
+        "affine_to_raw_metric": {
+          "operation": "raw_metric=wire*scale+offset",
+          "output_quantity": "raw_metric_depth",
+          "output_units": "metric_meters",
+          "scale": 1.4814775335788726,
+          "offset": 0.8734745681285858
+        },
+        "interpolation": "bilinear_align_corners_false",
+        "payload_validation": {
+          "source": "reject_nonfinite_then_all_ones",
+          "valid_value": 1.0
+        }
+      }
+    ]
+  }
+}

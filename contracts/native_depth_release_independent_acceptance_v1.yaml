@@ -1,0 +1,68 @@
+schema: dinocular-native-depth-release-independent-acceptance-v1
+decision: ACCEPT
+decision_state: READY
+performed_at: 2026-07-28
+performed_by: worker-native-raw-acceptance
+model: gpt-5.6-sol-medium
+integrated_implementation_commit: ce66819230b5a592297dea24cea3cb1ebc76ef3f
+submit_jobs: false
+copy_or_promote_caches: false
+execution_authority_granted: false
+delegated_environments:
+  - wall
+  - rope
+  - granular
+native_contract:
+  schema: dinocular-native-depth-contract-v1
+  repository_path: contracts/native_depth_contract_v1.json
+  materialized_path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/native_depth_contract_v1.json
+  sha256: a558b4fee9eb380a40de138e372a12f0796ef9af6b5eef9901f6e7d3853b3d4b
+  checkpoint_sha256: decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc
+ready_index:
+  schema: dino-wm-depth-contract-index-v1
+  repository_path: contracts/depth_contracts.yaml
+  materialized_path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/depth_contracts.yaml
+  sha256: 3de20169c3b4a82ff247655138f2a693989dcd48beea7c5b954f48893e53e172
+accepted_contract:
+  checkpoint_input: raw_unnormalized_metric_depth
+  normalization_kind: none_raw_metric
+  cache_inverse: raw_metric=wire*(hi-lo)+lo
+  interpolation: bilinear_align_corners_false
+  payload_validation: reject_nonfinite_then_all_ones
+  zero_depth: validate_same_payload_then_exact_numeric_zero_at_encoder_boundary
+environment_bindings:
+  wall:
+    manifest_id: 54bab01a-8c49-4df5-a1d9-3a76e32e5234
+    manifest_sha256: b6db2c8b495ed2a3a142973cdc3622ab193a5a38d51147515d2f38678214819d
+    producer_sha256: 4d15ed3f04ea318d72599d1d84653d57ae93ec81deb638272d7b823c7fdf5f54
+    validation_sha256: b2404b80ba54f7b9b9cd857c4032bf515a91d1a3295f62167c7c9c65f122fab4
+    lo: 0.6311277413368225
+    hi: 1.145139434337616
+    scale: 0.5140116930007935
+    offset: 0.6311277413368225
+  rope:
+    manifest_id: 0a31897e-f64a-4447-8c7e-0f5db66d9fb3
+    manifest_sha256: 5eb0818c6d38d6f6c5d210075e1be0ff008d5b04252926986979ddbb6c8f2dba
+    producer_sha256: c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc
+    validation_sha256: 3df12b04aa0ce2a68484dc023773d3eb7b3bd158ea4a9212c660caeeb5478a86
+    lo: 0.9579539752006531
+    hi: 2.320253071784973
+    scale: 1.3622990965843199
+    offset: 0.9579539752006531
+  granular:
+    manifest_id: 52897463-5cc8-4f70-b999-5f95af9d8b3f
+    manifest_sha256: 8ba955aa806fc4c1ef8a8ed8a6c282bf1e9d010e99f77ebd4e65d44360e99997
+    producer_sha256: c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc
+    validation_sha256: db67a785b67bedaf3c617b6da74250e0730adbf0f956f1cafd76207451caaec8
+    lo: 0.8734745681285858
+    hi: 2.3549521017074584
+    scale: 1.4814775335788726
+    offset: 0.8734745681285858
+independent_decision: >-
+  ACCEPT. The corrected contract binds the integrated loader to raw,
+  unnormalized metric depth for Wall, Rope, and Granular. Each cache wire value
+  is decoded with the cited environment calibration using scale=hi-lo and
+  offset=lo; nonfinite payloads are rejected before an exact all-ones validity
+  result is accepted; the same informative payload is validated before the
+  zero-depth arm replaces encoder-boundary depth with exact numeric zero. No
+  model, dataset, seed, hyperparameter, or PushT contract is changed.
