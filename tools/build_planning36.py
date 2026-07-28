@@ -13,6 +13,8 @@ import stat
 import textwrap
 from typing import Any, Mapping, Sequence
 
+import yaml
+
 
 EVALUATION_SCHEMA = "dinocular.fixed-evaluation-launch-artifacts.v1"
 PLANNING_SCHEMA = "dinocular.fixed-planning-launch-artifacts.v1"
@@ -92,6 +94,18 @@ def _object(path: Path) -> Mapping[str, Any]:
         raise MaterializationError(f"cannot read JSON object {path}: {exc}") from exc
     if not isinstance(value, Mapping):
         raise MaterializationError(f"expected JSON object at {path}")
+    return value
+
+
+def _evaluation_card(path: Path) -> Mapping[str, Any]:
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise MaterializationError(
+            f"cannot read YAML evaluation card {path}: {exc}"
+        ) from exc
+    if not isinstance(value, Mapping):
+        raise MaterializationError(f"expected YAML object at {path}")
     return value
 
 
@@ -408,7 +422,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                 if task_missing:
                     continue
                 source = evaluation["records"][lineage]
-                evaluation_card = _object(Path(source["evaluation_card"]))
+                evaluation_card = _evaluation_card(Path(source["evaluation_card"]))
                 task_planner = TASK_PLANNER[environment]
                 training_dir = Path(str(source["training_run_dir"]))
                 prediction_path = (
