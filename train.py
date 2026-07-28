@@ -22,7 +22,6 @@ from collections import OrderedDict
 from hydra.types import RunMode
 from hydra.core.hydra_config import HydraConfig
 from datetime import timedelta
-from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 from training_resume import (
@@ -42,6 +41,10 @@ from training_resume import (
     restore_rng_state,
 )
 from training_timing import StrictTimingWindow
+from tools.harness_common import (
+    require_regular_file_no_alias,
+    run_card_receipt_expectations,
+)
 from p3_completion import (
     FINAL_RECEIPT_SCHEMA,
     TRAINING_RECORD_SCHEMA,
@@ -612,7 +615,10 @@ class Trainer:
         run_card_path = os.environ.get("STRICT_P2_IMMUTABLE_RUN_CARD")
         if not run_card_path:
             raise RuntimeError("P3 completion requires the immutable run-card path")
-        run_card_path = Path(run_card_path).resolve()
+        run_card_path = require_regular_file_no_alias(
+            Path(run_card_path),
+            "P3 completion run card",
+        )
         run_card = __import__("yaml").safe_load(
             run_card_path.read_text(encoding="utf-8")
         )
@@ -629,6 +635,10 @@ class Trainer:
         if run_card.get("container", {}).get("sha256") != container_sha256:
             raise RuntimeError("P3 completion container differs from the run card")
         self.p3_run_card = run_card
+        (
+            self.p3_empirical_adapter_mode,
+            self.p3_empirical_provenance,
+        ) = run_card_receipt_expectations(run_card)
         self.p3_training_ledger_path = (
             Path(self.cfg.saved_folder) / "training_steps.jsonl"
         )
@@ -652,6 +662,7 @@ class Trainer:
                 target_steps=int(self.cfg.training.target_steps),
                 immutable_run_card_sha256=self.immutable_run_card_sha256,
                 manifest_sha256=str(self.cfg.training.p3_heldout_manifest_sha256),
+                expected_empirical_adapter_mode=self.p3_empirical_adapter_mode,
             )
             validate_checkpoint_evidence_bindings(
                 load_checkpoint_history(self.checkpoint_manager.history_path),
@@ -1038,13 +1049,24 @@ class Trainer:
                 "depth_producer_sha256": None,
                 "depth_cache_manifest_sha256": None,
                 "depth_native_contract_sha256": None,
+                "depth_empirical_contract_sha256": None,
+                "depth_empirical_provenance": None,
                 "depth_validation_sha256": None,
                 "depth_checkpoint_sha256": None,
             }
+        empirical = self.p3_empirical_provenance is not None
         return {
             "depth_producer_sha256": depth["producer_sha256"],
             "depth_cache_manifest_sha256": depth["cache_manifest_sha256"],
-            "depth_native_contract_sha256": depth["native_contract_sha256"],
+            "depth_native_contract_sha256": (
+                None if empirical else depth["native_contract_sha256"]
+            ),
+            "depth_empirical_contract_sha256": (
+                depth["empirical_contract_sha256"] if empirical else None
+            ),
+            "depth_empirical_provenance": (
+                dict(self.p3_empirical_provenance) if empirical else None
+            ),
             "depth_validation_sha256": depth["validation_sha256"],
             "depth_checkpoint_sha256": depth["checkpoint_sha256"],
         }
@@ -1096,6 +1118,7 @@ class Trainer:
                 self.p3_validation_ledger_path,
                 record,
                 target_steps=int(self.cfg.training.target_steps),
+                expected_empirical_adapter_mode=self.p3_empirical_adapter_mode,
             )
         except P3CompletionError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -1141,6 +1164,7 @@ class Trainer:
             immutable_run_card_sha256=self.immutable_run_card_sha256,
             manifest_sha256=str(self.cfg.training.p3_heldout_manifest_sha256),
             require_complete=True,
+            expected_empirical_adapter_mode=self.p3_empirical_adapter_mode,
         )
         progress_path = Path(self.cfg.saved_folder) / "progress.json"
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
@@ -1231,7 +1255,9 @@ class Trainer:
             final_receipt=receipt,
         )
         write_final_receipt(
-            Path(self.cfg.saved_folder) / "final_acceptance.json", receipt
+            Path(self.cfg.saved_folder) / "final_acceptance.json",
+            receipt,
+            expected_empirical_adapter_mode=self.p3_empirical_adapter_mode,
         )
         print("P3_FINAL_ACCEPTANCE=PASS")
 
@@ -1400,7 +1426,6 @@ class Trainer:
             self.run_steps()
             return
         if self.accelerator.is_main_process:
-            executor = ThreadPoolExecutor(max_workers=4)
             self.job_set = set()
             lock = threading.Lock()
 
@@ -1522,7 +1547,6 @@ class Trainer:
                     z_gt = self.model.encode_obs(obs)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
 
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
@@ -1618,7 +1642,6 @@ class Trainer:
                     z_gt = self.model.encode_obs(obs)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
 
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)

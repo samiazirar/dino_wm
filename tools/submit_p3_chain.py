@@ -11,7 +11,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -28,9 +28,25 @@ from p3_completion import (  # noqa: E402
 )
 
 try:
-    from .harness_common import validate_run_card
+    from .harness_common import (
+        HarnessError,
+        depth_artifact_records,
+        require_directory_no_alias,
+        require_run_card_authorization,
+        require_regular_file_no_alias,
+        run_card_receipt_expectations,
+        validate_run_card,
+    )
 except ImportError:
-    from harness_common import validate_run_card
+    from harness_common import (
+        HarnessError,
+        depth_artifact_records,
+        require_directory_no_alias,
+        require_run_card_authorization,
+        require_regular_file_no_alias,
+        run_card_receipt_expectations,
+        validate_run_card,
+    )
 
 
 SCHEMA = "dino-wm.p3-slurm-chain.v1"
@@ -38,6 +54,15 @@ SCHEMA = "dino-wm.p3-slurm-chain.v1"
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def require_candidate_launch_authorization(run_card: dict[str, Any]) -> None:
+    """Require candidate authority or the disjoint native legacy schema."""
+
+    try:
+        require_run_card_authorization(run_card, operation="chain")
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -51,11 +76,38 @@ def atomic_json(path: Path, value: Any) -> None:
 
 
 def load_manifest(path: Path) -> dict:
+    try:
+        path = require_regular_file_no_alias(path, "chain manifest")
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
     with path.open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     if manifest.get("schema") != SCHEMA:
         raise RuntimeError(f"Unknown chain manifest schema: {path}")
     return manifest
+
+
+def load_and_validate_run_card(
+    path: Path, *, expected_file_sha256: str, expected_content_sha256: str
+) -> dict[str, Any]:
+    try:
+        path = require_regular_file_no_alias(path, "chain run card")
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_file_sha256:
+        raise RuntimeError("run-card file SHA-256 differs from the immutable chain reference")
+    run_card = yaml.safe_load(raw.decode("utf-8"))
+    if not isinstance(run_card, dict):
+        raise RuntimeError("chain run card is invalid")
+    try:
+        validate_run_card(run_card)
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
+    if run_card.get("run_card_sha256") != expected_content_sha256:
+        raise RuntimeError("run-card content SHA-256 differs from the chain reference")
+    require_candidate_launch_authorization(run_card)
+    return run_card
 
 
 def verify_progress_evidence(manifest: dict, progress: dict) -> Path:
@@ -69,13 +121,17 @@ def verify_progress_evidence(manifest: dict, progress: dict) -> Path:
     if not is_process_id(progress.get("training_process_id")):
         raise RuntimeError("Progress has no valid segment training process ID")
     global_step = int(progress["global_step"])
-    checkpoint = Path(str(progress.get("checkpoint"))).resolve()
-    expected_directory = Path(manifest["run_dir"]).resolve() / "checkpoints" / "steps"
+    try:
+        run_dir = require_directory_no_alias(manifest["run_dir"], "chain run directory")
+        checkpoint = require_regular_file_no_alias(
+            Path(str(progress.get("checkpoint"))), "progress checkpoint"
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    expected_directory = run_dir / "checkpoints" / "steps"
     expected_name = f"step_{global_step:09d}.pth"
     if checkpoint.parent != expected_directory or checkpoint.name != expected_name:
         raise RuntimeError("Progress checkpoint path differs from the completed step")
-    if not checkpoint.is_file():
-        raise RuntimeError(f"Progress checkpoint is missing: {checkpoint}")
     digest = hashlib.sha256()
     with checkpoint.open("rb") as handle:
         for block in iter(lambda: handle.read(16 << 20), b""):
@@ -97,6 +153,12 @@ def verify_progress_evidence(manifest: dict, progress: dict) -> Path:
 
 
 def submit_job(manifest_path: Path, manifest: dict, dependency: str | None) -> str:
+    try:
+        sbatch_script = require_regular_file_no_alias(
+            Path(str(manifest["sbatch_script"])), "chain sbatch script"
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
     command = [
         "sbatch",
         "--parsable",
@@ -107,7 +169,7 @@ def submit_job(manifest_path: Path, manifest: dict, dependency: str | None) -> s
     ]
     if dependency is not None:
         command.append(f"--dependency=afterok:{dependency}")
-    command.append(manifest["sbatch_script"])
+    command.append(str(sbatch_script))
     output = subprocess.check_output(command, text=True).strip()
     job_id = output.split(";")[0]
     if not job_id.isdigit():
@@ -118,7 +180,18 @@ def submit_job(manifest_path: Path, manifest: dict, dependency: str | None) -> s
 def start(args: argparse.Namespace) -> None:
     if args.target_steps <= 0 or args.segment_steps <= 0:
         raise ValueError("target and segment steps must be positive")
-    run_dir = args.run_dir.resolve()
+    try:
+        run_dir = require_directory_no_alias(
+            args.run_dir, "chain run directory", allow_missing=True
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    run_card_path = args.run_card.expanduser()
+    run_card = load_and_validate_run_card(
+        run_card_path,
+        expected_file_sha256=args.run_card_file_sha256,
+        expected_content_sha256=args.run_card_sha256,
+    )
     existing_manifest_path = run_dir / "chain.json"
     if run_dir.exists():
         if not existing_manifest_path.is_file():
@@ -133,7 +206,7 @@ def start(args: argparse.Namespace) -> None:
             "partition": args.partition,
             "time_limit": args.time_limit,
             "job_name": args.job_name,
-            "run_card": str(args.run_card.resolve()),
+            "run_card": str(run_card_path),
             "run_card_file_sha256": args.run_card_file_sha256,
             "run_card_sha256": args.run_card_sha256,
         }
@@ -150,26 +223,19 @@ def start(args: argparse.Namespace) -> None:
             raise RuntimeError("existing chain has no submitted job record")
         print(existing["jobs"][-1]["job_id"])
         return
-    run_dir.mkdir(parents=True, exist_ok=False)
     code_root = Path(__file__).resolve().parents[1]
     manifest_path = run_dir / "chain.json"
-    run_card_path = args.run_card.resolve()
-    if not run_card_path.is_file():
-        raise FileNotFoundError(f"run card does not exist: {run_card_path}")
-    run_card_file_sha256 = hashlib.sha256(run_card_path.read_bytes()).hexdigest()
-    if run_card_file_sha256 != args.run_card_file_sha256:
-        raise RuntimeError(
-            "run-card file SHA-256 differs from the immutable matrix reference"
+    run_card_file_sha256 = args.run_card_file_sha256
+    try:
+        card_run_dir = require_directory_no_alias(
+            Path(str(run_card.get("run_dir", ""))),
+            "run-card run directory",
+            allow_missing=True,
         )
-    run_card = yaml.safe_load(run_card_path.read_text(encoding="utf-8"))
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
     if (
-        not isinstance(run_card, dict)
-        or run_card.get("run_card_sha256") != args.run_card_sha256
-    ):
-        raise RuntimeError("run-card content SHA-256 differs from the matrix reference")
-    validate_run_card(run_card)
-    if (
-        Path(run_card.get("run_dir", "")).resolve() != run_dir
+        card_run_dir != run_dir
         or int(run_card.get("target_steps", -1)) != args.target_steps
         or int(run_card.get("segment_steps", -1)) != args.segment_steps
     ):
@@ -182,6 +248,7 @@ def start(args: argparse.Namespace) -> None:
     for key, expected in environment_variables.items():
         if os.environ.get(str(key)) != str(expected):
             raise RuntimeError(f"launch environment differs from run card for {key}")
+    run_dir.mkdir(parents=True, exist_ok=False)
     overrides = list(args.override)
     manifest = {
         "schema": SCHEMA,
@@ -195,9 +262,7 @@ def start(args: argparse.Namespace) -> None:
         "partition": args.partition,
         "time_limit": args.time_limit,
         "job_name": args.job_name,
-        "sbatch_script": str(
-            (code_root / "tools" / "p3_step_segment.sbatch").resolve()
-        ),
+        "sbatch_script": str(code_root / "tools" / "p3_step_segment.sbatch"),
         "code_root": str(code_root),
         "overrides": overrides,
         "run_card": str(run_card_path),
@@ -227,9 +292,25 @@ def start(args: argparse.Namespace) -> None:
 
 
 def continue_chain(args: argparse.Namespace) -> None:
-    manifest_path = args.manifest.resolve()
+    manifest_path = args.manifest.expanduser()
     manifest = load_manifest(manifest_path)
-    progress_path = Path(manifest["run_dir"]) / "progress.json"
+    run_card = load_and_validate_run_card(
+        Path(manifest["run_card"]),
+        expected_file_sha256=str(manifest.get("run_card_file_sha256")),
+        expected_content_sha256=str(manifest.get("run_card_sha256")),
+    )
+    try:
+        run_dir = require_directory_no_alias(
+            Path(str(manifest["run_dir"])), "chain run directory"
+        )
+        code_root = require_directory_no_alias(
+            Path(str(manifest["code_root"])), "chain code root"
+        )
+        progress_path = require_regular_file_no_alias(
+            run_dir / "progress.json", "chain progress"
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
     with progress_path.open("r", encoding="utf-8") as handle:
         progress = json.load(handle)
     if int(progress["target_steps"]) != int(manifest["target_steps"]):
@@ -237,7 +318,7 @@ def continue_chain(args: argparse.Namespace) -> None:
     if (
         progress.get("source_commit")
         != subprocess.check_output(
-            ["git", "-C", manifest["code_root"], "rev-parse", "HEAD"], text=True
+            ["git", "-C", str(code_root), "rev-parse", "HEAD"], text=True
         ).strip()
     ):
         raise RuntimeError("Progress source commit differs from current branch")
@@ -271,9 +352,6 @@ def continue_chain(args: argparse.Namespace) -> None:
         if progress["status"] != "TARGET_REACHED":
             raise RuntimeError("Target step was reached without TARGET_REACHED status")
         if manifest.get("run_card_kind") == "p3-training":
-            run_card = yaml.safe_load(
-                Path(manifest["run_card"]).read_text(encoding="utf-8")
-            )
             completion = progress.get("p3_completion")
             if not isinstance(completion, dict):
                 raise RuntimeError("P3 target progress lacks completion evidence")
@@ -318,6 +396,9 @@ def continue_chain(args: argparse.Namespace) -> None:
                 "validation_batch.manifest_key": validation_manifest_key,
             }
             depth = run_card.get("depth_inputs")
+            expected_empirical_adapter_mode, empirical_provenance = (
+                run_card_receipt_expectations(run_card)
+            )
             expected_receipt.update(
                 {
                     "depth_producer_sha256": depth.get("producer_sha256")
@@ -329,6 +410,14 @@ def continue_chain(args: argparse.Namespace) -> None:
                     "depth_native_contract_sha256": depth.get("native_contract_sha256")
                     if depth
                     else None,
+                    "depth_empirical_contract_sha256": depth.get("empirical_contract_sha256")
+                    if depth
+                    else None,
+                    "depth_empirical_provenance": (
+                        dict(empirical_provenance)
+                        if empirical_provenance is not None
+                        else None
+                    ),
                     "depth_validation_sha256": depth.get("validation_sha256")
                     if depth
                     else None,
@@ -338,10 +427,16 @@ def continue_chain(args: argparse.Namespace) -> None:
                 }
             )
             try:
-                receipt, receipt_path, receipt_sha256 = load_final_receipt(
-                    manifest["run_dir"], expected=expected_receipt
+                require_regular_file_no_alias(
+                    run_dir / "final_acceptance.json",
+                    "final acceptance receipt",
                 )
-            except P3CompletionError as exc:
+                receipt, receipt_path, receipt_sha256 = load_final_receipt(
+                    run_dir,
+                    expected_empirical_adapter_mode=expected_empirical_adapter_mode,
+                    expected=expected_receipt,
+                )
+            except (HarnessError, P3CompletionError) as exc:
                 raise RuntimeError(str(exc)) from exc
             event["final_acceptance_receipt"] = str(receipt_path)
             event["final_acceptance_receipt_sha256"] = receipt_sha256
@@ -380,7 +475,7 @@ def continue_chain(args: argparse.Namespace) -> None:
 
 
 def emit(args: argparse.Namespace) -> None:
-    manifest = load_manifest(args.manifest.resolve())
+    manifest = load_manifest(args.manifest.expanduser())
     values = {
         "run_dir": manifest["run_dir"],
         "target_steps": str(manifest["target_steps"]),
@@ -402,8 +497,24 @@ def emit(args: argparse.Namespace) -> None:
 
 
 def verify(args: argparse.Namespace) -> None:
-    manifest = load_manifest(args.manifest.resolve())
-    code_root = Path(manifest["code_root"])
+    manifest = load_manifest(args.manifest.expanduser())
+    try:
+        require_directory_no_alias(
+            Path(str(manifest["run_dir"])), "chain run directory"
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
+    run_card = load_and_validate_run_card(
+        Path(manifest["run_card"]),
+        expected_file_sha256=str(manifest.get("run_card_file_sha256")),
+        expected_content_sha256=str(manifest.get("run_card_sha256")),
+    )
+    try:
+        code_root = require_directory_no_alias(
+            Path(str(manifest["code_root"])), "chain code root"
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
     current_commit = subprocess.check_output(
         ["git", "-C", str(code_root), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -415,11 +526,13 @@ def verify(args: argparse.Namespace) -> None:
     if dirty:
         raise RuntimeError("live source tree is dirty; refusing chain execution")
     for relative, expected in manifest.get("source_file_sha256", {}).items():
-        path = code_root / relative
-        if (
-            not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
-        ):
+        try:
+            path = require_regular_file_no_alias(
+                code_root / relative, f"live source file {relative}"
+            )
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
             raise RuntimeError(f"live source file hash differs: {relative}")
     records = {
         **manifest.get("artifacts", {}),
@@ -427,27 +540,15 @@ def verify(args: argparse.Namespace) -> None:
     }
     depth = manifest.get("depth_inputs")
     if isinstance(depth, dict):
-        records.update(
-            {
-                "depth cache manifest": {
-                    "path": str(Path(depth["cache_dir"]) / "manifest.json"),
-                    "sha256": depth["cache_manifest_sha256"],
-                },
-                "depth validation": {
-                    "path": depth["validation_path"],
-                    "sha256": depth["validation_sha256"],
-                },
-                "native depth contract": {
-                    "path": depth["native_contract_path"],
-                    "sha256": depth["native_contract_sha256"],
-                },
-            }
-        )
+        records.update(depth_artifact_records(depth))
     for label, record in records.items():
-        path = Path(record.get("path", ""))
+        try:
+            path = require_regular_file_no_alias(
+                Path(record.get("path", "")), f"live pinned artifact {label}"
+            )
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
         digest = hashlib.sha256()
-        if not path.is_file():
-            raise RuntimeError(f"missing pinned {label}: {path}")
         with path.open("rb") as handle:
             for block in iter(lambda: handle.read(16 << 20), b""):
                 digest.update(block)
@@ -456,7 +557,12 @@ def verify(args: argparse.Namespace) -> None:
     for key, expected in manifest.get("environment_variables", {}).items():
         if os.environ.get(str(key)) != str(expected):
             raise RuntimeError(f"live environment differs from run card for {key}")
-    run_card_path = Path(manifest["run_card"])
+    try:
+        run_card_path = require_regular_file_no_alias(
+            Path(str(manifest["run_card"])), "live chain run card"
+        )
+    except HarnessError as exc:
+        raise RuntimeError(str(exc)) from exc
     if hashlib.sha256(run_card_path.read_bytes()).hexdigest() != manifest.get(
         "run_card_file_sha256"
     ):

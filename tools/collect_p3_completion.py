@@ -38,6 +38,9 @@ from tools.harness_common import (  # noqa: E402
     canonical_json_bytes,
     load_json,
     load_matrix,
+    require_directory_no_alias,
+    require_regular_file_no_alias,
+    run_card_receipt_expectations,
     sha256_bytes,
 )
 
@@ -60,6 +63,14 @@ _PAIRED_ARM_ENVIRONMENT_VARIABLES = frozenset(
         "DINOCULAR_NATIVE_DEPTH_CONTRACT",
         "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256",
         "DINOCULAR_STUDENT_WEIGHTS",
+        "DINOCULAR_DEPTH_INPUT_MODE",
+        "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT",
+        "DINOCULAR_EMPIRICAL_DEPTH_CONTRACT_SHA256",
+        "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE",
+        "DINOCULAR_EMPIRICAL_RUNTIME_RELEASE_SHA256",
+        "DINOCULAR_EMPIRICAL_ADAPTER_ID",
+        "DINOCULAR_EMPIRICAL_ADAPTER_MODE",
+        "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION",
     }
 )
 
@@ -69,6 +80,7 @@ def _normalized_overrides(card: Mapping[str, Any]) -> list[str]:
         "encoder=",
         "+env.dataset.depth_",
         "+env.dataset.native_depth_",
+        "+env.dataset.empirical_",
     )
     return [
         str(value)
@@ -103,9 +115,17 @@ def _normalized_paired_card(card: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
-    run_dir = Path(str(card["run_dir"]))
-    progress = load_json(run_dir / "progress.json")
-    chain = load_json(run_dir / "chain.json")
+    run_dir = require_directory_no_alias(
+        Path(str(card["run_dir"])), "P3 collection run directory"
+    )
+    progress_path = require_regular_file_no_alias(
+        run_dir / "progress.json", "P3 collection progress"
+    )
+    chain_path = require_regular_file_no_alias(
+        run_dir / "chain.json", "P3 collection chain"
+    )
+    progress = load_json(progress_path)
+    chain = load_json(chain_path)
     target = int(card["target_steps"])
     jobs = chain.get("jobs")
     tail_job = (
@@ -125,10 +145,11 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         or chain.get("final_progress") != progress
     ):
         raise HarnessError(f"cell is not exact TARGET_REACHED/PASSED: {card['run_id']}")
-    checkpoint = Path(str(progress["checkpoint"]))
+    checkpoint = require_regular_file_no_alias(
+        Path(str(progress["checkpoint"])), "P3 collection checkpoint"
+    )
     if (
         checkpoint != run_dir / "checkpoints" / "steps" / f"step_{target:09d}.pth"
-        or not checkpoint.is_file()
         or sha256_file(checkpoint) != progress.get("checkpoint_sha256")
     ):
         raise HarnessError(f"cell final checkpoint differs: {card['run_id']}")
@@ -184,8 +205,16 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         "validation_batch.manifest_key": validation_manifest_key,
     }
     try:
+        expected_empirical_adapter_mode, _empirical_provenance = (
+            run_card_receipt_expectations(card)
+        )
+        require_regular_file_no_alias(
+            run_dir / "final_acceptance.json", "P3 collection final receipt"
+        )
         receipt, receipt_path, receipt_sha256 = load_final_receipt(
-            run_dir, expected=expected_receipt
+            run_dir,
+            expected_empirical_adapter_mode=expected_empirical_adapter_mode,
+            expected=expected_receipt,
         )
     except P3CompletionError as exc:
         raise HarnessError(str(exc)) from exc
@@ -204,9 +233,15 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         raise HarnessError(
             f"cell receipt is not bound to the chain tail: {card['run_id']}"
         )
-    training_path = Path(str(completion["training_ledger"]))
-    validation_path = Path(str(completion["validation_ledger"]))
-    history_path = Path(str(completion["checkpoint_history"]))
+    training_path = require_regular_file_no_alias(
+        Path(str(completion["training_ledger"])), "P3 collection training ledger"
+    )
+    validation_path = require_regular_file_no_alias(
+        Path(str(completion["validation_ledger"])), "P3 collection validation ledger"
+    )
+    history_path = require_regular_file_no_alias(
+        Path(str(completion["checkpoint_history"])), "P3 collection checkpoint history"
+    )
     if (
         training_path != run_dir / "training_steps.jsonl"
         or validation_path != run_dir / "heldout_loss.jsonl"
@@ -241,14 +276,18 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
     )
     if any(row.get("config_sha256") != card["config_sha256"] for row in training_rows):
         raise HarnessError(f"cell training config provenance differs: {card['run_id']}")
+    depth = card.get("depth_inputs")
+    expected_empirical_adapter_mode, empirical_provenance = (
+        run_card_receipt_expectations(card)
+    )
     validate_validation_records(
         validation_rows,
         target_steps=target,
         immutable_run_card_sha256=card["run_card_sha256"],
         manifest_sha256=card["heldout_loss_manifest"]["sha256"],
         require_complete=True,
+        expected_empirical_adapter_mode=expected_empirical_adapter_mode,
     )
-    depth = card.get("depth_inputs")
     expected_depth = {
         "depth_producer_sha256": depth.get("producer_sha256") if depth else None,
         "depth_cache_manifest_sha256": depth.get("cache_manifest_sha256")
@@ -257,6 +296,14 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         "depth_native_contract_sha256": depth.get("native_contract_sha256")
         if depth
         else None,
+        "depth_empirical_contract_sha256": depth.get("empirical_contract_sha256")
+        if depth
+        else None,
+        "depth_empirical_provenance": (
+            dict(empirical_provenance)
+            if empirical_provenance is not None
+            else None
+        ),
         "depth_validation_sha256": depth.get("validation_sha256") if depth else None,
         "depth_checkpoint_sha256": depth.get("checkpoint_sha256") if depth else None,
     }
@@ -317,6 +364,15 @@ def _load_cell(card: Mapping[str, Any]) -> Mapping[str, Any]:
         "depth_producer_sha256": receipt.get("depth_producer_sha256"),
         "depth_cache_manifest_sha256": receipt.get("depth_cache_manifest_sha256"),
         "depth_native_contract_sha256": receipt.get("depth_native_contract_sha256"),
+        "depth_empirical_contract_sha256": receipt.get(
+            "depth_empirical_contract_sha256"
+        ),
+        "depth_empirical_provenance": receipt.get("depth_empirical_provenance"),
+        "depth_adapter_mode": (
+            receipt.get("depth_empirical_provenance", {}).get("adapter_mode")
+            if isinstance(receipt.get("depth_empirical_provenance"), Mapping)
+            else None
+        ),
         "depth_validation_sha256": receipt.get("depth_validation_sha256"),
         "depth_checkpoint_sha256": receipt.get("depth_checkpoint_sha256"),
         "curve": [
@@ -370,17 +426,65 @@ def _paired_audit(
                 )
             informative = by_axis[(environment, "dinocular", seed)]
             neutral = by_axis[(environment, "dinocular_zerodepth", seed)]
+            empirical = (
+                informative.get("depth_inputs", {}).get("contract_kind")
+                == "empirical_lossy_cache"
+                or neutral.get("depth_inputs", {}).get("contract_kind")
+                == "empirical_lossy_cache"
+            )
+            if empirical:
+                informative_depth = copy.deepcopy(dict(informative["depth_inputs"]))
+                neutral_depth = copy.deepcopy(dict(neutral["depth_inputs"]))
+                informative_mode = informative_depth.pop("adapter_mode", None)
+                neutral_mode = neutral_depth.pop("adapter_mode", None)
+                informative_environment = copy.deepcopy(
+                    dict(informative["environment_variables"])
+                )
+                neutral_environment = copy.deepcopy(dict(neutral["environment_variables"]))
+                informative_zero = informative_environment.pop(
+                    "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION", None
+                )
+                neutral_zero = neutral_environment.pop(
+                    "DINOCULAR_EMPIRICAL_ZERO_INTERVENTION", None
+                )
+                informative_environment_mode = informative_environment.pop(
+                    "DINOCULAR_EMPIRICAL_ADAPTER_MODE", None
+                )
+                neutral_environment_mode = neutral_environment.pop(
+                    "DINOCULAR_EMPIRICAL_ADAPTER_MODE", None
+                )
+                invalid_pair = (
+                    environment != "pusht"
+                    or informative_depth != neutral_depth
+                    or informative_mode != "proxy_depth_z"
+                    or neutral_mode != "exact_constant_zero_numeric"
+                    or informative_environment != neutral_environment
+                    or informative_environment_mode != informative_mode
+                    or neutral_environment_mode != neutral_mode
+                    or informative_zero != "false"
+                    or neutral_zero != "true"
+                    or informative.get("encoder_boundary")
+                    != "empirical_proxy_depth_and_payload_presence_mask"
+                    or neutral.get("encoder_boundary")
+                    != "exact_constant_zero_numeric_and_audit_mask"
+                )
+            else:
+                invalid_pair = (
+                    informative.get("depth_inputs") != neutral.get("depth_inputs")
+                    or informative.get("environment_variables")
+                    != neutral.get("environment_variables")
+                    or informative.get("encoder_boundary")
+                    != "informative_depth_and_mask"
+                    or neutral.get("encoder_boundary")
+                    != "manifest_neutral_depth_and_mask"
+                )
             if (
-                informative.get("depth_inputs") != neutral.get("depth_inputs")
+                invalid_pair
                 or informative.get("artifacts", {}).get("dinocular_student")
                 != neutral.get("artifacts", {}).get("dinocular_student")
-                or informative.get("environment_variables")
-                != neutral.get("environment_variables")
-                or informative.get("encoder_boundary") != "informative_depth_and_mask"
-                or neutral.get("encoder_boundary") != "manifest_neutral_depth_and_mask"
             ):
                 raise HarnessError(
-                    f"DINOcular/zero pairing differs beyond neutral boundary for {environment}/s{seed}"
+                    f"DINOcular/zero pairing differs beyond reviewed boundary for {environment}/s{seed}"
                 )
             informative_cell = cells[(environment, "dinocular", seed)]
             neutral_cell = cells[(environment, "dinocular_zerodepth", seed)]
@@ -388,13 +492,22 @@ def _paired_audit(
                 "depth_producer_sha256",
                 "depth_cache_manifest_sha256",
                 "depth_native_contract_sha256",
+                "depth_empirical_contract_sha256",
                 "depth_validation_sha256",
                 "depth_checkpoint_sha256",
             ):
-                if informative_cell[field] != neutral_cell[field]:
+                if informative_cell.get(field) != neutral_cell.get(field):
                     raise HarnessError(
                         f"DINOcular/zero completion pairing differs at {field}"
                     )
+            if empirical and (
+                informative_cell.get("depth_adapter_mode") != "proxy_depth_z"
+                or neutral_cell.get("depth_adapter_mode")
+                != "exact_constant_zero_numeric"
+            ):
+                raise HarnessError(
+                    "DINOcular/zero completion pairing has wrong empirical adapter mode"
+                )
             for left_index, left in enumerate(LOCKED_ARMS):
                 for right in LOCKED_ARMS[left_index + 1 :]:
                     left_cell = cells[(environment, left, seed)]

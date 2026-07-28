@@ -16,12 +16,14 @@ import numpy as np
 
 try:
     from .harness_common import (
+        EVALUATION_EMPIRICAL_PROVENANCE_FIELDS,
         EVALUATION_IMMUTABLE_PROVENANCE_FIELDS,
         HarnessError,
         validate_evaluation_provenance,
     )
 except ImportError:
     from harness_common import (  # type: ignore[no-redef]
+        EVALUATION_EMPIRICAL_PROVENANCE_FIELDS,
         EVALUATION_IMMUTABLE_PROVENANCE_FIELDS,
         HarnessError,
         validate_evaluation_provenance,
@@ -55,7 +57,9 @@ def _row_provenance(row: Mapping[str, Any]) -> Mapping[str, Any]:
         validate_evaluation_provenance(row, requires_depth=requires_depth)
     except HarnessError as exc:
         raise CollectionError(f"invalid evaluator provenance: {exc}") from exc
-    return {field: row[field] for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS}
+    return {
+        field: row.get(field) for field in EVALUATION_IMMUTABLE_PROVENANCE_FIELDS
+    }
 
 
 def _group_provenance(
@@ -377,6 +381,11 @@ def _validate_open_loop_coverage(
         _require_common_code_provenance(
             group_provenance.values(), f"P4 {environment} groups"
         )
+        shared_empirical_fields = tuple(
+            field
+            for field in EVALUATION_EMPIRICAL_PROVENANCE_FIELDS
+            if field != "depth_adapter_mode"
+        )
         depth_identities = {
             tuple(
                 provenance[field]
@@ -386,6 +395,7 @@ def _validate_open_loop_coverage(
                     "depth_native_contract_sha256",
                     "depth_validation_sha256",
                     "depth_checkpoint_sha256",
+                    *shared_empirical_fields,
                 )
             )
             for key, provenance in group_provenance.items()
@@ -393,8 +403,29 @@ def _validate_open_loop_coverage(
         }
         if len(depth_identities) != 1:
             raise CollectionError(
-                f"P4 depth provenance drift across {environment} depth arms"
+                f"P4 shared depth provenance drift across {environment} depth arms"
             )
+        empirical = any(
+            provenance.get("depth_contract_kind") == "empirical_lossy_cache"
+            for key, provenance in group_provenance.items()
+            if key[1] != "dino_pinned"
+        )
+        expected_modes = (
+            {
+                "dinocular": "proxy_depth_z",
+                "dinocular_zerodepth": "exact_constant_zero_numeric",
+            }
+            if empirical
+            else {"dinocular": None, "dinocular_zerodepth": None}
+        )
+        for key, provenance in group_provenance.items():
+            arm = key[1]
+            if arm == "dino_pinned":
+                continue
+            if provenance.get("depth_adapter_mode") != expected_modes[arm]:
+                raise CollectionError(
+                    f"P4 arm-specific depth adapter provenance differs for {key}"
+                )
         contracts[environment] = {
             **reference,
             "horizons": P4_HORIZONS[environment],

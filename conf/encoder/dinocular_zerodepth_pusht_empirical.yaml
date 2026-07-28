@@ -1,0 +1,25 @@
+_target_: models.dinocular.DinocularEncoder
+name: dinocular_student_dropout_fullpr_pusht_empirical_zero
+backend: df2_dino_rope_convs_de
+factory: DFormerv2_S
+checkpoint_path: ${oc.env:DINOCULAR_STUDENT_WEIGHTS}
+checkpoint_sha256: decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc
+checkpoint_key: student
+state_prefix: module.backbone.
+allowed_outside_prefixes:
+  - module.dino_head.
+  - module.ibot_head.
+allowed_missing_keys: []
+feature_key: x_norm_patchtokens
+input_size: 224
+num_patches: 49
+emb_dim: 512
+frozen: true
+depth_contract_status: complete
+empirical_depth_contract_path: ${oc.env:DINOCULAR_EMPIRICAL_DEPTH_CONTRACT}
+empirical_depth_contract_sha256: ${oc.env:DINOCULAR_EMPIRICAL_DEPTH_CONTRACT_SHA256}
+empirical_runtime_release_path: ${oc.env:DINOCULAR_EMPIRICAL_RUNTIME_RELEASE}
+empirical_runtime_release_sha256: ${oc.env:DINOCULAR_EMPIRICAL_RUNTIME_RELEASE_SHA256}
+depth_input_mode: empirical_lossy_cache_v1
+empirical_zero_intervention: true
+neutralize_depth_at_encoder_input: false

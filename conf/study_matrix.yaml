@@ -4,7 +4,25 @@ code_root: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/code
 container:
   path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/containers/dinocular-wm-p0-20260714.sif
   sha256: 6992ca7aa544434f80cfb375523ae96a1e41656078b5c2d7e89128288c2aecae
-contracts_index: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/depth_contracts.yaml
+contracts_index: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/depth_consumption_index_v2.yaml
+launch_authorization_subject: pusht-empirical-candidate-v1
+authorization_prerequisites:
+  source_release:
+    status: BLOCKED_MISSING_ACCEPTED_ARTIFACT
+    path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/releases/source_release_v1.json
+    sha256: null
+  empirical_implementation_acceptance:
+    status: BLOCKED_MISSING_ACCEPTED_ARTIFACT
+    path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/acceptances/empirical_implementation_acceptance_v1.json
+    sha256: null
+  immutable_execution_acceptance:
+    status: BLOCKED_MISSING_ACCEPTED_ARTIFACT
+    path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/acceptances/immutable_execution_acceptance_v1.json
+    sha256: null
+  immutable_probe_acceptance:
+    status: BLOCKED_MISSING_ACCEPTED_ARTIFACT
+    path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/acceptances/immutable_probe_acceptance_v1.json
+    sha256: null
 producer_decision: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/results/p2a/producer_decision.json
 materialize_from_clean_head: true
 arms:
@@ -97,6 +115,9 @@ source_hash_files:
   - training_resume.py
   - p3_completion.py
   - depth_contract.py
+  - empirical_depth_contract.py
+  - contracts/pusht_mapanything_empirical_v1.json
+  - contracts/depth_consumption_index_v2.yaml
   - datasets/depth_cache.py
   - datasets/pusht_dset.py
   - datasets/wall_dset.py
@@ -113,6 +134,8 @@ source_hash_files:
   - conf/encoder/dino_pinned.yaml
   - conf/encoder/dinocular.yaml
   - conf/encoder/dinocular_zerodepth.yaml
+  - conf/encoder/dinocular_pusht_empirical.yaml
+  - conf/encoder/dinocular_zerodepth_pusht_empirical.yaml
   - conf/env/pusht.yaml
   - conf/env/wall.yaml
   - conf/env/deformable_env.yaml

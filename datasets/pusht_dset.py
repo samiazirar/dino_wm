@@ -7,8 +7,11 @@ from einops import rearrange
 from decord import VideoReader
 from typing import Callable, Optional
 from .traj_dset import TrajDataset, TrajSlicerDataset
-from typing import Optional, Callable, Any
-from .depth_cache import DepthCacheReader, require_complete_depth_arguments
+from .depth_cache import (
+    DepthCacheReader,
+    EmpiricalDepthCacheReader,
+    require_complete_depth_arguments,
+)
 decord.bridge.set_bridge("torch")
 
 # precomputed dataset stats
@@ -163,6 +166,11 @@ def load_pusht_slice_train_val(
     native_depth_contract_sha256=None,
     depth_cache_producer_sha256=None,
     depth_checkpoint_sha256=None,
+    depth_contract_kind=None,
+    empirical_depth_contract_path=None,
+    empirical_depth_contract_sha256=None,
+    empirical_runtime_release_path=None,
+    empirical_runtime_release_sha256=None,
 ):
     depth_values = {
         "depth_cache_dir": depth_cache_dir,
@@ -174,8 +182,47 @@ def load_pusht_slice_train_val(
         "depth_cache_producer_sha256": depth_cache_producer_sha256,
         "depth_checkpoint_sha256": depth_checkpoint_sha256,
     }
+    empirical_values = {
+        "depth_contract_kind": depth_contract_kind,
+        "empirical_depth_contract_path": empirical_depth_contract_path,
+        "empirical_depth_contract_sha256": empirical_depth_contract_sha256,
+        "empirical_runtime_release_path": empirical_runtime_release_path,
+        "empirical_runtime_release_sha256": empirical_runtime_release_sha256,
+        "depth_checkpoint_sha256": depth_checkpoint_sha256,
+    }
+    native_configured = any(
+        value is not None
+        for name, value in depth_values.items()
+        if name != "depth_checkpoint_sha256"
+    )
+    empirical_configured = any(
+        value is not None
+        for value in (
+            depth_contract_kind,
+            empirical_depth_contract_path,
+            empirical_depth_contract_sha256,
+            empirical_runtime_release_path,
+            empirical_runtime_release_sha256,
+        )
+    )
+    if native_configured and empirical_configured:
+        raise ValueError("native and empirical depth-cache configuration are mutually exclusive")
     depth_reader = None
-    if require_complete_depth_arguments(**depth_values):
+    if empirical_configured:
+        if not require_complete_depth_arguments(**empirical_values):
+            raise ValueError("partial empirical depth-cache configuration is forbidden")
+        if depth_contract_kind != "empirical_lossy_cache":
+            raise ValueError("unsupported PushT empirical depth contract kind")
+        depth_reader = EmpiricalDepthCacheReader(
+            environment="pusht",
+            source_root=Path(data_path).resolve().parent,
+            empirical_contract_path=empirical_depth_contract_path,
+            empirical_contract_sha256=empirical_depth_contract_sha256,
+            empirical_runtime_release_path=empirical_runtime_release_path,
+            empirical_runtime_release_sha256=empirical_runtime_release_sha256,
+            expected_checkpoint_sha256=depth_checkpoint_sha256,
+        )
+    elif require_complete_depth_arguments(**depth_values):
         depth_reader = DepthCacheReader(
             environment="pusht",
             source_root=Path(data_path).resolve().parent,
