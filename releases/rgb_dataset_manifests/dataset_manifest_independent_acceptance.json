@@ -1,0 +1,99 @@
+{
+  "artifact_commits": {
+    "integrated_commit": "d0cb33ee64e955e674d458e5d57f2dfbaf5fd407",
+    "origin_commit": "ac5af0456fd63a802db9abb6057daa7c6246e12d",
+    "source_commit": "00e46eb0ded3b8c379ec6ebdb74c8991604f4b8f"
+  },
+  "decision": "INDEPENDENTLY_ACCEPTED",
+  "environments": {
+    "granular": {
+      "file_count": 1002,
+      "manifest_schema": "dino-wm.rgb-dataset-manifest.v1",
+      "manifest_sha256": "8433070978de0eab5199dd112f0caf5552b8bf160c50464a305391926e65dc24",
+      "source_commit": "00e46eb0ded3b8c379ec6ebdb74c8991604f4b8f",
+      "split": {
+        "encoding": "compact-json-array-without-trailing-newline",
+        "train_episode_count": 900,
+        "train_episodes_sha256": "21699c948b6433c97a5e5ad21013fb144456f927dbcd6272c071dc4358f7efa5",
+        "valid_episode_count": 100,
+        "valid_episodes_sha256": "e941cbe71f1a9410d75df7190c284ccbffe8a46533df6bdd203db04b08542838"
+      },
+      "trajectory_episode_count": 1000,
+      "windows": {
+        "train": 17100,
+        "valid": 1900
+      }
+    },
+    "rope": {
+      "file_count": 1002,
+      "manifest_schema": "dino-wm.rgb-dataset-manifest.v1",
+      "manifest_sha256": "f7e51a2a87b9c197a7c4b5416a765f7a5b73ffb67b8dde1d7614e772cfab194f",
+      "source_commit": "00e46eb0ded3b8c379ec6ebdb74c8991604f4b8f",
+      "split": {
+        "encoding": "compact-json-array-without-trailing-newline",
+        "train_episode_count": 900,
+        "train_episodes_sha256": "21699c948b6433c97a5e5ad21013fb144456f927dbcd6272c071dc4358f7efa5",
+        "valid_episode_count": 100,
+        "valid_episodes_sha256": "e941cbe71f1a9410d75df7190c284ccbffe8a46533df6bdd203db04b08542838"
+      },
+      "trajectory_episode_count": 1000,
+      "windows": {
+        "train": 17100,
+        "valid": 1900
+      }
+    },
+    "wall": {
+      "file_count": 1924,
+      "manifest_schema": "dino-wm.rgb-dataset-manifest.v1",
+      "manifest_sha256": "130f28f3e354da64ef36b2bf64d3516722f2aa02d78edd3620cf660c435f3066",
+      "source_commit": "00e46eb0ded3b8c379ec6ebdb74c8991604f4b8f",
+      "split": {
+        "encoding": "compact-json-array-without-trailing-newline",
+        "train_episode_count": 1728,
+        "train_episodes_sha256": "2759a825b9b2c7843cc5e89ad94042bb21b374f0610640e426217886cf8c2b18",
+        "valid_episode_count": 192,
+        "valid_episodes_sha256": "504341188d5c125cc48d84c714847926bb971b4baa780c94421c9f0c238b6942"
+      },
+      "trajectory_episode_count": 1920,
+      "windows": {
+        "train": 70848,
+        "valid": 7872
+      }
+    }
+  },
+  "evidence": {
+    "loader_reproduction": {
+      "all_checks_true": true,
+      "manifest_schema": "dino-wm.rgb-dataset-manifest.v1",
+      "schema": "dino-wm.rgb-dataset-manifest-reproduction.v1",
+      "sha256": "95d5c4ee4e0ebf538cd15fb252022fc02d05da76a7bf73c224017e25cc894c2a",
+      "source_commit": "00e46eb0ded3b8c379ec6ebdb74c8991604f4b8f",
+      "state": "PASS"
+    },
+    "materializer": {
+      "path": "tools/materialize_rgb_dataset_manifest.py",
+      "sha256": "07edbcf9e04ae7452b5d3a805c9aa43d3abd9a2c7c0ec46c5b7c6d00b45a1f07"
+    },
+    "reproducer": {
+      "path": "tools/reproduce_dataset_manifest_loaders.py",
+      "sha256": "071240a743befa20e63705506f021c9debc9d074e08643e8a2baf6503752f605"
+    }
+  },
+  "inspection": {
+    "artifacts": [
+      "releases/rgb_dataset_manifests/dataset_manifest_wall.json",
+      "releases/rgb_dataset_manifests/dataset_manifest_rope.json",
+      "releases/rgb_dataset_manifests/dataset_manifest_granular.json",
+      "releases/rgb_dataset_manifests/dataset_manifest_loader_reproduction.json",
+      "tools/materialize_rgb_dataset_manifest.py",
+      "tools/reproduce_dataset_manifest_loaders.py"
+    ],
+    "mode": "committed_bytes_only",
+    "reran_loaders": false,
+    "reran_materialization": false,
+    "reran_scheduler": false,
+    "reran_tests": false
+  },
+  "schema": "dino-wm.rgb-dataset-manifest-independent-acceptance.v1",
+  "state": "PASS"
+}
