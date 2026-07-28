@@ -176,6 +176,7 @@ NATIVE_ENVIRONMENT_FIELDS = BASE_ENVIRONMENT_FIELDS | frozenset(
         "DINOCULAR_NATIVE_DEPTH_CONTRACT",
         "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256",
         "DINOCULAR_CACHE_PRODUCER_SHA256",
+        "DINOCULAR_CACHE_ENVIRONMENT",
     }
 )
 EMPIRICAL_ENVIRONMENT_FIELDS = BASE_ENVIRONMENT_FIELDS | frozenset(
@@ -195,6 +196,7 @@ NATIVE_DEPTH_INPUT_FIELDS = frozenset(
     {
         "producer",
         "producer_sha256",
+        "environment",
         "cache_dir",
         "cache_manifest_sha256",
         "validation_path",

@@ -22,7 +22,7 @@ ready_index:
   schema: dino-wm-depth-contract-index-v1
   repository_path: contracts/depth_contracts.yaml
   materialized_path: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/depth_contracts.yaml
-  sha256: 3de20169c3b4a82ff247655138f2a693989dcd48beea7c5b954f48893e53e172
+  sha256: 2acaaf058ec5ada5bf90f5c70157a8696721a15624e646210c605f2f0b485269
 accepted_contract:
   checkpoint_input: raw_unnormalized_metric_depth
   normalization_kind: none_raw_metric
