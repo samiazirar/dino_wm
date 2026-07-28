@@ -71,19 +71,19 @@ def _finite(value: Any, label: str) -> float:
 
 @dataclass(frozen=True)
 class CacheToNativeBinding:
+    environment: str
     producer_sha256: str
     wire_format_sha256: str
     wire_quantity: str
     wire_minimum: float
     wire_maximum: float
-    affine_scale: float
-    affine_offset: float
-    clip_minimum: float
-    clip_maximum: float
+    raw_metric_scale: float
+    raw_metric_offset: float
+    raw_metric_minimum: float
+    raw_metric_maximum: float
     interpolation: str
-    invalid_source: str
+    payload_validation: str
     valid_value: float
-    invalid_value: float
 
 
 @dataclass(frozen=True)
@@ -94,13 +94,13 @@ class NativeDepthContract:
     checkpoint_sha256: str
     checkpoint_native_quantity: str
     checkpoint_native_units: str
-    normalization_mean: float
-    normalization_std: float
-    neutral_normalized_depth: float
-    neutral_validity_mask: float
+    normalization_kind: str
+    zero_intervention: str
     cache_bindings: tuple[CacheToNativeBinding, ...]
 
-    def binding_for(self, producer_sha256: str) -> CacheToNativeBinding:
+    def binding_for(
+        self, producer_sha256: str, environment: str
+    ) -> CacheToNativeBinding:
         producer_sha256 = require_sha256(
             producer_sha256, "selected cache producer SHA-256"
         )
@@ -108,10 +108,11 @@ class NativeDepthContract:
             binding
             for binding in self.cache_bindings
             if binding.producer_sha256 == producer_sha256
+            and binding.environment == str(environment)
         ]
         if len(matches) != 1:
             raise DepthContractError(
-                "selected cache producer has no unique cache-wire to checkpoint-native binding"
+                "selected environment/cache producer has no unique wire-to-raw-metric binding"
             )
         return matches[0]
 
@@ -142,12 +143,12 @@ def load_native_depth_contract(
         raise DepthContractError(
             f"unsupported native depth schema: {manifest.get('schema')!r}"
         )
-    if manifest.get("status") != "complete" or manifest.get(
-        "scientific_use_allowed"
-    ) is not True:
-        raise DepthContractError(
-            "native depth contract is not complete and approved for scientific use"
-        )
+    if manifest.get("status") != "complete":
+        raise DepthContractError("native depth contract is incomplete")
+    if manifest.get("self_acceptance_recorded") is not False:
+        raise DepthContractError("native depth contract must not self-accept")
+    if manifest.get("execution_authority_granted") is not False:
+        raise DepthContractError("native depth contract must not grant execution authority")
 
     checkpoint = _object(manifest.get("checkpoint"), "checkpoint")
     checkpoint_sha256 = require_sha256(
@@ -194,23 +195,23 @@ def load_native_depth_contract(
         checkpoint_native.get("normalization"),
         "encoder_input.checkpoint_native.normalization",
     )
-    if normalization.get("kind") != "affine_mean_std":
+    if normalization.get("kind") != "none_raw_metric":
         raise DepthContractError(
-            "encoder_input.normalization.kind must be affine_mean_std"
+            "encoder_input.normalization.kind must be none_raw_metric"
         )
-    mean = _finite(normalization.get("mean"), "encoder_input.normalization.mean")
-    std = _finite(normalization.get("std"), "encoder_input.normalization.std")
-    if std <= 0:
-        raise DepthContractError("encoder_input.normalization.std must be positive")
-    neutral = _object(encoder_input.get("neutral"), "encoder_input.neutral")
-    neutral_depth = _finite(
-        neutral.get("normalized_depth"), "encoder_input.neutral.normalized_depth"
-    )
-    neutral_mask = _finite(
-        neutral.get("validity_mask"), "encoder_input.neutral.validity_mask"
-    )
-    if neutral_mask not in {0.0, 1.0}:
-        raise DepthContractError("neutral validity mask must be exactly 0 or 1")
+    if set(normalization) != {"kind"}:
+        raise DepthContractError(
+            "none_raw_metric normalization must not define mean/std or other transforms"
+        )
+    zero_depth = _object(encoder_input.get("zero_depth"), "encoder_input.zero_depth")
+    if zero_depth.get("payload_validation") != "same_as_informative_depth":
+        raise DepthContractError("zero-depth must validate the informative payload first")
+    if zero_depth.get("intervention") != "exact_numeric_zero_at_encoder_boundary":
+        raise DepthContractError("zero-depth intervention must be exact numeric zero")
+    if zero_depth.get("learned_neutrality_claimed") is not False:
+        raise DepthContractError("zero-depth must not claim learned neutrality")
+    if zero_depth.get("rgb_equivalence_claimed") is not False:
+        raise DepthContractError("zero-depth must not claim RGB equivalence")
 
     bindings_value = encoder_input.get("cache_bindings")
     if not isinstance(bindings_value, list) or not bindings_value:
@@ -219,6 +220,9 @@ def load_native_depth_contract(
     for index, value in enumerate(bindings_value):
         label = f"encoder_input.cache_bindings[{index}]"
         value = _object(value, label)
+        environment = _text(value.get("environment"), f"{label}.environment")
+        if environment not in {"wall", "rope", "granular"}:
+            raise DepthContractError(f"{label}.environment is unsupported")
         producer_sha = require_sha256(
             value.get("producer_sha256"), f"{label}.producer_sha256"
         )
@@ -234,66 +238,66 @@ def load_native_depth_contract(
         if not wire_maximum > wire_minimum:
             raise DepthContractError(f"{label}.wire_range is not increasing")
         affine = _object(
-            value.get("affine_to_checkpoint_native"),
-            f"{label}.affine_to_checkpoint_native",
+            value.get("affine_to_raw_metric"),
+            f"{label}.affine_to_raw_metric",
         )
-        if affine.get("operation") != "checkpoint_native=wire*scale+offset":
+        if affine.get("operation") != "raw_metric=wire*scale+offset":
             raise DepthContractError(f"{label} has an unsupported affine operation")
         if affine.get("output_quantity") != checkpoint_quantity:
             raise DepthContractError(
-                f"{label} affine output does not name checkpoint-native quantity"
+                f"{label} affine output does not name the raw checkpoint quantity"
             )
+        if affine.get("output_units") != checkpoint_units:
+            raise DepthContractError(f"{label} affine output units differ")
         affine_scale = _finite(affine.get("scale"), f"{label}.affine.scale")
         affine_offset = _finite(affine.get("offset"), f"{label}.affine.offset")
-        if affine_scale == 0.0:
-            raise DepthContractError(f"{label}.affine.scale must be nonzero")
-        clipping = _object(value.get("clipping"), f"{label}.clipping")
-        if clipping.get("space") != "checkpoint_native_before_normalization":
-            raise DepthContractError(f"{label}.clipping uses the wrong space")
-        clip_minimum = _finite(clipping.get("minimum"), f"{label}.clipping.minimum")
-        clip_maximum = _finite(clipping.get("maximum"), f"{label}.clipping.maximum")
-        if not clip_maximum > clip_minimum:
-            raise DepthContractError(f"{label}.clipping range is not increasing")
+        if affine_scale <= 0.0:
+            raise DepthContractError(f"{label}.affine.scale must be positive")
+        raw_minimum = affine_offset + wire_minimum * affine_scale
+        raw_maximum = affine_offset + wire_maximum * affine_scale
         interpolation = _text(value.get("interpolation"), f"{label}.interpolation")
         if interpolation not in {
             "bilinear_align_corners_false",
             "identity_224x224",
         }:
             raise DepthContractError(f"{label}.interpolation is unsupported")
-        invalid = _object(value.get("invalid_mask"), f"{label}.invalid_mask")
-        invalid_source = _text(invalid.get("source"), f"{label}.invalid_mask.source")
-        if invalid_source != "all_finite_cache_values":
+        validation = _object(
+            value.get("payload_validation"), f"{label}.payload_validation"
+        )
+        validation_source = _text(
+            validation.get("source"), f"{label}.payload_validation.source"
+        )
+        if validation_source != "reject_nonfinite_then_all_ones":
             raise DepthContractError(
-                f"{label} uses unsupported invalid-mask source {invalid_source!r}"
+                f"{label} uses unsupported payload validation {validation_source!r}"
             )
         valid_value = _finite(
-            invalid.get("valid_value"), f"{label}.invalid_mask.valid_value"
+            validation.get("valid_value"), f"{label}.payload_validation.valid_value"
         )
-        invalid_value = _finite(
-            invalid.get("invalid_value"), f"{label}.invalid_mask.invalid_value"
-        )
-        if valid_value != 1.0 or invalid_value != 0.0:
-            raise DepthContractError(f"{label} validity values must be exact 1 and 0")
+        if valid_value != 1.0:
+            raise DepthContractError(f"{label} valid payload value must be exact 1")
         bindings.append(
             CacheToNativeBinding(
+                environment=environment,
                 producer_sha256=producer_sha,
                 wire_format_sha256=wire_sha,
                 wire_quantity=wire_quantity,
                 wire_minimum=wire_minimum,
                 wire_maximum=wire_maximum,
-                affine_scale=affine_scale,
-                affine_offset=affine_offset,
-                clip_minimum=clip_minimum,
-                clip_maximum=clip_maximum,
+                raw_metric_scale=affine_scale,
+                raw_metric_offset=affine_offset,
+                raw_metric_minimum=raw_minimum,
+                raw_metric_maximum=raw_maximum,
                 interpolation=interpolation,
-                invalid_source=invalid_source,
+                payload_validation=validation_source,
                 valid_value=valid_value,
-                invalid_value=invalid_value,
             )
         )
-    producer_hashes = [binding.producer_sha256 for binding in bindings]
-    if len(set(producer_hashes)) != len(producer_hashes):
-        raise DepthContractError("cache bindings contain duplicate producer hashes")
+    binding_keys = [
+        (binding.environment, binding.producer_sha256) for binding in bindings
+    ]
+    if len(set(binding_keys)) != len(binding_keys):
+        raise DepthContractError("cache bindings contain duplicate environment/producer pairs")
 
     return NativeDepthContract(
         path=artifact,
@@ -302,9 +306,7 @@ def load_native_depth_contract(
         checkpoint_sha256=checkpoint_sha256,
         checkpoint_native_quantity=checkpoint_quantity,
         checkpoint_native_units=checkpoint_units,
-        normalization_mean=mean,
-        normalization_std=std,
-        neutral_normalized_depth=neutral_depth,
-        neutral_validity_mask=neutral_mask,
+        normalization_kind="none_raw_metric",
+        zero_intervention="exact_numeric_zero_at_encoder_boundary",
         cache_bindings=tuple(bindings),
     )

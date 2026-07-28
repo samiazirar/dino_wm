@@ -299,6 +299,7 @@ class DinocularEncoder(nn.Module):
         native_depth_contract_path: Optional[str] = None,
         native_depth_contract_sha256: Optional[str] = None,
         selected_cache_producer_sha256: Optional[str] = None,
+        selected_cache_environment: Optional[str] = None,
         empirical_depth_contract_path: Optional[str] = None,
         empirical_depth_contract_sha256: Optional[str] = None,
         empirical_runtime_release_path: Optional[str] = None,
@@ -417,6 +418,7 @@ class DinocularEncoder(nn.Module):
             self.empirical_runtime_release_sha256 = empirical_release.sha256
             self.empirical_runtime_mode = empirical_release.mode
             self.selected_cache_producer_sha256 = empirical.producer_sha256
+            self.selected_cache_environment = "pusht"
             self.native_depth_contract_path = None
             self.native_depth_contract_sha256 = None
         elif native_depth_contract_path is not None:
@@ -444,27 +446,30 @@ class DinocularEncoder(nn.Module):
                     f"native contract/checkpoint configuration mismatch: {mismatches}"
                 )
             self.native_depth_contract = native
-            if selected_cache_producer_sha256 is None:
+            if selected_cache_producer_sha256 is None or selected_cache_environment is None:
                 raise DepthContractError(
-                    "native depth contract requires selected_cache_producer_sha256"
+                    "native depth contract requires selected producer and environment"
                 )
-            self.cache_binding = native.binding_for(selected_cache_producer_sha256)
+            self.cache_binding = native.binding_for(
+                selected_cache_producer_sha256, selected_cache_environment
+            )
             self.depth_contract = dict(native.manifest)
             self.depth_contract_status = "complete"
-            depth_mean = native.normalization_mean
-            depth_std = native.normalization_std
+            depth_mean = 0.0
+            depth_std = 1.0
             self.native_depth_contract_path = str(native.path)
             self.native_depth_contract_sha256 = native.sha256
             self.selected_cache_producer_sha256 = self.cache_binding.producer_sha256
+            self.selected_cache_environment = self.cache_binding.environment
             self.empirical_depth_contract_path = None
             self.empirical_depth_contract_sha256 = None
             self.empirical_runtime_release_path = None
             self.empirical_runtime_release_sha256 = None
             self.empirical_runtime_mode = None
         else:
-            if selected_cache_producer_sha256 is not None:
+            if selected_cache_producer_sha256 is not None or selected_cache_environment is not None:
                 raise DepthContractError(
-                    "selected cache producer requires a native depth contract"
+                    "selected cache producer/environment requires a native depth contract"
                 )
             if self.depth_input_mode != "native_v1" or self.empirical_zero_intervention:
                 raise DepthContractError("empirical mode requires an explicit empirical contract")
@@ -476,6 +481,7 @@ class DinocularEncoder(nn.Module):
             self.empirical_runtime_release_sha256 = None
             self.empirical_runtime_mode = None
             self.selected_cache_producer_sha256 = None
+            self.selected_cache_environment = None
         if self.neutralize_depth_at_encoder_input and self.native_depth_contract is None:
             raise DepthContractError(
                 "neutral depth requires an explicit complete native depth contract"
@@ -547,12 +553,11 @@ class DinocularEncoder(nn.Module):
             assert self.cache_binding is not None
             cache_minimum = self.cache_binding.wire_minimum
             cache_maximum = self.cache_binding.wire_maximum
-            neutral_depth = self.native_depth_contract.neutral_normalized_depth
-            neutral_mask = self.native_depth_contract.neutral_validity_mask
-            affine_scale = self.cache_binding.affine_scale
-            affine_offset = self.cache_binding.affine_offset
-            clip_minimum = self.cache_binding.clip_minimum
-            clip_maximum = self.cache_binding.clip_maximum
+            neutral_depth, neutral_mask = 0.0, 1.0
+            affine_scale = self.cache_binding.raw_metric_scale
+            affine_offset = self.cache_binding.raw_metric_offset
+            clip_minimum = self.cache_binding.raw_metric_minimum
+            clip_maximum = self.cache_binding.raw_metric_maximum
             self.depth_interpolation = self.cache_binding.interpolation
         self.register_buffer(
             "depth_cache_range",
@@ -575,7 +580,7 @@ class DinocularEncoder(nn.Module):
             persistent=False,
         )
         self.register_buffer(
-            "checkpoint_native_clip_range",
+            "raw_metric_range",
             torch.tensor([clip_minimum, clip_maximum], dtype=torch.float32),
             persistent=False,
         )
@@ -597,6 +602,7 @@ class DinocularEncoder(nn.Module):
             ),
             "empirical_zero_intervention": self.empirical_zero_intervention,
             "selected_cache_producer_sha256": self.selected_cache_producer_sha256,
+            "selected_cache_environment": self.selected_cache_environment,
         }
 
         self.load_audit = load_backbone_checkpoint(
@@ -655,10 +661,13 @@ class DinocularEncoder(nn.Module):
                 device=depth.device, dtype=depth.dtype
             )
             depth = depth * affine[0] + affine[1]
-            clip_range = self.checkpoint_native_clip_range.to(
+            raw_range = self.raw_metric_range.to(
                 device=depth.device, dtype=depth.dtype
             )
-            depth = torch.clamp(depth, min=clip_range[0], max=clip_range[1])
+            self._validate_finite_range(
+                depth, float(raw_range[0]), float(raw_range[1]), "Raw metric depth"
+            )
+            return depth
         mean = self.depth_mean.to(device=depth.device, dtype=depth.dtype)
         std = self.depth_std.to(device=depth.device, dtype=depth.dtype)
         return (depth - mean) / std
@@ -668,7 +677,7 @@ class DinocularEncoder(nn.Module):
         depth: torch.Tensor,
         depth_validity_mask: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply native normalization and the final-boundary neutral intervention."""
+        """Decode raw metric depth, then apply the exact zero boundary intervention."""
 
         if depth.ndim == 3:
             depth = depth.unsqueeze(1)
@@ -732,24 +741,16 @@ class DinocularEncoder(nn.Module):
         ):
             raise ValueError("depth validity mask must contain only exact 0 and 1")
 
-        normalized = self.preprocess_depth(depth)
-        neutral_depth = self.neutral_normalized_depth.to(
-            device=normalized.device, dtype=normalized.dtype
-        )
-        normalized = torch.where(
-            depth_validity_mask.to(dtype=torch.bool), normalized, neutral_depth
-        )
-        effective_mask = depth_validity_mask
-        if self.neutralize_depth_at_encoder_input:
-            normalized = torch.zeros_like(normalized) + neutral_depth
-            neutral_mask = self.neutral_validity_mask.to(
-                device=effective_mask.device, dtype=effective_mask.dtype
+        if self.native_depth_contract is not None and not torch.all(
+            depth_validity_mask == 1.0
+        ):
+            raise ValueError(
+                "native cache payload validation must reject invalid values before the encoder"
             )
-            effective_mask = torch.zeros_like(effective_mask) + neutral_mask
-        normalized = torch.where(
-            effective_mask.to(dtype=torch.bool), normalized, neutral_depth
-        )
-        return normalized, effective_mask
+        raw_metric_depth = self.preprocess_depth(depth)
+        if self.neutralize_depth_at_encoder_input:
+            raw_metric_depth = torch.zeros_like(raw_metric_depth)
+        return raw_metric_depth, depth_validity_mask
 
     def register_encoder_boundary_hook(
         self,

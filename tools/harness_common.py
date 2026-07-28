@@ -1381,6 +1381,7 @@ def depth_inputs(
         raise HarnessError(f"cache {producer_name}/{environment} is absent")
     native = index["native_contract"]
     return {
+        "environment": environment,
         "producer": producer_name,
         "producer_sha256": producer["producer_sha256"],
         "cache_dir": cache["cache_dir"],

@@ -225,6 +225,7 @@ def _depth_overrides(card: dict[str, Any], inputs: Mapping[str, Any]) -> None:
                 "DINOCULAR_NATIVE_DEPTH_CONTRACT": values["native_contract_path"],
                 "DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256": values["native_contract_sha256"],
                 "DINOCULAR_CACHE_PRODUCER_SHA256": values["producer_sha256"],
+                "DINOCULAR_CACHE_ENVIRONMENT": values["environment"],
             }
         )
     card["depth_inputs"] = values

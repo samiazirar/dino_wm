@@ -139,7 +139,9 @@ class DepthCacheReader:
             raise DepthCacheError(
                 "cache producer differs from the run's selected producer SHA-256"
             )
-        self.binding = self.native_contract.binding_for(producer_sha256)
+        self.binding = self.native_contract.binding_for(
+            producer_sha256, self.environment
+        )
         wire_sha256 = sha256_bytes(canonical_json_bytes(wire))
         if wire_sha256 != self.binding.wire_format_sha256:
             raise DepthCacheError(

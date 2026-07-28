@@ -26,17 +26,20 @@ build_dinocular_container_env() {
                     : "${DINOCULAR_NATIVE_DEPTH_CONTRACT:?DINOcular native contract is required}"
                     : "${DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256:?DINOcular native contract hash is required}"
                     : "${DINOCULAR_CACHE_PRODUCER_SHA256:?DINOcular producer hash is required}"
+                    : "${DINOCULAR_CACHE_ENVIRONMENT:?DINOcular cache environment is required}"
                     DINOCULAR_CONTAINER_ENV+=(
                         --env DINOCULAR_STUDENT_WEIGHTS="$DINOCULAR_STUDENT_WEIGHTS"
                         --env DINOCULAR_NATIVE_DEPTH_CONTRACT="$DINOCULAR_NATIVE_DEPTH_CONTRACT"
                         --env DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256="$DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256"
                         --env DINOCULAR_CACHE_PRODUCER_SHA256="$DINOCULAR_CACHE_PRODUCER_SHA256"
+                        --env DINOCULAR_CACHE_ENVIRONMENT="$DINOCULAR_CACHE_ENVIRONMENT"
                     )
                     ;;
                 empirical_lossy_cache_v1)
                     if [ -n "${DINOCULAR_NATIVE_DEPTH_CONTRACT:-}" ] || \
                        [ -n "${DINOCULAR_NATIVE_DEPTH_CONTRACT_SHA256:-}" ] || \
-                       [ -n "${DINOCULAR_CACHE_PRODUCER_SHA256:-}" ]; then
+                       [ -n "${DINOCULAR_CACHE_PRODUCER_SHA256:-}" ] || \
+                       [ -n "${DINOCULAR_CACHE_ENVIRONMENT:-}" ]; then
                         printf 'empirical depth mode must not include native depth inputs\n' >&2
                         return 2
                     fi
