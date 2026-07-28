@@ -536,7 +536,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                 _write_immutable(card_path, text)
                 card_file_sha256 = _sha256(card_path)
                 wrapper_path = (
-                    output_path.parent.parent / "direct_planning_no_submit.sbatch"
+                    output_path.parent / "direct_planning_no_submit.sbatch"
                 )
                 _write_immutable(
                     wrapper_path,
