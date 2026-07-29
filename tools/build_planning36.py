@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import pickle
 import stat
+import subprocess
 import textwrap
 from typing import Any, Mapping, Sequence
 
@@ -117,6 +118,39 @@ def _evaluation_card(path: Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise MaterializationError(f"expected YAML object at {path}")
     return value
+
+
+def _planning_runtime(root: Path, source_commit: str) -> tuple[Path, str]:
+    root = root.resolve()
+    if (
+        not root.is_dir()
+        or len(source_commit) != 40
+        or any(character not in "0123456789abcdef" for character in source_commit)
+    ):
+        raise MaterializationError("planning runtime root or source commit is invalid")
+
+    def git(*arguments: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise MaterializationError(
+                f"cannot verify planning runtime checkout {root}"
+            ) from exc
+        return result.stdout.strip()
+
+    if Path(git("rev-parse", "--show-toplevel")).resolve() != root:
+        raise MaterializationError("planning runtime root is not the checkout root")
+    if git("rev-parse", "HEAD") != source_commit:
+        raise MaterializationError("planning runtime checkout commit differs")
+    if git("status", "--porcelain=v1", "--untracked-files=normal"):
+        raise MaterializationError("planning runtime checkout is not clean")
+    return root, source_commit
 
 
 def _write_immutable(
@@ -439,6 +473,9 @@ PY
 
 
 def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
+    planning_code_root, planning_source_commit = _planning_runtime(
+        args.planning_code_root, args.planning_source_commit
+    )
     evaluation = _validated_launch(args.evaluation_launch_manifest)
     launch_root = args.evaluation_launch_manifest.parent
     target_root = args.target_root or launch_root / "manifests"
@@ -579,8 +616,8 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         ),
                         "launch_policy": "refuse_unless_all_evidence_exists_and_hash_binds",
                     },
-                    "source_commit": evaluation_card.get("source_commit"),
-                    "code_root": evaluation_card.get("code_root"),
+                    "source_commit": planning_source_commit,
+                    "code_root": str(planning_code_root),
                     "container": evaluation_card.get("container"),
                     "runtime": {
                         "checkpoint_loader": {
@@ -709,6 +746,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluation-launch-manifest", type=Path, required=True)
     parser.add_argument("--out-root", type=Path, required=True)
     parser.add_argument("--target-root", type=Path)
+    parser.add_argument("--planning-code-root", type=Path, required=True)
+    parser.add_argument("--planning-source-commit", required=True)
     return parser
 
 
