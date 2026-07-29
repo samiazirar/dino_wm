@@ -558,8 +558,8 @@ def planning_main(cfg_dict):
         )
         model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
 
-    # use dummy vector env for wall and deformable envs
-    if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
+    # Wall remains serial; PyFlex requires one deformable environment per process.
+    if model_cfg.env.name == "wall":
         from env.serial_vector_env import SerialVectorEnv
         env = SerialVectorEnv(
             [
@@ -570,6 +570,10 @@ def planning_main(cfg_dict):
             ]
         )
     else:
+        if model_cfg.env.name == "deformable_env":
+            import multiprocessing
+
+            multiprocessing.set_start_method("spawn", force=True)
         env = SubprocVectorEnv(
             [
                 lambda: gym.make(
