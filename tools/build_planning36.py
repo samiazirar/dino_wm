@@ -490,7 +490,7 @@ build_dinocular_container_env "$ARM"
     --env DINOV2_REPO="$DINOV2_REPO" \\
     --env DINOV2_VITS14_WEIGHTS="$DINOV2_VITS14_WEIGHTS" \\
     "${{DINOCULAR_CONTAINER_ENV[@]}}" \\
-    --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \\
+    --env PYTHONPATH="$CODE_ROOT:/opt/dinov2:/opt/AdaptiGraph/PyFleX/bindings/build" \\
     "$SIF" python - <<'PY'
 {resolver}
 PY
