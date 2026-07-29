@@ -1,0 +1,29 @@
+{
+  "controller_hook": "/usr/bin/python3 /home/user/azirar/dinocular-wm-worktrees/wandb-campaign-tracking/tools/wandb_campaign.py --state /tmp/dinocular_resume_controller_state.json --event-file /tmp/dinocular_resume_controller.event --project dinocular-wm-campaign --receipt reports/wandb_campaign_receipt.json",
+  "entity": "rlp_uni_bonn",
+  "idempotency_check": {
+    "imported_records_on_repeat": 0,
+    "live_records_on_repeat": 0,
+    "status": "success"
+  },
+  "lineages": [
+    {
+      "cluster": "marvin",
+      "gpu_model": "not_recorded",
+      "gpu_request": "1",
+      "imported_records": 1812,
+      "lineage": "granular/dinocular/seed3",
+      "live_records": 0,
+      "partition": "sgpu_short",
+      "run_id": "dc-176b170c0f2391492014",
+      "run_url": "https://wandb.ai/rlp_uni_bonn/dinocular-wm-campaign/runs/dc-176b170c0f2391492014",
+      "status": "success"
+    }
+  ],
+  "project": "dinocular-wm-campaign",
+  "project_identity": "rlp_uni_bonn/dinocular-wm-campaign",
+  "project_url": "https://wandb.ai/rlp_uni_bonn/dinocular-wm-campaign",
+  "schema": "dinocular.wandb-campaign.v1",
+  "status": "success",
+  "timestamp": "2026-07-29T05:12:20.709720+00:00"
+}
