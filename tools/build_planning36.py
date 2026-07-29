@@ -664,6 +664,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         f"plan_{environment}.yaml"
                         if environment in ("pusht", "wall")
                         else "plan.yaml",
+                        f"hydra.run.dir={output_path.parent}",
                         "planner=mpc_cem",
                         "goal_source=file",
                         f"+goal_file_path={target_path}",
