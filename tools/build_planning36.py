@@ -666,7 +666,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         else "plan.yaml",
                         "planner=mpc_cem",
                         "goal_source=file",
-                        f"goal_file_path={target_path}",
+                        f"+goal_file_path={target_path}",
                         f"n_evals={len(target_ids)}",
                         f"seed={SELECTION_SEED}",
                         "goal_H=5",
