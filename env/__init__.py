@@ -1,5 +1,6 @@
 from gym.envs.registration import register
-from .pointmaze import U_MAZE
+
+U_MAZE = "#####\\#GOO#\\###O#\\#OOO#\\#####"
 register(
     id="pusht",
     entry_point="env.pusht.pusht_wrapper:PushTWrapper",

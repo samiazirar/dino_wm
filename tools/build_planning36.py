@@ -370,8 +370,33 @@ def _wrapper(card_path: Path, card: Mapping[str, Any], card_file_sha256: str) ->
         text = json.dumps(binding, indent=2, sort_keys=True) + "\n"
         binding_path.parent.mkdir(parents=True, exist_ok=True)
         if binding_path.exists():
-            if binding_path.read_text(encoding="utf-8") != text:
+            previous = object_at(binding_path, "runtime evidence binding")
+            previous_card = previous.get("planning_card")
+            previous_evidence = {
+                key: value
+                for key, value in previous.items()
+                if key != "planning_card"
+            }
+            current_evidence = {
+                key: value
+                for key, value in binding.items()
+                if key != "planning_card"
+            }
+            if (
+                not isinstance(previous_card, dict)
+                or previous_card.get("path") != str(card_path)
+                or previous_evidence != current_evidence
+            ):
                 fail("immutable runtime evidence binding differs")
+            if previous != binding:
+                temporary = binding_path.with_name(
+                    f".{binding_path.name}.tmp.{os.getpid()}"
+                )
+                with temporary.open("x", encoding="utf-8") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, binding_path)
         else:
             temporary = binding_path.with_name(
                 f".{binding_path.name}.tmp.{os.getpid()}"
