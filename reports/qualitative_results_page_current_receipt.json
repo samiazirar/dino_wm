@@ -1,0 +1,18 @@
+{
+  "complete_triplet_count": 0,
+  "output_directory": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/qualitative-results-page",
+  "output_directory_created": false,
+  "result_bundle": {
+    "path": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/open-loop-result-artifacts/result_bundle_manifest.json",
+    "state": "MISSING"
+  },
+  "status": "WAITING_FOR_MATCHED_QUALITATIVE_TRIPLET",
+  "waiting_on": [
+    "pusht/s1: qualitative evaluation output for pusht/dino_pinned/s1 is absent: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/lineages/seed1/pusht/dino_pinned/run/qualitative/qualitative_evaluation.json",
+    "pusht/s2: qualitative evaluation output for pusht/dino_pinned/s2 is absent: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/lineages/seed2/pusht/dino_pinned/run/qualitative/qualitative_evaluation.json",
+    "pusht/s3: qualitative evaluation output for pusht/dino_pinned/s3 is absent: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/lineages/seed3/pusht/dino_pinned/run/qualitative/qualitative_evaluation.json",
+    "wall/s1: qualitative evaluation output for wall/dino_pinned/s1 is absent: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/lineages/seed1/wall/dino_pinned/run/qualitative/qualitative_evaluation.json",
+    "wall/s2: qualitative evaluation output for wall/dino_pinned/s2 is absent: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/lineages/seed2/wall/dino_pinned/run/qualitative/qualitative_evaluation.json",
+    "wall/s3: qualitative evaluation output for wall/dino_pinned/s3 is absent: /lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/lineages/seed3/wall/dino_pinned/run/qualitative/qualitative_evaluation.json"
+  ]
+}
