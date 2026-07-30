@@ -5,12 +5,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --output=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/depth-validity/depth-validity-20260730b/logs/job.%j.out
-#SBATCH --error=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/depth-validity/depth-validity-20260730b/logs/job.%j.err
+#SBATCH --output=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/depth-validity/depth-validity-20260730c/logs/job.%j.out
+#SBATCH --error=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/depth-validity/depth-validity-20260730c/logs/job.%j.err
 set -euo pipefail
 
 PROJECT=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm
-ROOT=$PROJECT/outputs/depth-validity/depth-validity-20260730b
+ROOT=$PROJECT/outputs/depth-validity/depth-validity-20260730c
 CODE_ROOT=$PROJECT/outputs/campaign-seed1/native-seed1-20260728c/code/dino_wm
 SIF=$PROJECT/containers/dinocular-wm-p0-20260714.sif
 TOOL=$ROOT/code/measure_consumed_depth.py

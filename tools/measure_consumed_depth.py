@@ -141,6 +141,8 @@ def aggregate_depth(boundary: torch.Tensor, mask: torch.Tensor, groups: list[sli
     return {
         "finite_min": float(flat.min()),
         "finite_max": float(flat.max()),
+        "fraction_at_observed_minimum": float((flat == flat.min()).double().mean()),
+        "fraction_at_observed_maximum": float((flat == flat.max()).double().mean()),
         "quantiles": {
             f"{q:g}": float(torch.quantile(flat, q)) for q in QUANTILES
         },
@@ -155,6 +157,7 @@ def aggregate_depth(boundary: torch.Tensor, mask: torch.Tensor, groups: list[sli
             "min": float(spatial_var.min()),
             "median": float(spatial_var.median()),
             "max": float(spatial_var.max()),
+            "values_in_sample_identity_order": [float(value) for value in spatial_var],
         },
         "sequence_pixelwise_temporal_variance": {
             "mean": float(torch.stack(temporal).mean()),
