@@ -22,6 +22,10 @@ from training_resume import atomic_write_json, file_sha256, json_sha256
 TIMING_SCHEMA = "dino-wm.strict-p2-timing.v1"
 RUN_CARD_SCHEMA = "dino-wm.strict-p2-run-card.v1"
 IMMUTABLE_RUN_CARD_SCHEMA = "dino-wm-run-card-v1"
+LEGACY_IMMUTABLE_RUN_CARD_SCHEMA = "dino-wm.legacy-run-card.v1"
+IMMUTABLE_RUN_CARD_SCHEMAS = frozenset(
+    {IMMUTABLE_RUN_CARD_SCHEMA, LEGACY_IMMUTABLE_RUN_CARD_SCHEMA}
+)
 DINOCULAR_ARMS = frozenset({"dinocular", "dinocular_zerodepth"})
 LOCKED_ARMS = frozenset({"dino_pinned", *DINOCULAR_ARMS})
 LOCKED_FRAMESKIPS = {"pusht": 5, "wall": 5, "rope": 1, "granular": 1}
@@ -295,7 +299,7 @@ class StrictTimingWindow:
             raise RuntimeError("immutable timing run-card content hash differs")
         timing = card.get("timing")
         if (
-            card.get("schema") != IMMUTABLE_RUN_CARD_SCHEMA
+            card.get("schema") not in IMMUTABLE_RUN_CARD_SCHEMAS
             or card.get("kind") != "p2-timing"
             or card.get("gate_mode") != "timing"
             or card.get("arm") != self.arm
