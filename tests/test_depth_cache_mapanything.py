@@ -100,11 +100,15 @@ def test_raw_wire_validation_uses_shared_float16_limit(
     }
     (cache_dir / "manifest.json").write_text(json.dumps(manifest))
 
+    constructed_batch_sizes: list[int] = []
+    inference_batch_sizes: list[int] = []
+
     class FakeProducer:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
+        def __init__(self, *_args, batch_size: int, **_kwargs) -> None:
+            constructed_batch_sizes.append(batch_size)
 
         def infer_independent_frames(self, frames, **_kwargs):
+            inference_batch_sizes.append(_kwargs["batch_size"])
             return [np.ones((224, 224), dtype=np.float32) for _ in frames], []
 
     FakeProducer.provenance = provenance
@@ -135,11 +139,14 @@ def test_raw_wire_validation_uses_shared_float16_limit(
             cache_root=tmp_path / "cache",
             mapanything_root=tmp_path / "mapanything",
             model_dir=tmp_path / "model",
-            batch_size=1,
+            batch_size=8,
             spot_frames=1,
             max_trajectories=None,
             environment="pusht",
         )
+
+    assert constructed_batch_sizes == [1]
+    assert inference_batch_sizes == [8, 1]
 
 
 def test_shards_are_deterministic_balanced_and_trajectory_atomic() -> None:

@@ -940,9 +940,10 @@ def validate_cache(
     # proven generation-process ordering and avoids retaining both mappings while
     # the 4.9 GB checkpoint and DINOv2 backbone are materialized.
     print(json.dumps({"event": "producer_gate_start", "utc": utc_now()}), flush=True)
-    producer = MapAnythingFramewiseProducer(
-        mapanything_root, model_dir, batch_size=batch_size
-    )
+    # The completed cache was produced through the pinned literal-singleton
+    # configuration.  Keep that identity intact, then exercise the frozen
+    # validation batch size explicitly below against singleton recomputation.
+    producer = MapAnythingFramewiseProducer(mapanything_root, model_dir, batch_size=1)
     if producer_identity(manifest.get("producer", {})) != producer_identity(
         producer.provenance
     ):
