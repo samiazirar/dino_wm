@@ -437,6 +437,18 @@ def test_normalization_is_global_clip_without_inversion() -> None:
     assert gray[100, 100] < gray[120, 120]
 
 
+def test_raw_depth_wire_allows_float16_range_only() -> None:
+    depth = np.full((224, 224), 2.5, dtype=np.float32)
+    with pytest.raises(ContractError, match=r"outside \[0,1.0\]"):
+        encode_depth_value(depth)
+    payload = encode_depth_value(
+        depth, wire_maximum=float(np.finfo(np.dtype("<f2")).max)
+    )
+    decoded = decode_depth_value(payload)
+    assert decoded.dtype.str == "<f2"
+    assert np.array_equal(decoded, np.asarray(depth, dtype="<f2"))
+
+
 def _fake_torch_hub(tmp_path: Path):
     repo = tmp_path / "facebookresearch_dinov2_main"
     repo.mkdir()

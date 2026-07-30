@@ -683,13 +683,20 @@ def _require_lmdb_zstd() -> tuple[Any, Any]:
     return lmdb, zstandard
 
 
-def encode_depth_value(gray: np.ndarray, compressor: Any | None = None) -> bytes:
+def encode_depth_value(
+    gray: np.ndarray,
+    compressor: Any | None = None,
+    *,
+    wire_maximum: float = 1.0,
+) -> bytes:
     _, zstandard = _require_lmdb_zstd()
     value = np.asarray(gray)
     if value.shape != OUTPUT_SHAPE or not np.isfinite(value).all():
         raise ContractError(f"cannot encode invalid depth {value.shape}")
-    if value.size and (value.min() < 0 or value.max() > 1):
-        raise ContractError("cannot encode depth outside [0,1]")
+    if not math.isfinite(wire_maximum) or wire_maximum <= 0:
+        raise ContractError("wire maximum must be finite and positive")
+    if value.size and (value.min() < 0 or value.max() > wire_maximum):
+        raise ContractError(f"cannot encode depth outside [0,{wire_maximum}]")
     wire = np.asarray(value, dtype=WIRE_DTYPE, order="C")
     if wire.dtype.str != "<f2":
         raise ContractError(
@@ -894,7 +901,15 @@ def build_environment_cache(
                         gray = normalize_depth(cropped_metric[frame], lo, hi)
                     inserted = transaction.put(
                         physical_key.encode("ascii"),
-                        encode_depth_value(gray, compressor),
+                        encode_depth_value(
+                            gray,
+                            compressor,
+                            wire_maximum=(
+                                float(np.finfo(WIRE_DTYPE).max)
+                                if raw_depth_wire
+                                else 1.0
+                            ),
+                        ),
                         overwrite=False,
                     )
                     if not inserted:
