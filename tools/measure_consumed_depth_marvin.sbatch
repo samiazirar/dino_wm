@@ -5,8 +5,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
 #SBATCH --output=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/depth-validity/depth-validity-20260730a/logs/job.%j.out
 #SBATCH --error=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/depth-validity/depth-validity-20260730a/logs/job.%j.err
 set -euo pipefail
