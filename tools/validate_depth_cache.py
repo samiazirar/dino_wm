@@ -307,6 +307,9 @@ def validate_key_set_and_range(
     database: Any,
     environment: str,
     trajectories: Sequence[Trajectory],
+    *,
+    wire_minimum: float = 0.0,
+    wire_maximum: float = 1.0,
 ) -> dict[str, Any]:
     _, zstandard = _require_lmdb_zstd()
     decompressor = zstandard.ZstdDecompressor()
@@ -344,12 +347,20 @@ def validate_key_set_and_range(
                 raise ContractError(
                     f"wire decode differs for {physical_key}: {depth.shape}/{depth.dtype.str}"
                 )
-            if not np.isfinite(depth).all() or np.any(depth < 0) or np.any(depth > 1):
+            if (
+                not np.isfinite(depth).all()
+                or np.any(depth < wire_minimum)
+                or np.any(depth > wire_maximum)
+            ):
                 raise ContractError(f"non-finite/out-of-range depth at {physical_key}")
             if physical_key in sampled_set:
                 bits = depth.reshape(-1).view(np.uint16)
                 histogram += np.bincount(bits, minlength=1 << 16).astype(np.uint64)
-                saturated += int(np.count_nonzero((depth == 0) | (depth == 1)))
+                saturated += int(
+                    np.count_nonzero(
+                        (depth == wire_minimum) | (depth == wire_maximum)
+                    )
+                )
                 sampled_values += depth.size
                 low_std_maps += int(float(np.std(depth, dtype=np.float64)) <= 1e-4)
     q10 = _histogram_quantile(histogram, 0.10)

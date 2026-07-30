@@ -784,9 +784,13 @@ def build_environment_cache(
         )
     if not trajectories:
         raise ContractError(f"cannot build empty {environment} cache")
-    lo, hi = float(calibration["lo"]), float(calibration["hi"])
-    if not hi > lo + 1e-6:
-        raise ContractError("cache build received invalid global calibration")
+    raw_depth_wire = calibration.get("wire_mode") == "raw_depth_z_float16"
+    if raw_depth_wire:
+        lo = hi = None
+    else:
+        lo, hi = float(calibration["lo"]), float(calibration["hi"])
+        if not hi > lo + 1e-6:
+            raise ContractError("cache build received invalid global calibration")
 
     output_root.mkdir(parents=True, exist_ok=True)
     destination = output_root / f"{environment}.lmdb"
@@ -870,7 +874,19 @@ def build_environment_cache(
             normalize_compress_commit_started = time.monotonic()
             with database.begin(write=True) as transaction:
                 for frame, physical_key in enumerate(ordered_keys):
-                    gray = normalize_depth(cropped_metric[frame], lo, hi)
+                    if raw_depth_wire:
+                        gray = np.asarray(cropped_metric[frame], dtype=np.float32)
+                        if (
+                            not np.isfinite(gray).all()
+                            or np.any(gray < 0)
+                            or np.any(gray > np.finfo(WIRE_DTYPE).max)
+                        ):
+                            raise ContractError(
+                                f"{physical_key}: raw depth_z cannot be represented "
+                                "losslessly enough by the declared float16 wire"
+                            )
+                    else:
+                        gray = normalize_depth(cropped_metric[frame], lo, hi)
                     inserted = transaction.put(
                         physical_key.encode("ascii"),
                         encode_depth_value(gray, compressor),
@@ -941,7 +957,11 @@ def build_environment_cache(
             "compressor": "zstd",
             "compressor_level": ZSTD_LEVEL,
             "map_size": MAP_SIZE,
-            "normalization": "clip((depth_m-lo)/(hi-lo),0,1)",
+            "normalization": (
+                "none_raw_depth_z_float16"
+                if raw_depth_wire
+                else "clip((depth_m-lo)/(hi-lo),0,1)"
+            ),
             "inverted": False,
         },
         "tool_sha256": tool_sha256 or sha256_file(Path(__file__)),

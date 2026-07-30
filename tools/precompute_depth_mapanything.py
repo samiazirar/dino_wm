@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and validate the PushT MapAnything frame-wise depth cache.
+"""Build and validate frame-wise MapAnything depth caches.
 
 The recovered student evidence identifies MapAnything, singleton image inference,
 and ``pred["depth_z"]`` but not the original checkpoint snapshot or invocation.
@@ -106,6 +106,7 @@ CALIBRATION_FRAMES = 128
 RECOMPUTE_MAX_ABS = 1e-3
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_SHARD_COUNT = 8
+MAPANYTHING_ENVIRONMENTS = ("pusht", "rope", "granular")
 
 
 def _git_output(root: Path, *args: str) -> str:
@@ -242,6 +243,14 @@ class MapAnythingFramewiseProducer:
                 "confidence_percentile": 10.0,
                 "output": "pred['depth_z']",
                 "raw_units": "metric_Z_depth_as_declared_by_MapAnything",
+                "scientific_quantity": (
+                    "later_pinned_mapanything_depth_z_proxy_not_lossless_original_training_input"
+                ),
+                "invalid_policy": (
+                    "reject_nonfinite_or_negative_then_preserve_exact_zeros_written_by_"
+                    "upstream_apply_mask_true_non_ambiguous_and_edge_mask"
+                ),
+                "custom_hole_fill": "forbidden",
                 "prefix_invariance": "not_applicable_framewise",
                 "goal_path": "same_singleton_frame_path",
                 "pth_float32_rgb_quantization": "round_half_up_to_uint8_for_png_contract",
@@ -311,6 +320,12 @@ class MapAnythingFramewiseProducer:
             mask = output.get("mask")
             if mask is not None:
                 valid = mask.detach().cpu().numpy()[..., 0].astype(bool)
+                if valid.shape != raw.shape:
+                    raise ContractError("MapAnything mask shape differs from depth_z")
+                if np.any(raw[~valid] != 0):
+                    raise ContractError(
+                        "MapAnything invalid-mask pixels are not exact upstream zeros"
+                    )
                 invalid_pixels += int(valid.size - np.count_nonzero(valid))
                 total_pixels += int(valid.size)
             else:
@@ -374,7 +389,7 @@ def select_training_calibration_keys(
     ]
     if len(candidates) < count:
         raise ContractError(
-            f"PushT training split has {len(candidates)} frames, fewer than {count} calibration keys"
+            f"training split has {len(candidates)} frames, fewer than {count} calibration keys"
         )
     candidates.sort(key=lambda key: (sha256_bytes(key.encode()), key))
     return candidates[:count]
@@ -390,12 +405,16 @@ def _trajectory_by_key(trajectories: Sequence[Trajectory]) -> dict[str, Trajecto
 def generate_training_calibration(
     trajectories: Sequence[Trajectory], producer: MapAnythingFramewiseProducer
 ) -> dict[str, Any]:
+    environments = {trajectory.environment for trajectory in trajectories}
+    if len(environments) != 1:
+        raise ContractError("calibration trajectories must belong to one environment")
+    selected_environment = next(iter(environments))
     keys = select_training_calibration_keys(trajectories)
     lookup = _trajectory_by_key(trajectories)
     grouped: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for key in keys:
         environment, split, episode, frame = key.split("/")
-        if environment != "pusht" or split != "train":
+        if environment != selected_environment or split != "train":
             raise ContractError(f"non-training calibration key selected: {key}")
         grouped[f"{split}/{episode}"].append((key, int(frame)))
 
@@ -418,8 +437,9 @@ def generate_training_calibration(
         raise ContractError("calibration inference did not reproduce the selected key set")
     lo, hi = compute_global_calibration(cropped_by_key[key] for key in keys)
     return {
-        "scope": "pusht_training_only",
-        "selected_environments": ["pusht"],
+        "scope": "environment_training_only_mapanything_proxy",
+        "environment": selected_environment,
+        "selected_environments": [selected_environment],
         "selection": "128_smallest_sha256_training_frame_keys",
         "per_environment": CALIBRATION_FRAMES,
         "frame_key_format": "<env>/<split>/<episode:05d>/<frame:06d>",
@@ -431,7 +451,7 @@ def generate_training_calibration(
         "percentile_method": "numpy.linear",
         "lo": lo,
         "hi": hi,
-        "raw_units": "MapAnything_pred_depth_z_metric",
+        "raw_units": "later_pinned_MapAnything_pred_depth_z_declared_metric_proxy",
         "wire_adaptation": "clip((depth_z-lo)/(hi-lo),0,1)",
         "inference_metadata": metadata,
     }
@@ -462,7 +482,11 @@ def load_training_calibration(
     return calibration
 
 
-def _expected_wire() -> dict[str, Any]:
+def _expected_wire(calibration: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    raw_depth_wire = (
+        calibration is not None
+        and calibration.get("wire_mode") == "raw_depth_z_float16"
+    )
     return {
         "physical_key": "<split>/<episode:05d>/<frame:06d>",
         "dtype": "<f2",
@@ -471,7 +495,11 @@ def _expected_wire() -> dict[str, Any]:
         "compressor": "zstd",
         "compressor_level": ZSTD_LEVEL,
         "map_size": MAP_SIZE,
-        "normalization": "clip((depth_m-lo)/(hi-lo),0,1)",
+        "normalization": (
+            "none_raw_depth_z_float16"
+            if raw_depth_wire
+            else "clip((depth_m-lo)/(hi-lo),0,1)"
+        ),
         "inverted": False,
     }
 
@@ -525,6 +553,10 @@ def plan_trajectory_shards(
 def _shard_plan_document(
     trajectories: Sequence[Trajectory], shard_count: int
 ) -> dict[str, Any]:
+    environments = {trajectory.environment for trajectory in trajectories}
+    if len(environments) != 1:
+        raise ContractError("shard plan trajectories must belong to one environment")
+    environment = next(iter(environments))
     shards = plan_trajectory_shards(trajectories, shard_count)
     assignments = [
         {
@@ -538,7 +570,7 @@ def _shard_plan_document(
     ]
     core = {
         "schema": "dinocular-mapanything-shard-plan-v1",
-        "environment": "pusht",
+        "environment": environment,
         "shard_count": shard_count,
         "full_trajectory_count": len(trajectories),
         "full_frame_count": sum(item.frame_count for item in trajectories),
@@ -558,6 +590,7 @@ def merge_shards(
     output_root: Path,
     shard_count: int,
     rebuild: bool,
+    environment: str = "pusht",
 ) -> dict[str, Any]:
     """Verify immutable trajectory shards and merge them without recomputation."""
 
@@ -566,7 +599,7 @@ def merge_shards(
     except Exception as exc:
         raise ContractError("LMDB is required") from exc
 
-    trajectories = enumerate_environment(root, "pusht")
+    trajectories = enumerate_environment(root, environment)
     shard_plan = _shard_plan_document(trajectories, shard_count)
     planned_shards = plan_trajectory_shards(trajectories, shard_count)
     shard_manifests: list[dict[str, Any]] = []
@@ -578,7 +611,7 @@ def merge_shards(
     try:
         for index, expected in enumerate(planned_shards):
             shard_root = shards_root / f"shard-{index:03d}-of-{shard_count:03d}"
-            cache_dir = shard_root / "pusht.lmdb"
+            cache_dir = shard_root / f"{environment}.lmdb"
             manifest_path = cache_dir / "manifest.json"
             if not manifest_path.is_file():
                 raise ContractError(f"missing shard manifest {manifest_path}")
@@ -597,8 +630,9 @@ def merge_shards(
             )
             checks = {
                 "schema": manifest.get("schema") == "dinocular-depth-cache-v1",
-                "environment": manifest.get("environment") == "pusht",
-                "wire_format": manifest.get("wire_format") == _expected_wire(),
+                "environment": manifest.get("environment") == environment,
+                "wire_format": manifest.get("wire_format")
+                == _expected_wire(manifest.get("calibration")),
                 "trajectory_count": manifest.get("trajectory_count") == len(expected),
                 "frame_count": manifest.get("frame_count")
                 == sum(trajectory.frame_count for trajectory in expected),
@@ -656,7 +690,7 @@ def merge_shards(
 
         if common_producer is None or common_calibration is None:
             raise ContractError("no shard metadata was loaded")
-        destination = output_root / "pusht.lmdb"
+        destination = output_root / f"{environment}.lmdb"
         if destination.exists() and not rebuild:
             manifest_path = destination / "manifest.json"
             if not manifest_path.is_file():
@@ -667,7 +701,8 @@ def merge_shards(
                 and existing.get("trajectory_count") == len(trajectories)
                 and existing.get("frame_count")
                 == sum(trajectory.frame_count for trajectory in trajectories)
-                and existing.get("wire_format") == _expected_wire()
+                and existing.get("wire_format")
+                == _expected_wire(existing.get("calibration"))
                 and existing.get("calibration") == common_calibration
                 and producer_identity(existing.get("producer", {}))
                 == producer_identity(common_producer)
@@ -683,7 +718,7 @@ def merge_shards(
 
         output_root.mkdir(parents=True, exist_ok=True)
         manifest_id = str(uuid.uuid4())
-        building = output_root / f".pusht.lmdb.building-{manifest_id}"
+        building = output_root / f".{environment}.lmdb.building-{manifest_id}"
         building.mkdir(parents=True)
         database = lmdb.open(
             str(building),
@@ -758,13 +793,13 @@ def merge_shards(
             "schema": "dinocular-depth-cache-v1",
             "manifest_id": manifest_id,
             "created_utc": utc_now(),
-            "environment": "pusht",
+            "environment": environment,
             "trajectory_count": len(trajectories),
             "frame_count": total_frames,
             "source_index_sha256": _source_index_sha256(trajectories),
             "producer": common_producer,
             "calibration": common_calibration,
-            "wire_format": _expected_wire(),
+            "wire_format": _expected_wire(common_calibration),
             "tool_sha256": sha256_file(Path(__file__)),
             "trajectories": merged_records,
             "build_metrics": {
@@ -797,7 +832,7 @@ def merge_shards(
         atomic_write_json(building / "manifest.json", manifest)
         if destination.exists():
             quarantine = output_root / (
-                "pusht.lmdb.quarantine-"
+                f"{environment}.lmdb.quarantine-"
                 f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
                 f"{uuid.uuid4().hex[:8]}"
             )
@@ -836,6 +871,7 @@ def validate_cache(
     batch_size: int,
     spot_frames: int,
     max_trajectories: int | None,
+    environment: str,
 ) -> dict[str, Any]:
     try:
         import lmdb
@@ -844,33 +880,51 @@ def validate_cache(
         raise ContractError("LMDB and zstandard are required") from exc
     if spot_frames <= 0:
         raise ContractError("spot recomputation frame count must be positive")
-    all_trajectories = enumerate_environment(root, "pusht")
+    all_trajectories = enumerate_environment(root, environment)
     trajectories = all_trajectories
     if max_trajectories is not None:
         if max_trajectories <= 0:
             raise ContractError("--max-trajectories must be positive")
         trajectories = all_trajectories[:max_trajectories]
-    cache_dir = cache_root / "pusht.lmdb"
+    cache_dir = cache_root / f"{environment}.lmdb"
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.is_file():
         raise ContractError(f"missing complete cache manifest {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("schema") != "dinocular-depth-cache-v1":
-        raise ContractError("cache schema differs from the DA3 cache schema")
-    if manifest.get("wire_format") != _expected_wire():
-        raise ContractError("MapAnything LMDB wire format differs from DA3")
+        raise ContractError("cache schema differs from the shared cache schema")
+    if manifest.get("environment") != environment:
+        raise ContractError("cache environment differs")
+    calibration = manifest.get("calibration", {})
+    if manifest.get("wire_format") != _expected_wire(calibration):
+        raise ContractError("MapAnything LMDB wire format differs from its contract")
     if manifest.get("trajectory_count") != len(trajectories):
-        raise ContractError("manifest trajectory count differs from PushT")
+        raise ContractError("manifest trajectory count differs from dataset")
     expected_frames = sum(trajectory.frame_count for trajectory in trajectories)
     if manifest.get("frame_count") != expected_frames:
-        raise ContractError("manifest frame count differs from PushT")
+        raise ContractError("manifest frame count differs from dataset")
     if manifest.get("source_index_sha256") != _source_index_sha256(trajectories):
-        raise ContractError("manifest source index differs from PushT")
-    calibration = manifest.get("calibration", {})
-    if calibration.get("keys") != select_training_calibration_keys(all_trajectories):
-        raise ContractError("manifest does not use the fixed PushT training-only calibration")
-    if any("/valid/" in key for key in calibration["keys"]):
-        raise ContractError("validation leakage in calibration key set")
+        raise ContractError("manifest source index differs from dataset")
+    raw_depth_wire = calibration.get("wire_mode") == "raw_depth_z_float16"
+    if raw_depth_wire:
+        if calibration != {
+            "wire_mode": "raw_depth_z_float16",
+            "checkpoint_compatibility": (
+                "original_student_loader_np_load_float32_without_depth_normalization"
+            ),
+            "quantity": "later_pinned_MapAnything_pred_depth_z_proxy",
+            "units": "declared_metric_Z_depth_nonphysical_later_checkpoint_proxy",
+            "invalid_policy": (
+                "reject_nonfinite_or_negative_preserve_upstream_masked_exact_zero"
+            ),
+            "calibration": "none",
+        }:
+            raise ContractError("raw depth_z compatibility declaration differs")
+    else:
+        if calibration.get("keys") != select_training_calibration_keys(all_trajectories):
+            raise ContractError("manifest does not use the fixed training-only calibration")
+        if any("/valid/" in key for key in calibration["keys"]):
+            raise ContractError("validation leakage in calibration key set")
 
     records = manifest.get("trajectories")
     if not isinstance(records, list) or len(records) != len(trajectories):
@@ -909,11 +963,17 @@ def validate_cache(
         raise ContractError(
             f"independent batch versus singleton error {batch_max_abs} exceeds {RECOMPUTE_MAX_ABS}"
         )
-    lo, hi = float(calibration["lo"]), float(calibration["hi"])
-    recomputed = [
-        normalize_depth(crop_metric_depth(raw, decoded_hw), lo, hi)
-        for raw, decoded_hw in zip(raw_depths, decoded_sizes)
-    ]
+    if raw_depth_wire:
+        recomputed = [
+            crop_metric_depth(raw, decoded_hw)
+            for raw, decoded_hw in zip(raw_depths, decoded_sizes)
+        ]
+    else:
+        lo, hi = float(calibration["lo"]), float(calibration["hi"])
+        recomputed = [
+            normalize_depth(crop_metric_depth(raw, decoded_hw), lo, hi)
+            for raw, decoded_hw in zip(raw_depths, decoded_sizes)
+        ]
     del producer
     print(
         json.dumps(
@@ -937,10 +997,18 @@ def validate_cache(
         max_readers=32,
     )
     try:
-        range_gate = validate_key_set_and_range(database, "pusht", trajectories)
+        range_gate = validate_key_set_and_range(
+            database,
+            environment,
+            trajectories,
+            wire_minimum=0.0,
+            wire_maximum=(
+                float(np.finfo(WIRE_DTYPE).max) if raw_depth_wire else 1.0
+            ),
+        )
         temporal_gate = validate_temporal_gate(
             database,
-            "pusht",
+            environment,
             trajectories,
             record_by_key,
             enforce=False,
@@ -978,7 +1046,8 @@ def validate_cache(
     )
 
     return {
-        "schema": "dinocular-mapanything-cache-validation-v1",
+        "schema": "dinocular-mapanything-cache-validation-v2",
+        "environment": environment,
         "created_utc": utc_now(),
         "state": "PASS",
         "manifest_id": manifest["manifest_id"],
@@ -993,14 +1062,22 @@ def validate_cache(
             "wire_format": manifest["wire_format"],
             "producer_agnostic_fields_equal_to_da3": True,
         },
-        "calibration_gate": {
-            "scope": calibration["scope"],
-            "keys": len(calibration["keys"]),
-            "keys_sha256": calibration["keys_sha256"],
-            "validation_keys": 0,
-            "lo": calibration["lo"],
-            "hi": calibration["hi"],
-        },
+        "calibration_gate": (
+            {
+                "state": "NOT_APPLICABLE_RAW_CHECKPOINT_INPUT",
+                "wire_mode": calibration["wire_mode"],
+                "calibration": "none",
+            }
+            if raw_depth_wire
+            else {
+                "scope": calibration["scope"],
+                "keys": len(calibration["keys"]),
+                "keys_sha256": calibration["keys_sha256"],
+                "validation_keys": 0,
+                "lo": calibration["lo"],
+                "hi": calibration["hi"],
+            }
+        ),
         "range_gate": range_gate,
         "spot_recomputation_gate": {
             "frames": spot_frames,
@@ -1025,7 +1102,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build = subparsers.add_parser("build", help="build the PushT cache")
+    build = subparsers.add_parser("build", help="build one MapAnything cache")
+    build.add_argument("--environment", choices=MAPANYTHING_ENVIRONMENTS, default="pusht")
     build.add_argument("--root", type=Path, required=True)
     build.add_argument("--out", type=Path, required=True)
     build.add_argument("--model-dir", type=Path, required=True)
@@ -1037,19 +1115,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     build.add_argument("--calibration-json", type=Path)
     build.add_argument("--rebuild", action="store_true")
 
-    plan = subparsers.add_parser("plan", help="plan deterministic PushT shards")
+    plan = subparsers.add_parser("plan", help="plan deterministic cache shards")
+    plan.add_argument("--environment", choices=MAPANYTHING_ENVIRONMENTS, default="pusht")
     plan.add_argument("--root", type=Path, required=True)
     plan.add_argument("--shard-count", type=int, default=DEFAULT_SHARD_COUNT)
     plan.add_argument("--json", type=Path)
 
-    merge = subparsers.add_parser("merge", help="verify and merge PushT shards")
+    merge = subparsers.add_parser("merge", help="verify and merge cache shards")
+    merge.add_argument("--environment", choices=MAPANYTHING_ENVIRONMENTS, default="pusht")
     merge.add_argument("--root", type=Path, required=True)
     merge.add_argument("--shards-root", type=Path, required=True)
     merge.add_argument("--out", type=Path, required=True)
     merge.add_argument("--shard-count", type=int, default=DEFAULT_SHARD_COUNT)
     merge.add_argument("--rebuild", action="store_true")
 
-    validate = subparsers.add_parser("validate", help="validate a complete PushT cache")
+    validate = subparsers.add_parser("validate", help="validate a complete cache")
+    validate.add_argument("--environment", choices=MAPANYTHING_ENVIRONMENTS, default="pusht")
     validate.add_argument("--root", type=Path, required=True)
     validate.add_argument("--cache", type=Path, required=True)
     validate.add_argument("--model-dir", type=Path, required=True)
@@ -1066,7 +1147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.command == "plan":
         report = _shard_plan_document(
-            enumerate_environment(args.root, "pusht"), args.shard_count
+            enumerate_environment(args.root, args.environment), args.shard_count
         )
         if args.json:
             atomic_write_json(args.json, report)
@@ -1078,6 +1159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             shards_root=args.shards_root,
             output_root=args.out,
             shard_count=args.shard_count,
+            environment=args.environment,
             rebuild=args.rebuild,
         )
         print(
@@ -1105,13 +1187,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             batch_size=args.batch_size,
             spot_frames=args.spot_frames,
             max_trajectories=args.max_trajectories,
+            environment=args.environment,
         )
         if args.json:
             atomic_write_json(args.json, report)
         print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
         return 0
 
-    trajectories = enumerate_environment(args.root, "pusht")
+    trajectories = enumerate_environment(args.root, args.environment)
     if (args.shard_count is None) != (args.shard_index is None):
         raise ContractError("--shard-count and --shard-index must be supplied together")
     if args.max_trajectories is not None and args.shard_count is not None:
@@ -1122,10 +1205,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.mapanything_root, args.model_dir, batch_size=args.batch_size
     )
     calibration_path = args.calibration_json or args.out / "calibration.json"
-    if calibration_path.is_file():
-        calibration = load_training_calibration(
-            calibration_path, trajectories, producer
-        )
+    if args.environment in {"rope", "granular"}:
+        if args.calibration_json is not None:
+            raise ContractError(
+                "Rope/Granular checkpoint-compatible raw depth_z forbids calibration"
+            )
+        calibration = {
+            "wire_mode": "raw_depth_z_float16",
+            "checkpoint_compatibility": (
+                "original_student_loader_np_load_float32_without_depth_normalization"
+            ),
+            "quantity": "later_pinned_MapAnything_pred_depth_z_proxy",
+            "units": "declared_metric_Z_depth_nonphysical_later_checkpoint_proxy",
+            "invalid_policy": (
+                "reject_nonfinite_or_negative_preserve_upstream_masked_exact_zero"
+            ),
+            "calibration": "none",
+        }
+    elif calibration_path.is_file():
+        calibration = load_training_calibration(calibration_path, trajectories, producer)
     else:
         calibration = generate_training_calibration(trajectories, producer)
         atomic_write_json(
@@ -1148,7 +1246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )[args.shard_index]
     manifest = build_environment_cache(
         output_root=args.out,
-        environment="pusht",
+        environment=args.environment,
         trajectories=selected_trajectories,
         calibration=calibration,
         producer=producer,
