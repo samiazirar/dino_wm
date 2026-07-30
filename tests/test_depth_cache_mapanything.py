@@ -151,6 +151,68 @@ def test_raw_wire_validation_uses_shared_float16_limit(
     )
 
 
+def test_requested_grouping_keeps_mapanything_model_calls_singleton() -> None:
+    from tools import precompute_depth_mapanything as module
+
+    class FakeCuda:
+        @staticmethod
+        def reset_peak_memory_stats() -> None:
+            pass
+
+        @staticmethod
+        def max_memory_allocated() -> int:
+            return 0
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTensor:
+        def __init__(self, array: np.ndarray) -> None:
+            self.array = array
+
+        def detach(self):
+            return self
+
+        def float(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self) -> np.ndarray:
+            return self.array
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.frame_counts: list[int] = []
+
+        def infer(self, views, **_kwargs):
+            frame_count = int(views[0]["img"].shape[0])
+            self.frame_counts.append(frame_count)
+            return [
+                {
+                    "depth_z": FakeTensor(
+                        np.ones((frame_count, 3, 4, 1), dtype=np.float32)
+                    )
+                }
+            ]
+
+    producer = object.__new__(module.MapAnythingFramewiseProducer)
+    producer._torch = FakeTorch()
+    producer._model = FakeModel()
+    producer._preprocess_batch = lambda frames: {"img": frames}
+
+    depths, metadata = producer.infer_independent_frames(
+        np.zeros((3, 5, 6, 3), dtype=np.uint8), batch_size=2
+    )
+
+    assert producer._model.frame_counts == [1, 1, 1]
+    assert len(depths) == 3
+    assert metadata["batch_size"] == 2
+    assert metadata["model_batch_size"] == 1
+    assert metadata["batch_semantics"] == "literal_singleton_only"
+
+
 def test_shards_are_deterministic_balanced_and_trajectory_atomic() -> None:
     trajectories = [
         _trajectory("train", episode, frames)

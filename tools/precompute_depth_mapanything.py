@@ -295,57 +295,63 @@ class MapAnythingFramewiseProducer:
         self._torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
         for start in range(0, len(frames), effective_batch):
-            batch = frames[start : start + effective_batch]
-            view = self._preprocess_batch(batch)
-            outputs = self._model.infer(
-                [view],
-                memory_efficient_inference=False,
-                use_amp=True,
-                amp_dtype="bf16",
-                apply_mask=True,
-                mask_edges=True,
-                edge_normal_threshold=5.0,
-                edge_depth_threshold=0.03,
-                apply_confidence_mask=False,
-                confidence_percentile=10.0,
-            )
-            if len(outputs) != 1:
-                raise ContractError(
-                    f"singleton-view MapAnything returned {len(outputs)} view outputs"
+            # MapAnything interprets its tensor batch axis as views of one scene,
+            # not unrelated image samples.  Keep the requested grouping only for
+            # deterministic scheduling; every model invocation is a literal
+            # one-frame view so cache bytes retain their singleton semantics.
+            for frame in frames[start : start + effective_batch]:
+                view = self._preprocess_batch(frame[None, ...])
+                outputs = self._model.infer(
+                    [view],
+                    memory_efficient_inference=False,
+                    use_amp=True,
+                    amp_dtype="bf16",
+                    apply_mask=True,
+                    mask_edges=True,
+                    edge_normal_threshold=5.0,
+                    edge_depth_threshold=0.03,
+                    apply_confidence_mask=False,
+                    confidence_percentile=10.0,
                 )
-            output = outputs[0]
-            raw = output["depth_z"].detach().float().cpu().numpy()[..., 0]
-            if raw.shape[0] != len(batch) or raw.ndim != 3:
-                raise ContractError(f"MapAnything depth has invalid shape {raw.shape}")
-            if not np.isfinite(raw).all() or np.any(raw < 0):
-                raise ContractError("MapAnything returned non-finite or negative Z-depth")
-            mask = output.get("mask")
-            if mask is not None:
-                valid = mask.detach().cpu().numpy()[..., 0].astype(bool)
-                if valid.shape != raw.shape:
-                    raise ContractError("MapAnything mask shape differs from depth_z")
-                if np.any(raw[~valid] != 0):
+                if len(outputs) != 1:
                     raise ContractError(
-                        "MapAnything invalid-mask pixels are not exact upstream zeros"
+                        f"singleton-view MapAnything returned {len(outputs)} view outputs"
                     )
-                invalid_pixels += int(valid.size - np.count_nonzero(valid))
-                total_pixels += int(valid.size)
-            else:
-                total_pixels += int(raw.size)
-            scales = output.get("metric_scaling_factor")
-            if scales is not None:
-                metric_scales.extend(
-                    float(value)
-                    for value in scales.detach().float().cpu().reshape(-1).tolist()
-                )
-            processed_shapes.add((int(raw.shape[1]), int(raw.shape[2])))
-            depths.extend(np.asarray(value, dtype=np.float32).copy() for value in raw)
+                output = outputs[0]
+                raw = output["depth_z"].detach().float().cpu().numpy()[..., 0]
+                if raw.shape[0] != 1 or raw.ndim != 3:
+                    raise ContractError(f"MapAnything depth has invalid shape {raw.shape}")
+                if not np.isfinite(raw).all() or np.any(raw < 0):
+                    raise ContractError("MapAnything returned non-finite or negative Z-depth")
+                mask = output.get("mask")
+                if mask is not None:
+                    valid = mask.detach().cpu().numpy()[..., 0].astype(bool)
+                    if valid.shape != raw.shape:
+                        raise ContractError("MapAnything mask shape differs from depth_z")
+                    if np.any(raw[~valid] != 0):
+                        raise ContractError(
+                            "MapAnything invalid-mask pixels are not exact upstream zeros"
+                        )
+                    invalid_pixels += int(valid.size - np.count_nonzero(valid))
+                    total_pixels += int(valid.size)
+                else:
+                    total_pixels += int(raw.size)
+                scales = output.get("metric_scaling_factor")
+                if scales is not None:
+                    metric_scales.extend(
+                        float(value)
+                        for value in scales.detach().float().cpu().reshape(-1).tolist()
+                    )
+                processed_shapes.add((int(raw.shape[1]), int(raw.shape[2])))
+                depths.extend(np.asarray(value, dtype=np.float32).copy() for value in raw)
 
         elapsed = time.monotonic() - started
         metadata = {
             "framewise": True,
             "input_frames": len(frames),
             "batch_size": effective_batch,
+            "model_batch_size": 1,
+            "batch_semantics": "literal_singleton_only",
             "inference_seconds": elapsed,
             "inference_frames_per_second": len(frames) / elapsed if elapsed else None,
             "processed_depth_hw": [list(shape) for shape in sorted(processed_shapes)],
