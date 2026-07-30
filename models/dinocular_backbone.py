@@ -47,7 +47,7 @@ BACKEND_REGISTRY: Dict[str, BackendSpec] = {
     "df2_dino_rope_convs_de": BackendSpec(
         module=_target,
         factories={"DFormerv2_S": 512, "DFormerv2_B": 512, "DFormerv2_L": 640},
-        output_kind="dino_feature_dict",
+        output_kind="dino_encoder_feature_map",
         checkpoint_policy="exact",
     ),
 }
@@ -101,6 +101,19 @@ def extract_features(
         if feature_map.ndim != 4:
             raise RuntimeError(
                 "Stock DFormerv2 forward_encoder must return [B,C,H,W], "
+                f"got {tuple(feature_map.shape)}"
+            )
+        patch_tokens = feature_map.flatten(2).transpose(1, 2).contiguous()
+        return {
+            "x_norm_patchtokens": patch_tokens,
+            "x_norm_clstoken": patch_tokens.mean(dim=1),
+        }
+
+    if spec.output_kind == "dino_encoder_feature_map":
+        feature_map, _intermediate_maps = backbone.forward_encoder(rgb, depth)
+        if feature_map.ndim != 4:
+            raise RuntimeError(
+                "DF2_DINO_rope_convs_de.forward_encoder must return [B,C,H,W], "
                 f"got {tuple(feature_map.shape)}"
             )
         patch_tokens = feature_map.flatten(2).transpose(1, 2).contiguous()
