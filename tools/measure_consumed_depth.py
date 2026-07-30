@@ -71,11 +71,28 @@ def fixed_frames(count: int) -> list[int]:
 
 
 def rgb_for(source: Path, frames: list[int]) -> tuple[torch.Tensor, dict[str, Any]]:
-    reader = VideoReader(str(source), num_threads=1)
-    raw = reader.get_batch(frames).asnumpy()
-    if raw.ndim != 4 or raw.shape[-1] != 3:
-        raise RuntimeError(f"unexpected RGB video shape {raw.shape} for {source}")
-    rgb = torch.from_numpy(raw).permute(0, 3, 1, 2).float() / 255.0
+    if source.suffix == ".pth":
+        stored = torch.load(source, map_location="cpu")
+        raw = stored[frames]
+        decoded_frames = len(stored)
+        if raw.ndim != 4:
+            raise RuntimeError(f"unexpected RGB tensor shape {tuple(raw.shape)} for {source}")
+        if raw.shape[1] == 3:
+            rgb = raw.float() / 255.0
+            stored_layout = "TCHW"
+        elif raw.shape[-1] == 3:
+            rgb = raw.permute(0, 3, 1, 2).float() / 255.0
+            stored_layout = "THWC"
+        else:
+            raise RuntimeError(f"RGB channel axis is ambiguous in {tuple(raw.shape)} for {source}")
+    else:
+        reader = VideoReader(str(source), num_threads=1)
+        raw = reader.get_batch(frames).asnumpy()
+        if raw.ndim != 4 or raw.shape[-1] != 3:
+            raise RuntimeError(f"unexpected RGB video shape {raw.shape} for {source}")
+        rgb = torch.from_numpy(raw).permute(0, 3, 1, 2).float() / 255.0
+        decoded_frames = len(reader)
+        stored_layout = "THWC video"
     source_shape = list(rgb.shape[-2:])
     # torchvision Resize(int) followed by CenterCrop(224), exactly as default_transform.
     h, w = source_shape
@@ -87,7 +104,8 @@ def rgb_for(source: Path, frames: list[int]) -> tuple[torch.Tensor, dict[str, An
     rgb = rgb[:, :, top : top + 224, left : left + 224]
     rgb = (rgb - 0.5) / 0.5
     return rgb, {
-        "decoded_video_frames": len(reader),
+        "decoded_source_frames": decoded_frames,
+        "stored_layout": stored_layout,
         "decoded_source_hw": source_shape,
         "resize_hw": list(resized),
         "center_crop_tlbr": [top, left, top + 224, left + 224],
