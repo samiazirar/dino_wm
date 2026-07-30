@@ -1,0 +1,473 @@
+{
+  "artifacts": {
+    "paths": {
+      "dinocular_weights": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/checkpoints/dinov2_depthembed_dropout_fullpr.pth",
+      "dinov2_repo": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/code/dinov2",
+      "dinov2_weights": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/models/dinov2_vits14_pretrain.pth",
+      "native_depth_contract": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/native_depth_contract_v1.json"
+    },
+    "sha256": {
+      "dinocular_weights": "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc",
+      "dinov2_weights": "b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9",
+      "native_depth_contract": "a558b4fee9eb380a40de138e372a12f0796ef9af6b5eef9901f6e7d3853b3d4b"
+    }
+  },
+  "command": {
+    "argv": [
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/encoder-capacity-fairness/20260730d/run/profile_encoder_capacity.py",
+      "--code-root",
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-seed1/native-seed1-20260728c/code/dino_wm",
+      "--dinov2-repo",
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/code/dinov2",
+      "--dinov2-weights",
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/models/dinov2_vits14_pretrain.pth",
+      "--dinocular-weights",
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/checkpoints/dinov2_depthembed_dropout_fullpr.pth",
+      "--native-depth-contract",
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/manifests/native_depth_contract_v1.json",
+      "--native-depth-contract-sha256",
+      "a558b4fee9eb380a40de138e372a12f0796ef9af6b5eef9901f6e7d3853b3d4b",
+      "--cache-producer-sha256",
+      "4d15ed3f04ea318d72599d1d84653d57ae93ec81deb638272d7b823c7fdf5f54",
+      "--cache-environment",
+      "wall",
+      "--output",
+      "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/encoder-capacity-fairness/20260730d/run/profile.json",
+      "--warmup",
+      "20",
+      "--repeats",
+      "100",
+      "--batch-size",
+      "1"
+    ],
+    "batch_size": 1,
+    "dtype": "torch.float32",
+    "forward_only": true
+  },
+  "comparison": {
+    "fairness_tolerance": {
+      "applies_to": [
+        "loaded encoder parameters",
+        "module-hook active encoder parameters",
+        "profiler-supported encoder FLOPs",
+        "task-specific total trainable downstream parameters"
+      ],
+      "justification": "A symmetric 1.5x capacity band is strict enough to reject a different model-size tier while allowing token/width trade-offs between unlike frozen architectures.",
+      "latency_treatment": "Same-GPU latency is an implementation-efficiency diagnostic, not a representational-capacity pass criterion. It is reported because it determines operational cost; supported FLOPs disclose arithmetic coverage and unsupported operators explicitly.",
+      "lower_ratio": 0.6666666666666666,
+      "upper_ratio": 1.5
+    },
+    "ratios": {
+      "active_encoder_parameters_dinocular_over_dino": 1.1661997229621506,
+      "downstream_parameters_dinocular_over_dino": {
+        "granular": 1.3127183710204344,
+        "pusht": 1.3049766533020322,
+        "rope": 1.3127183710204344,
+        "wall": 1.312716961277859
+      },
+      "loaded_encoder_parameters_dinocular_over_dino": 1.1661823213176878,
+      "median_latency_dinocular_over_dino": 7.56736006488959,
+      "supported_flops_dinocular_over_dino": 1.2132977147287984
+    },
+    "reason": "All loaded/active encoder, supported-FLOP, and task-specific downstream-parameter ratios fall inside the declared 2/3-to-1.5 capacity band. The large latency ratio is retained as an operational cost difference and does not add trainable capacity.",
+    "supplemental_rgb_comparator": null,
+    "supplemental_training_cells": 0,
+    "verdict": "DEFEND_DINOV2_VITS14_PRIMARY_BASELINE"
+  },
+  "dinocular_load_audit": {
+    "allowed_checkpoint_only": [],
+    "allowed_model_only": [],
+    "allowed_outside_prefix": [
+      "module.dino_head.last_layer.weight_g",
+      "module.dino_head.last_layer.weight_v",
+      "module.dino_head.mlp.0.bias",
+      "module.dino_head.mlp.0.weight",
+      "module.dino_head.mlp.2.bias",
+      "module.dino_head.mlp.2.weight",
+      "module.dino_head.mlp.4.bias",
+      "module.dino_head.mlp.4.weight",
+      "module.ibot_head.last_layer.weight_g",
+      "module.ibot_head.last_layer.weight_v",
+      "module.ibot_head.mlp.0.bias",
+      "module.ibot_head.mlp.0.weight",
+      "module.ibot_head.mlp.2.bias",
+      "module.ibot_head.mlp.2.weight",
+      "module.ibot_head.mlp.4.bias",
+      "module.ibot_head.mlp.4.weight"
+    ],
+    "checkpoint_key": "student",
+    "checkpoint_sha256": "decc7c73283bf46f66dbbedec6fb065ad0a943fb2ddb1c49317fafb0319f5dcc",
+    "checkpoint_tensor_count": 893,
+    "loaded_tensor_count": 877,
+    "state_prefix": "module.backbone."
+  },
+  "downstream": {
+    "granular": {
+      "dino_pinned": {
+        "action_encoder_parameters": 50,
+        "action_input_dim": 4,
+        "num_hist": 1,
+        "predictor_input_width": 404,
+        "predictor_parameters": 19964232,
+        "proprio_input_dim": 1,
+        "proprio_state_encoder_parameters": 20,
+        "total_trainable_downstream_parameters": 19964302,
+        "visual_tokens_per_frame": 196,
+        "visual_width": 384
+      },
+      "dinocular": {
+        "action_encoder_parameters": 50,
+        "action_input_dim": 4,
+        "num_hist": 1,
+        "predictor_input_width": 532,
+        "predictor_parameters": 26207436,
+        "proprio_input_dim": 1,
+        "proprio_state_encoder_parameters": 20,
+        "total_trainable_downstream_parameters": 26207506,
+        "visual_tokens_per_frame": 49,
+        "visual_width": 512
+      }
+    },
+    "pusht": {
+      "dino_pinned": {
+        "action_encoder_parameters": 110,
+        "action_input_dim": 10,
+        "num_hist": 3,
+        "predictor_input_width": 404,
+        "predictor_parameters": 20122600,
+        "proprio_input_dim": 4,
+        "proprio_state_encoder_parameters": 50,
+        "total_trainable_downstream_parameters": 20122760,
+        "visual_tokens_per_frame": 196,
+        "visual_width": 384
+      },
+      "dinocular": {
+        "action_encoder_parameters": 110,
+        "action_input_dim": 10,
+        "num_hist": 3,
+        "predictor_input_width": 532,
+        "predictor_parameters": 26259572,
+        "proprio_input_dim": 4,
+        "proprio_state_encoder_parameters": 50,
+        "total_trainable_downstream_parameters": 26259732,
+        "visual_tokens_per_frame": 49,
+        "visual_width": 512
+      }
+    },
+    "rope": {
+      "dino_pinned": {
+        "action_encoder_parameters": 50,
+        "action_input_dim": 4,
+        "num_hist": 1,
+        "predictor_input_width": 404,
+        "predictor_parameters": 19964232,
+        "proprio_input_dim": 1,
+        "proprio_state_encoder_parameters": 20,
+        "total_trainable_downstream_parameters": 19964302,
+        "visual_tokens_per_frame": 196,
+        "visual_width": 384
+      },
+      "dinocular": {
+        "action_encoder_parameters": 50,
+        "action_input_dim": 4,
+        "num_hist": 1,
+        "predictor_input_width": 532,
+        "predictor_parameters": 26207436,
+        "proprio_input_dim": 1,
+        "proprio_state_encoder_parameters": 20,
+        "total_trainable_downstream_parameters": 26207506,
+        "visual_tokens_per_frame": 49,
+        "visual_width": 512
+      }
+    },
+    "wall": {
+      "dino_pinned": {
+        "action_encoder_parameters": 110,
+        "action_input_dim": 10,
+        "num_hist": 1,
+        "predictor_input_width": 404,
+        "predictor_parameters": 19964232,
+        "proprio_input_dim": 4,
+        "proprio_state_encoder_parameters": 50,
+        "total_trainable_downstream_parameters": 19964392,
+        "visual_tokens_per_frame": 196,
+        "visual_width": 384
+      },
+      "dinocular": {
+        "action_encoder_parameters": 110,
+        "action_input_dim": 10,
+        "num_hist": 1,
+        "predictor_input_width": 532,
+        "predictor_parameters": 26207436,
+        "proprio_input_dim": 4,
+        "proprio_state_encoder_parameters": 50,
+        "total_trainable_downstream_parameters": 26207596,
+        "visual_tokens_per_frame": 49,
+        "visual_width": 512
+      }
+    }
+  },
+  "encoders": {
+    "dino_pinned": {
+      "flops": {
+        "counted_operator_flops": {
+          "aten::add": 1891200,
+          "aten::addmm": 8366063616,
+          "aten::conv2d": 88510464,
+          "aten::mul": 1815552
+        },
+        "output_shape": [
+          1,
+          196,
+          384
+        ],
+        "supported_flops": 8458280832,
+        "unsupported_disclosure": "supported_flops is not an exact total: torch.profiler estimates only supported matrix-multiplication and 2-D-convolution operations. Observed ATen/xFormers operators with zero profiler FLOPs are listed and contribute zero.",
+        "unsupported_observed_operators": [
+          "aten::_convolution",
+          "aten::add_",
+          "aten::as_strided",
+          "aten::cat",
+          "aten::convolution",
+          "aten::cudnn_convolution",
+          "aten::dropout",
+          "aten::empty",
+          "aten::expand",
+          "aten::fill_",
+          "aten::flatten",
+          "aten::gelu",
+          "aten::layer_norm",
+          "aten::linear",
+          "aten::native_layer_norm",
+          "aten::permute",
+          "aten::reshape",
+          "aten::select",
+          "aten::slice",
+          "aten::t",
+          "aten::to",
+          "aten::transpose",
+          "aten::unbind",
+          "aten::unsqueeze",
+          "aten::upsample_bicubic2d",
+          "aten::view",
+          "aten::zero_",
+          "xformers::efficient_attention_forward_cutlass"
+        ]
+      },
+      "forward_activity": {
+        "active_buffer_tensors": 0,
+        "active_buffers": 0,
+        "active_parameter_tensors": 174,
+        "active_parameters": 22056192,
+        "inactive_buffer_names": [],
+        "inactive_parameter_names": [
+          "base_model.mask_token"
+        ],
+        "method": "A parameter or buffer is active when its owning module's forward-pre-hook fires or the exact tensor is observed by TorchDispatch (covering direct forward_features method calls); shared tensors are counted once by Python object identity.",
+        "traversed_module_count": 173
+      },
+      "input_contract": {
+        "batch_size": 1,
+        "channels": {
+          "depth": 0,
+          "rgb": 3
+        },
+        "dtype": "torch.float32",
+        "resolution": [
+          196,
+          196
+        ]
+      },
+      "latency": {
+        "max_ms": 7.586785,
+        "mean_ms": 7.38530138,
+        "median_ms": 7.382386,
+        "min_ms": 7.322996,
+        "p05_ms": 7.33627795,
+        "p95_ms": 7.4130495,
+        "repeats": 100,
+        "synchronization": "torch.cuda.synchronize after warmup and every measured forward",
+        "warmup": 20
+      },
+      "output_shape": [
+        1,
+        196,
+        384
+      ],
+      "state": {
+        "buffer_tensors": 0,
+        "buffers": 0,
+        "frozen_parameters": 22056576,
+        "parameter_tensors": 175,
+        "parameters": 22056576,
+        "trainable_parameters": 0
+      }
+    },
+    "dinocular": {
+      "flops": {
+        "counted_operator_flops": {
+          "aten::add": 25498816,
+          "aten::addmm": 7861174272,
+          "aten::bmm": 480485376,
+          "aten::conv2d": 1884610560,
+          "aten::mul": 10643780
+        },
+        "output_shape": [
+          1,
+          49,
+          512
+        ],
+        "supported_flops": 10262412804,
+        "unsupported_disclosure": "supported_flops is not an exact total: torch.profiler estimates only supported matrix-multiplication and 2-D-convolution operations. Observed ATen/xFormers operators with zero profiler FLOPs are listed and contribute zero.",
+        "unsupported_observed_operators": [
+          "aten::__or__",
+          "aten::_batch_norm_impl_index",
+          "aten::_conv_depthwise2d",
+          "aten::_convolution",
+          "aten::_local_scalar_dense",
+          "aten::_reshape_alias",
+          "aten::_softmax",
+          "aten::_to_copy",
+          "aten::_unsafe_view",
+          "aten::abs",
+          "aten::add_",
+          "aten::alias",
+          "aten::all",
+          "aten::amax",
+          "aten::amin",
+          "aten::arange",
+          "aten::as_strided",
+          "aten::batch_norm",
+          "aten::bitwise_or",
+          "aten::cat",
+          "aten::clone",
+          "aten::contiguous",
+          "aten::convolution",
+          "aten::copy_",
+          "aten::cos",
+          "aten::cudnn_batch_norm",
+          "aten::cudnn_convolution",
+          "aten::detach",
+          "aten::div",
+          "aten::dropout",
+          "aten::einsum",
+          "aten::empty",
+          "aten::empty_like",
+          "aten::empty_strided",
+          "aten::eq",
+          "aten::expand",
+          "aten::expand_as",
+          "aten::flatten",
+          "aten::gelu",
+          "aten::is_nonzero",
+          "aten::isfinite",
+          "aten::item",
+          "aten::layer_norm",
+          "aten::linear",
+          "aten::matmul",
+          "aten::mean",
+          "aten::meshgrid",
+          "aten::narrow",
+          "aten::native_layer_norm",
+          "aten::ne",
+          "aten::neg",
+          "aten::permute",
+          "aten::repeat",
+          "aten::repeat_interleave",
+          "aten::reshape",
+          "aten::resize_",
+          "aten::resolve_conj",
+          "aten::resolve_neg",
+          "aten::select",
+          "aten::sin",
+          "aten::slice",
+          "aten::softmax",
+          "aten::squeeze",
+          "aten::stack",
+          "aten::sub",
+          "aten::sum",
+          "aten::t",
+          "aten::to",
+          "aten::transpose",
+          "aten::unfold",
+          "aten::unsqueeze",
+          "aten::upsample_bilinear2d",
+          "aten::upsample_nearest2d",
+          "aten::view"
+        ]
+      },
+      "forward_activity": {
+        "active_buffer_tensors": 71,
+        "active_buffers": 2823,
+        "active_parameter_tensors": 814,
+        "active_parameters": 25721925,
+        "inactive_buffer_names": [],
+        "inactive_parameter_names": [
+          "backbone.mask_token"
+        ],
+        "method": "A parameter or buffer is active when its owning module's forward-pre-hook fires or the exact tensor is observed by TorchDispatch (covering direct forward_features method calls); shared tensors are counted once by Python object identity.",
+        "traversed_module_count": 659
+      },
+      "input_contract": {
+        "batch_size": 1,
+        "channels": {
+          "depth": 1,
+          "depth_validity_mask": 1,
+          "rgb": 3
+        },
+        "dtype": "torch.float32",
+        "resolution": [
+          224,
+          224
+        ]
+      },
+      "latency": {
+        "max_ms": 56.929069,
+        "mean_ms": 55.876445190000005,
+        "median_ms": 55.865173,
+        "min_ms": 55.654764,
+        "p05_ms": 55.741731550000004,
+        "p95_ms": 55.9954355,
+        "repeats": 100,
+        "synchronization": "torch.cuda.synchronize after warmup and every measured forward",
+        "warmup": 20
+      },
+      "output_shape": [
+        1,
+        49,
+        512
+      ],
+      "state": {
+        "buffer_tensors": 71,
+        "buffers": 2823,
+        "frozen_parameters": 25721989,
+        "parameter_tensors": 815,
+        "parameters": 25721989,
+        "trainable_parameters": 0
+      }
+    }
+  },
+  "runtime": {
+    "code_root": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-seed1/native-seed1-20260728c/code/dino_wm",
+    "container": "/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/containers/dinocular-wm-p0-20260714.sif",
+    "container_sha256": "6992ca7aa544434f80cfb375523ae96a1e41656078b5c2d7e89128288c2aecae",
+    "cuda_capability": [
+      8,
+      6
+    ],
+    "cuda_runtime": "12.1",
+    "cudnn": 8902,
+    "gpu": {
+      "driver_version": "580.65.06",
+      "name": "NVIDIA A40",
+      "uuid": "GPU-1d9bf295-0184-14be-0720-ba53655a7ecb"
+    },
+    "hostname": "mlgpu001",
+    "python": "3.10.14",
+    "pytorch": "2.3.1",
+    "slurm_job_id": "26737356",
+    "slurm_partition": "mlgpu_devel",
+    "source_commit": "22aa276bbc0ae9e76d603e4f87cb360d684622bd"
+  },
+  "schema": "dinocular.encoder-capacity-profile.v1"
+}
