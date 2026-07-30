@@ -46,6 +46,17 @@ def check_hash(path: str | Path, expected: str, label: str) -> str:
     return actual
 
 
+def check_card(path: Path, expected_semantic_sha256: str, task: str) -> str:
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    actual_semantic = value.get("run_card_sha256")
+    if actual_semantic != expected_semantic_sha256:
+        raise RuntimeError(
+            f"{task} immutable card semantic hash mismatch: "
+            f"expected {expected_semantic_sha256}, got {actual_semantic}"
+        )
+    return sha256_file(path)
+
+
 def json_dump(path: Path, value: Any) -> None:
     path.write_text(
         json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -204,7 +215,7 @@ def save_montage(path: Path, rgb: torch.Tensor, depth: torch.Tensor, labels: lis
 
 
 def run_task(task: str, hydra_path: Path, card_path: Path, card_sha: str, output: Path) -> dict[str, Any]:
-    check_hash(card_path, card_sha, f"{task} immutable card")
+    card_file_sha = check_card(card_path, card_sha, task)
     config = yaml.safe_load(hydra_path.read_text(encoding="utf-8"))
     dataset = config["env"]["dataset"]
     checkpoint = config["encoder"]["checkpoint_path"]
@@ -298,7 +309,8 @@ def run_task(task: str, hydra_path: Path, card_path: Path, card_sha: str, output
         "sample_frame_identities": identities,
         "provenance": {
             "immutable_card": str(card_path),
-            "immutable_card_sha256": card_sha,
+            "immutable_card_semantic_sha256": card_sha,
+            "immutable_card_file_sha256": card_file_sha,
             "hydra_config": str(hydra_path),
             "hydra_config_sha256": sha256_file(hydra_path),
             "cache_manifest": str(reader.manifest_path),
