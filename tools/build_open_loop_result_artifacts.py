@@ -19,6 +19,21 @@ import sys
 import tempfile
 from typing import Any, Mapping, Sequence
 
+try:
+    from .controller_result_registration import (
+        ADMISSION_POLICY_SCHEMA,
+        ADMISSION_QUARANTINE_REASON,
+        QUARANTINED_TARGETS,
+        admission_decision,
+    )
+except ImportError:
+    from controller_result_registration import (  # type: ignore[no-redef]
+        ADMISSION_POLICY_SCHEMA,
+        ADMISSION_QUARANTINE_REASON,
+        QUARANTINED_TARGETS,
+        admission_decision,
+    )
+
 LAUNCH_SCHEMA = "dinocular.fixed-evaluation-launch-artifacts.v1"
 BUNDLE_SCHEMA = "dinocular.combined-result-bundle.v1"
 PLANNING_LAUNCH_SCHEMA = "dinocular.fixed-planning-launch-artifacts.v1"
@@ -123,6 +138,50 @@ def _completion_snapshot(
     if not isinstance(summary, Mapping):
         raise BuildError("completion summary must be a JSON object")
     return summary, {
+        "path": str(path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "snapshot": _snapshot_key(after),
+    }
+
+
+def _admission_policy_snapshot(
+    path: Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if not path.is_absolute():
+        raise BuildError("admission policy path must be absolute")
+    try:
+        path_stat = path.lstat()
+    except OSError as exc:
+        raise BuildError(f"cannot stat admission policy {path}: {exc}") from exc
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise BuildError("admission policy must be a regular file, not an alias")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            content = handle.read()
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise BuildError(f"cannot read admission policy {path}: {exc}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _snapshot_key(path_stat) != _snapshot_key(before)
+        or _snapshot_key(before) != _snapshot_key(after)
+        or len(content) != before.st_size
+    ):
+        raise BuildError("admission policy was mutable while being read")
+    try:
+        policy = json.loads(
+            content.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant {value}")
+            ),
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise BuildError(f"admission policy is not strict JSON: {exc}") from exc
+    if not isinstance(policy, Mapping):
+        raise BuildError("admission policy must be a JSON object")
+    return policy, {
         "path": str(path),
         "sha256": hashlib.sha256(content).hexdigest(),
         "snapshot": _snapshot_key(after),
@@ -335,6 +394,96 @@ def _assert_completion_unchanged(path: Path, snapshot: Mapping[str, Any]) -> Non
         or _sha256(path) != snapshot["sha256"]
     ):
         raise BuildError("completion summary changed during build")
+
+
+def _assert_admission_policy_unchanged(
+    path: Path, snapshot: Mapping[str, Any]
+) -> None:
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise BuildError(f"admission policy disappeared during build: {exc}") from exc
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or _snapshot_key(current) != snapshot["snapshot"]
+        or _sha256(path) != snapshot["sha256"]
+    ):
+        raise BuildError("admission policy changed during build")
+
+
+def _admission_records(
+    policy: Mapping[str, Any], inputs: Mapping[str, Path]
+) -> list[Mapping[str, Any]]:
+    if (
+        policy.get("schema") != ADMISSION_POLICY_SCHEMA
+        or policy.get("reason") != ADMISSION_QUARANTINE_REASON
+        or policy.get("targets") != sorted(QUARANTINED_TARGETS)
+    ):
+        raise BuildError("admission policy identity or target coverage differs")
+    depth_receipts = policy.get("depth_validation_receipts")
+    zero_depth_reuse_receipts = policy.get("zero_depth_reuse_receipts")
+    if not isinstance(depth_receipts, Mapping) or not isinstance(
+        zero_depth_reuse_receipts, Mapping
+    ):
+        raise BuildError("admission policy receipt maps are malformed")
+
+    records: list[Mapping[str, Any]] = []
+    for chain in sorted(QUARANTINED_TARGETS):
+        environment, arm = chain.split("/")
+        admission_kind = (
+            "depth_validation"
+            if arm == "dinocular"
+            else "zero_depth_reuse"
+        )
+        receipt = (
+            depth_receipts.get(environment)
+            if arm == "dinocular"
+            else zero_depth_reuse_receipts.get(environment)
+        )
+        decision = admission_decision(
+            environment,
+            arm,
+            depth_receipt=receipt if arm == "dinocular" else None,
+            zero_depth_reuse_receipt=(
+                receipt if arm == "dinocular_zerodepth" else None
+            ),
+        )
+        if decision["status"] != "ELIGIBLE":
+            raise BuildError(
+                f"admission policy rejects {chain}: {decision['detail']}"
+            )
+        try:
+            receipt_sha256 = hashlib.sha256(
+                _canonical_json_bytes(receipt)
+            ).hexdigest()
+        except (TypeError, ValueError) as exc:
+            raise BuildError(f"admission receipt is not canonical for {chain}") from exc
+        lineages = []
+        for seed in SEEDS:
+            lineage = f"{chain}/s{seed}"
+            path = inputs.get(lineage)
+            if path is None:
+                raise BuildError(f"admission lineage is absent from bundle: {lineage}")
+            lineages.append(
+                {
+                    "lineage": lineage,
+                    "episode_errors_sha256": _sha256(path),
+                }
+            )
+        records.append(
+            {
+                "chain": chain,
+                "required_admission_kind": admission_kind,
+                "decision": decision,
+                "receipt": {
+                    "embedded_record": receipt,
+                    "sha256": receipt_sha256,
+                },
+                "result_lineages": lineages,
+            }
+        )
+    return records
 
 
 def _common_convergence_artifact(
@@ -719,6 +868,9 @@ def _build(
     completion_snapshot: Mapping[str, Any],
     completion_cells: Mapping[tuple[str, str, int], Mapping[str, Any]],
     completion_comparisons: Sequence[Mapping[str, Any]],
+    admission_policy_path: Path,
+    admission_policy_snapshot: Mapping[str, Any],
+    admission_records: Sequence[Mapping[str, Any]],
     planning_manifest_path: Path | None = None,
     planning_manifest: Mapping[str, Any] | None = None,
     planning_outputs: Mapping[str, tuple[Path, int]] | None = None,
@@ -888,6 +1040,12 @@ def _build(
                 "schema": completion["schema"],
                 "summary_sha256": completion["summary_sha256"],
             },
+            "admission_policy": {
+                "path": str(admission_policy_path),
+                "sha256": admission_policy_snapshot["sha256"],
+                "schema": ADMISSION_POLICY_SCHEMA,
+            },
+            "admissions": list(admission_records),
             "collector": {
                 "bootstrap_seed": BOOTSTRAP_SEED,
                 "bootstrap_replicates": BOOTSTRAP_REPLICATES,
@@ -912,6 +1070,9 @@ def _build(
         }
         _write_json(stage / "result_bundle_manifest.json", bundle_manifest)
         _assert_completion_unchanged(completion_path, completion_snapshot)
+        _assert_admission_policy_unchanged(
+            admission_policy_path, admission_policy_snapshot
+        )
         os.replace(stage, out_dir)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -928,6 +1089,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--launch-manifest", type=Path, required=True)
     parser.add_argument("--planning-launch-manifest", type=Path)
     parser.add_argument("--completion-summary", type=Path, required=True)
+    parser.add_argument("--admission-policy", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser
 
@@ -939,6 +1101,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         completion
     )
     manifest, inputs = _discover(args.launch_manifest)
+    admission_policy, admission_policy_snapshot = _admission_policy_snapshot(
+        args.admission_policy
+    )
+    admission_records = _admission_records(admission_policy, inputs)
     planning_manifest = None
     planning_outputs = None
     if args.planning_launch_manifest is not None:
@@ -962,6 +1128,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         completion_snapshot,
         completion_cells,
         completion_comparisons,
+        args.admission_policy,
+        admission_policy_snapshot,
+        admission_records,
         args.planning_launch_manifest,
         planning_manifest,
         planning_outputs,
