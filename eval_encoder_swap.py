@@ -366,6 +366,35 @@ def _tensor_obs(obs: Mapping[str, Any], device: str) -> Mapping[str, Any]:
     return {key: value.unsqueeze(0).to(device) for key, value in obs.items()}
 
 
+def _load_target_observations(dataset, environment: str, episode: int, frames):
+    frames = [int(frame) for frame in frames]
+    trajectory_length = int(dataset.get_seq_length(episode))
+    if environment != "wall" or max(frames) < trajectory_length:
+        observations, _act, _state, _info = dataset.get_frames(episode, frames)
+        return observations
+    if min(frames) < 0 or max(frames) > trajectory_length:
+        raise EvaluationContractError("Wall target frame exceeds the released rollout")
+    if dataset.depth_reader is not None:
+        raise EvaluationContractError(
+            "Wall terminal target observation has no accepted depth-cache frame"
+        )
+    images = _torch_load(
+        dataset.data_path / "obses" / f"episode_{episode:03d}.pth"
+    )
+    if int(images.shape[0]) != trajectory_length + 1:
+        raise EvaluationContractError(
+            "Wall terminal target requires one post-action observation"
+        )
+    visual = images[frames] / 255
+    if dataset.transform:
+        visual = dataset.transform(visual)
+    proprio_frames = [min(frame, trajectory_length - 1) for frame in frames]
+    return {
+        "visual": visual,
+        "proprio": dataset.proprios[episode, proprio_frames],
+    }
+
+
 def _append_jsonl(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -742,8 +771,8 @@ def evaluate(args: argparse.Namespace) -> None:
                 history_obs, _act, _state, _info = base_dataset.get_frames(
                     episode, history_frames
                 )
-                target_obs, _act, _state, _info = base_dataset.get_frames(
-                    episode, target_frames
+                target_obs = _load_target_observations(
+                    base_dataset, environment, episode, target_frames
                 )
                 maximum_horizon = max(HORIZONS[environment])
                 num_hist = NUM_HIST[environment]
