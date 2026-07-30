@@ -986,6 +986,13 @@ def validate_cache(
             normalize_depth(crop_metric_depth(raw, decoded_hw), lo, hi)
             for raw, decoded_hw in zip(raw_depths, decoded_sizes)
         ]
+    # The LMDB contract is float16.  Compare the independently recomputed
+    # samples after that exact lossless-for-the-wire round-trip, rather than
+    # treating the expected float32 intermediate as persisted cache bytes.
+    recomputed_after_wire = [
+        np.asarray(value, dtype=WIRE_DTYPE).astype(np.float32)
+        for value in recomputed
+    ]
     del producer
     print(
         json.dumps(
@@ -1032,7 +1039,7 @@ def validate_cache(
         maximum = 0.0
         decompressor = zstandard.ZstdDecompressor()
         with database.begin(write=False) as transaction:
-            for (trajectory, frame), normalized in zip(selected, recomputed):
+            for (trajectory, frame), normalized in zip(selected, recomputed_after_wire):
                 payload = transaction.get(trajectory.physical_key(frame).encode("ascii"))
                 if payload is None:
                     raise ContractError(

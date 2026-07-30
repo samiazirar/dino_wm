@@ -7,7 +7,13 @@ import lmdb
 import numpy as np
 import pytest
 
-from tools.precompute_depth import ContractError, Trajectory, WIRE_DTYPE, sha256_bytes
+from tools.precompute_depth import (
+    ContractError,
+    Trajectory,
+    WIRE_DTYPE,
+    encode_depth_value,
+    sha256_bytes,
+)
 from tools.precompute_depth_mapanything import (
     CALIBRATION_FRAMES,
     _expected_wire,
@@ -149,6 +155,84 @@ def test_raw_wire_validation_uses_shared_float16_limit(
     assert inference_batch_sizes == [8, 1], (
         "frozen candidate batch must precede independent singleton recomputation"
     )
+
+
+def test_raw_wire_spot_recomputation_compares_after_float16_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tools import precompute_depth_mapanything as module
+
+    trajectory = _trajectory("train", 0, 1)
+    calibration = {
+        "wire_mode": "raw_depth_z_float16",
+        "checkpoint_compatibility": (
+            "original_student_loader_np_load_float32_without_depth_normalization"
+        ),
+        "quantity": "later_pinned_MapAnything_pred_depth_z_proxy",
+        "units": "declared_metric_Z_depth_nonphysical_later_checkpoint_proxy",
+        "invalid_policy": "reject_nonfinite_or_negative_preserve_upstream_masked_exact_zero",
+        "calibration": "none",
+    }
+    cache_dir = tmp_path / "cache" / "pusht.lmdb"
+    cache_dir.mkdir(parents=True)
+    raw_depth = np.full((224, 224), np.float32(4.001953125), dtype=np.float32)
+    database = lmdb.open(str(cache_dir), map_size=1 << 20, subdir=True)
+    with database.begin(write=True) as transaction:
+        transaction.put(
+            trajectory.physical_key(0).encode("ascii"),
+            encode_depth_value(
+                raw_depth, wire_maximum=float(np.finfo(WIRE_DTYPE).max)
+            ),
+        )
+    database.close()
+
+    provenance = {"name": "fake-mapanything"}
+    manifest = {
+        "schema": "dinocular-depth-cache-v1",
+        "manifest_id": "raw-wire-round-trip-test",
+        "environment": "pusht",
+        "calibration": calibration,
+        "wire_format": _expected_wire(calibration),
+        "trajectory_count": 1,
+        "frame_count": 1,
+        "source_index_sha256": module._source_index_sha256([trajectory]),
+        "producer": provenance,
+        "trajectories": [{"trajectory_key": trajectory.trajectory_key}],
+    }
+    (cache_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    class FakeProducer:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def infer_independent_frames(self, frames, **_kwargs):
+            return [raw_depth.copy() for _ in frames], {}
+
+    FakeProducer.provenance = provenance
+
+    monkeypatch.setattr(module, "enumerate_environment", lambda *_args: [trajectory])
+    monkeypatch.setattr(
+        module,
+        "decode_trajectory",
+        lambda _trajectory: [np.zeros((224, 224, 3), dtype=np.uint8)],
+    )
+    monkeypatch.setattr(module, "crop_metric_depth", lambda value, *_args: value)
+    monkeypatch.setattr(module, "MapAnythingFramewiseProducer", FakeProducer)
+    monkeypatch.setattr(module, "validate_key_set_and_range", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "validate_temporal_gate", lambda *_args, **_kwargs: {})
+
+    result = module.validate_cache(
+        root=tmp_path / "raw",
+        cache_root=tmp_path / "cache",
+        mapanything_root=tmp_path / "mapanything",
+        model_dir=tmp_path / "model",
+        batch_size=8,
+        spot_frames=1,
+        max_trajectories=None,
+        environment="pusht",
+    )
+
+    assert result["spot_recomputation_gate"]["max_absolute_error_after_wire_decode"] == 0.0
 
 
 def test_requested_grouping_keeps_mapanything_model_calls_singleton() -> None:
