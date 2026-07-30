@@ -146,7 +146,7 @@ def test_raw_wire_validation_uses_shared_float16_limit(
         )
 
     assert constructed_batch_sizes == [1]
-    assert inference_batch_sizes == [8, 1]
+    assert inference_batch_sizes == [1, 1]
 
 
 def test_shards_are_deterministic_balanced_and_trajectory_atomic() -> None:

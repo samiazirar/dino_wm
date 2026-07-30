@@ -955,8 +955,11 @@ def validate_cache(
         decoded = decode_trajectory(trajectory)[frame]
         frame_arrays.append(decoded)
         decoded_sizes.append((int(decoded.shape[0]), int(decoded.shape[1])))
+    # The manifest pins literal singleton inference.  ``--batch-size`` must not
+    # select a different MapAnything execution path while validating frozen
+    # cache bytes; cache-vs-recomputation is the relevant acceptance check.
     raw_depths, raw_metadata = producer.infer_independent_frames(
-        np.stack(frame_arrays), batch_size=batch_size
+        np.stack(frame_arrays), batch_size=1
     )
     singleton_depths, _ = producer.infer_independent_frames(
         np.stack(frame_arrays), batch_size=1
