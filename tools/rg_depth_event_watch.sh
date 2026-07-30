@@ -11,6 +11,8 @@ EVENT=${2:?event path required}
 INTERVAL_SECONDS=${INTERVAL_SECONDS:-60}
 RETRY_LIMIT=${RETRY_LIMIT:-3}
 MAX_POLLS=${RG_DEPTH_WATCH_MAX_POLLS:-0} # Test-only bounded loop; zero means forever.
+INITIAL_DELAY_SECONDS=${RG_DEPTH_WATCH_INITIAL_DELAY_SECONDS:-0}
+PID_FILE=${RG_DEPTH_WATCH_PID_FILE:-}
 LOG=${RG_DEPTH_WATCH_LOG:-"${EVENT%.event.json}.watch.log"}
 
 IFS=, read -r -a EXPECTED_JOB_IDS <<< "$JOBS"
@@ -38,6 +40,18 @@ case "$MAX_POLLS" in
         exit 2
         ;;
 esac
+case "$INTERVAL_SECONDS" in
+    ''|*[!0-9]*)
+        printf 'INTERVAL_SECONDS must be a nonnegative integer\n' >&2
+        exit 2
+        ;;
+esac
+case "$INITIAL_DELAY_SECONDS" in
+    ''|*[!0-9]*)
+        printf 'RG_DEPTH_WATCH_INITIAL_DELAY_SECONDS must be a nonnegative integer\n' >&2
+        exit 2
+        ;;
+esac
 
 SNAPSHOT_FILE=$(mktemp "${EVENT}.snapshot.XXXXXX") || exit 2
 PARSED_FILE=$(mktemp "${EVENT}.parsed.XXXXXX") || {
@@ -46,11 +60,24 @@ PARSED_FILE=$(mktemp "${EVENT}.parsed.XXXXXX") || {
 }
 cleanup() {
     rm -f "$SNAPSHOT_FILE" "$PARSED_FILE"
+    if [ -n "$PID_FILE" ] && [ -r "$PID_FILE" ] && [ "$(tr -d '[:space:]' < "$PID_FILE")" = "$$" ]; then
+        rm -f "$PID_FILE"
+    fi
 }
 trap cleanup EXIT
 
 log() {
     printf '%s %s\n' "$(date --iso-8601=seconds)" "$*" >> "$LOG" 2>&1 || true
+}
+
+write_pid_file() {
+    local temporary
+    [ -z "$PID_FILE" ] && return 0
+    temporary=$(mktemp "${PID_FILE}.tmp.XXXXXX") || return 1
+    if ! printf '%s\n' "$$" > "$temporary" || ! mv -f "$temporary" "$PID_FILE"; then
+        rm -f "$temporary"
+        return 1
+    fi
 }
 
 trim() {
@@ -201,6 +228,26 @@ terminal_state() {
 
 FAILURES=0
 POLLS=0
+signal_exit() {
+    local signal_name=$1
+    log "WATCHER_SIGNAL signal=$signal_name"
+    if write_receipt MONITOR_ERROR "WATCHER_SIGNAL_$signal_name" "$FAILURES"; then
+        notify_operations MONITOR_ERROR
+    fi
+    exit 0
+}
+trap 'signal_exit HUP' HUP
+trap 'signal_exit INT' INT
+trap 'signal_exit TERM' TERM
+
+if ! write_pid_file; then
+    log "PID_WRITE_ERROR path=$PID_FILE"
+    exit 2
+fi
+log "WATCH_STARTED pid=$$ interval=$INTERVAL_SECONDS initial_delay=$INITIAL_DELAY_SECONDS"
+if [ "$INITIAL_DELAY_SECONDS" -gt 0 ]; then
+    sleep "$INITIAL_DELAY_SECONDS" || log "INITIAL_SLEEP_ERROR interval=$INITIAL_DELAY_SECONDS"
+fi
 while :; do
     POLLS=$((POLLS + 1))
     PARSE_ERROR=

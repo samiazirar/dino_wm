@@ -1,11 +1,14 @@
 import json
 import os
 import pathlib
+import signal
 import subprocess
+import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WATCHER = ROOT / "tools" / "rg_depth_event_watch.sh"
+LAUNCHER = ROOT / "tools" / "launch_rg_depth_event_watch.sh"
 JOBS = "26738306,26738307,26738308,26738309"
 
 
@@ -153,3 +156,59 @@ def test_message_failure_preserves_terminal_receipt(tmp_path):
     assert not messages.exists()
     assert "RECEIPT_WRITTEN" in log
     assert "DELIVERY_ERROR kind=TERMINAL" in log
+
+
+def test_foreground_launcher_survives_an_interval_and_cleans_temporary_state(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "ssh").write_text(
+        "#!/bin/bash\n"
+        f"printf '%s' '{job_rows('PENDING', 'PENDING', 'PENDING', 'PENDING')}'\n"
+    )
+    (fake_bin / "herdr-role-message").write_text("#!/bin/bash\nexit 0\n")
+    for command in fake_bin.iterdir():
+        command.chmod(0o755)
+
+    event = tmp_path / "watch.event.json"
+    pid_file = tmp_path / "watch.pid"
+    log = tmp_path / "watch.log"
+    environment = os.environ | {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "INTERVAL_SECONDS": "1",
+        "RETRY_LIMIT": "3",
+    }
+    process = subprocess.Popen(
+        ["bash", str(LAUNCHER), JOBS, str(event), str(pid_file), str(log)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 5
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_file.exists()
+    watcher_pid = int(pid_file.read_text())
+    try:
+        assert watcher_pid == process.pid
+        time.sleep(1.3)
+        os.kill(watcher_pid, 0)
+        assert log.read_text().count("POLL_OK kind=NONTERMINAL") >= 2
+
+        os.kill(watcher_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while not event.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        receipt = json.loads(event.read_text())
+        assert receipt["kind"] == "MONITOR_ERROR"
+        assert receipt["reason"] == "WATCHER_SIGNAL_TERM"
+        assert not pid_file.exists()
+        assert not list(tmp_path.glob("watch.event.json.snapshot.*"))
+        assert not list(tmp_path.glob("watch.event.json.parsed.*"))
+    finally:
+        try:
+            os.kill(watcher_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
