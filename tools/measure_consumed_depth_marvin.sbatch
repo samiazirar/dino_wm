@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=depth-validity
-#SBATCH --partition=sgpu_devel
+#SBATCH --partition=mlgpu_devel
 #SBATCH --time=00:55:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
