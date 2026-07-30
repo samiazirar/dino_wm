@@ -55,6 +55,7 @@ def prepare_card(
     max_trajectories: int,
     spot_frames: int,
     batch_size: int,
+    validation_output: Path,
 ) -> dict[str, Any]:
     if environment not in {"rope", "granular"}:
         raise RuntimeError("environment must be rope or granular")
@@ -112,6 +113,7 @@ def prepare_card(
             "producer_gate": "pinned_MapAnything_identity_must_match_manifest",
             "cache_mutation": "forbidden",
         },
+        "validation_receipt": str(validation_output),
     }
 
 
@@ -127,6 +129,7 @@ def main() -> None:
     parser.add_argument("--max-trajectories", type=int, default=1)
     parser.add_argument("--spot-frames", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--validation-output", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     card = prepare_card(
@@ -140,6 +143,7 @@ def main() -> None:
         max_trajectories=args.max_trajectories,
         spot_frames=args.spot_frames,
         batch_size=args.batch_size,
+        validation_output=args.validation_output,
     )
     write_immutable(args.output, card)
     print(json.dumps(card, indent=2, sort_keys=True))

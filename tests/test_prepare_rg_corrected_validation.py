@@ -56,11 +56,13 @@ def test_prepare_card_freezes_existing_cache_and_corrected_source(tmp_path: Path
         max_trajectories=1,
         spot_frames=32,
         batch_size=8,
+        validation_output=tmp_path / "rope" / "validation.json",
     )
 
     assert card["stage"] == "validate_only_no_rebuild"
     assert card["cache"]["data_mdb_sha256"] == hashes["data"]
     assert card["corrected_validator"]["source_tool_sha256"] == hashes["source"]
+    assert card["validation_receipt"].endswith("rope/validation.json")
 
 
 def test_prepare_card_rejects_changed_completed_bytes(tmp_path: Path) -> None:
@@ -79,4 +81,5 @@ def test_prepare_card_rejects_changed_completed_bytes(tmp_path: Path) -> None:
             max_trajectories=1,
             spot_frames=32,
             batch_size=8,
+            validation_output=tmp_path / "rope" / "validation.json",
         )
