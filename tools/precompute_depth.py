@@ -798,8 +798,13 @@ def build_environment_cache(
         if _manifest_is_reusable(destination, trajectories, calibration, producer):
             return json.loads((destination / "manifest.json").read_text())
         raise ContractError(
-            f"{destination} already exists but does not match this immutable build; use --rebuild "
-            "to mint a new manifest and quarantine the old cache"
+            f"{destination} already exists but does not match this immutable build; "
+            "resolve and permanently delete the exact superseded target before rebuilding"
+        )
+    if destination.exists():
+        raise ContractError(
+            f"{destination} already exists; retained-copy replacement is forbidden. "
+            "Resolve consumers and permanently delete the exact superseded target first."
         )
 
     manifest_id = str(uuid.uuid4())
@@ -983,11 +988,9 @@ def build_environment_cache(
     atomic_write_json(building / "manifest.json", manifest)
 
     if destination.exists():
-        quarantine = output_root / (
-            f"{environment}.lmdb.quarantine-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
-            f"{uuid.uuid4().hex[:8]}"
+        raise ContractError(
+            f"{destination} appeared during the immutable build; refusing to replace or archive it"
         )
-        os.replace(destination, quarantine)
     os.replace(building, destination)
     return manifest
 
@@ -1542,7 +1545,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="quarantine and replace nonmatching LMDBs",
+        help=(
+            "recompute only when the destination is absent; existing caches must be "
+            "consumer-checked and permanently deleted by the repair deletion tool"
+        ),
     )
     return parser.parse_args(argv)
 

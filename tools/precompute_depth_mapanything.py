@@ -713,7 +713,13 @@ def merge_shards(
             if reusable:
                 return existing
             raise ContractError(
-                f"{destination} exists but is not the verified full merge; use --rebuild"
+                f"{destination} exists but is not the verified full merge; resolve and "
+                "permanently delete the exact superseded target before rebuilding"
+            )
+        if destination.exists():
+            raise ContractError(
+                f"{destination} already exists; retained-copy replacement is forbidden. "
+                "Resolve consumers and permanently delete the exact superseded target first."
             )
 
         output_root.mkdir(parents=True, exist_ok=True)
@@ -831,12 +837,9 @@ def merge_shards(
         }
         atomic_write_json(building / "manifest.json", manifest)
         if destination.exists():
-            quarantine = output_root / (
-                f"{environment}.lmdb.quarantine-"
-                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
-                f"{uuid.uuid4().hex[:8]}"
+            raise ContractError(
+                f"{destination} appeared during the immutable merge; refusing to replace or archive it"
             )
-            os.replace(destination, quarantine)
         os.replace(building, destination)
         atomic_write_json(output_root / "shard_plan.json", shard_plan)
         return manifest

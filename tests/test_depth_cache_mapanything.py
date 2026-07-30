@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 import lmdb
+import pytest
 
-from tools.precompute_depth import Trajectory, sha256_bytes
+from tools.precompute_depth import ContractError, Trajectory, sha256_bytes
 from tools.precompute_depth_mapanything import (
     CALIBRATION_FRAMES,
     _expected_wire,
@@ -174,3 +175,15 @@ def test_merge_verifies_shards_and_restores_dataset_order(
                 key = trajectory.physical_key(frame).encode("ascii")
                 assert transaction.get(key) == b"payload:" + key
     database.close()
+
+    original_manifest = (output_root / "pusht.lmdb" / "manifest.json").read_bytes()
+    with pytest.raises(ContractError, match="retained-copy replacement is forbidden"):
+        merge_shards(
+            root=tmp_path / "raw",
+            shards_root=shards_root,
+            output_root=output_root,
+            shard_count=2,
+            rebuild=True,
+        )
+    assert (output_root / "pusht.lmdb" / "manifest.json").read_bytes() == original_manifest
+    assert not list(output_root.glob("*.quarantine-*"))

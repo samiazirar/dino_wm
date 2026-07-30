@@ -401,6 +401,34 @@ def test_failed_later_trajectory_never_publishes_partial_environment(
     )  # recovery evidence is retained; no in-place continuation occurs.
 
 
+def test_rebuild_never_replaces_or_quarantines_existing_cache(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "raw"
+    cache_root = tmp_path / "cache"
+    _make_wall_dataset(data_root)
+    trajectories = enumerate_environment(data_root, "wall")
+    build_environment_cache(
+        output_root=cache_root,
+        environment="wall",
+        trajectories=trajectories,
+        calibration=_calibration(),
+        producer=DeterministicTrajectoryProducer(),
+    )
+    original_manifest = (cache_root / "wall.lmdb" / "manifest.json").read_bytes()
+    with pytest.raises(ContractError, match="retained-copy replacement is forbidden"):
+        build_environment_cache(
+            output_root=cache_root,
+            environment="wall",
+            trajectories=trajectories,
+            calibration=_calibration(),
+            producer=DeterministicTrajectoryProducer(),
+            rebuild=True,
+        )
+    assert (cache_root / "wall.lmdb" / "manifest.json").read_bytes() == original_manifest
+    assert not list(cache_root.glob("*.quarantine-*"))
+
+
 def test_normalization_is_global_clip_without_inversion() -> None:
     depth = np.linspace(1.0, 3.0, 224 * 224, dtype=np.float32).reshape(224, 224)
     gray = normalize_depth(depth, lo=1.5, hi=2.5)
