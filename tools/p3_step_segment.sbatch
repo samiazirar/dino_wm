@@ -40,20 +40,27 @@ esac
 mkdir -p "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$HF_HOME"
 test -w "$TRITON_CACHE_DIR" -a -w "$XDG_CACHE_HOME" -a -w "$HF_HOME"
 
-python3 "$SUBMITTER" verify --manifest "$P3_CHAIN_MANIFEST"
+run_submitter() {
+    /usr/bin/apptainer exec --writable-tmpfs \
+        --bind "$PROJECT:$PROJECT" \
+        --env PYTHONPATH="$CODE_ROOT:/opt/dinov2" \
+        "$SIF" python "$SUBMITTER" "$@"
+}
 
-RUN_DIR=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field run_dir)
-TARGET_STEPS=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field target_steps)
-SEGMENT_STEPS=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field segment_steps)
-CHECKPOINT_EVERY=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field checkpoint_every_steps)
-RUN_CARD=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field run_card)
-RUN_CARD_SHA256=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field run_card_sha256)
-RUN_KIND=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field kind)
-P2_ENV=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field environment)
-P2_ARM=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field arm)
-SIF_SHA256=$(python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field container_sha256)
+run_submitter verify --manifest "$P3_CHAIN_MANIFEST"
+
+RUN_DIR=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field run_dir)
+TARGET_STEPS=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field target_steps)
+SEGMENT_STEPS=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field segment_steps)
+CHECKPOINT_EVERY=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field checkpoint_every_steps)
+RUN_CARD=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field run_card)
+RUN_CARD_SHA256=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field run_card_sha256)
+RUN_KIND=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field kind)
+P2_ENV=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field environment)
+P2_ARM=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field arm)
+SIF_SHA256=$(run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field container_sha256)
 mapfile -t OVERRIDES < <(
-    python3 "$SUBMITTER" emit --manifest "$P3_CHAIN_MANIFEST" --field overrides
+    run_submitter emit --manifest "$P3_CHAIN_MANIFEST" --field overrides
 )
 
 TRAIN_ARGS=(
@@ -219,7 +226,7 @@ case "$RUN_KIND" in
 esac
 
 NEXT_JOB=$(
-    python3 "$SUBMITTER" continue \
+    run_submitter continue \
         --manifest "$P3_CHAIN_MANIFEST" \
         --parent-job "$SLURM_JOB_ID"
 )
