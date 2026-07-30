@@ -196,13 +196,14 @@ def test_foreground_launcher_survives_an_interval_and_cleans_temporary_state(tmp
         os.kill(watcher_pid, 0)
         assert log.read_text().count("POLL_OK kind=NONTERMINAL") >= 2
 
-        os.kill(watcher_pid, signal.SIGTERM)
+        os.kill(watcher_pid, signal.SIGHUP)
         deadline = time.monotonic() + 5
         while not event.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         receipt = json.loads(event.read_text())
         assert receipt["kind"] == "MONITOR_ERROR"
-        assert receipt["reason"] == "WATCHER_SIGNAL_TERM"
+        assert receipt["reason"] == "WATCHER_SIGNAL_HUP"
+        assert process.wait(timeout=5) == 0
         assert not pid_file.exists()
         assert not list(tmp_path.glob("watch.event.json.snapshot.*"))
         assert not list(tmp_path.glob("watch.event.json.parsed.*"))
