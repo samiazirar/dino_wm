@@ -263,15 +263,12 @@ class StrictTimingWindow:
             tuple[torch.cuda.Event, torch.cuda.Event]
         ] = []
         self._encoder_started: torch.cuda.Event | None = None
-        self._encoder_pre_hook = None
-        self._encoder_post_hook = None
+        self._encoder_module = None
+        self._encoder_original_forward = None
         if self.component_timing_enabled:
-            self._encoder_pre_hook = trainer.model.encoder.register_forward_pre_hook(
-                self._before_encoder
-            )
-            self._encoder_post_hook = trainer.model.encoder.register_forward_hook(
-                self._after_encoder
-            )
+            self._encoder_module = trainer.model.encoder
+            self._encoder_original_forward = self._encoder_module.forward
+            self._encoder_module.forward = self._timed_encoder_forward
         self._card = self._initial_card(trainer)
         _atomic_write_yaml(self.run_card_path, self._card)
 
@@ -517,7 +514,7 @@ class StrictTimingWindow:
         self._train_cpu_seconds += time.perf_counter() - self._train_cpu_started
         self._train_cpu_started = None
 
-    def _before_encoder(self, _module: Any, _inputs: Any) -> None:
+    def _before_encoder(self) -> None:
         if not self._component_active:
             return
         if self._encoder_started is not None:
@@ -525,7 +522,7 @@ class StrictTimingWindow:
         self._encoder_started = self._cuda_event()
         self._encoder_started.record()
 
-    def _after_encoder(self, _module: Any, _inputs: Any, _output: Any) -> None:
+    def _after_encoder(self) -> None:
         if not self._component_active:
             return
         if self._encoder_started is None:
@@ -535,12 +532,20 @@ class StrictTimingWindow:
         self._encoder_cuda_events.append((self._encoder_started, finished))
         self._encoder_started = None
 
+    def _timed_encoder_forward(self, *args: Any, **kwargs: Any) -> Any:
+        if self._encoder_original_forward is None:
+            raise RuntimeError("strict timing encoder wrapper is not initialized")
+        self._before_encoder()
+        try:
+            return self._encoder_original_forward(*args, **kwargs)
+        finally:
+            self._after_encoder()
+
     def _remove_component_hooks(self) -> None:
-        for hook in (self._encoder_pre_hook, self._encoder_post_hook):
-            if hook is not None:
-                hook.remove()
-        self._encoder_pre_hook = None
-        self._encoder_post_hook = None
+        if self._encoder_module is not None and self._encoder_original_forward is not None:
+            self._encoder_module.forward = self._encoder_original_forward
+        self._encoder_module = None
+        self._encoder_original_forward = None
 
     @staticmethod
     def _elapsed_seconds(
