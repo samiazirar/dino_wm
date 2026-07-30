@@ -13,6 +13,7 @@ PROJECT=/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm
 REPAIR_ROOT=$PROJECT/outputs/rg-depth-repair/rg-depth-repair-20260730a
 SIF=$PROJECT/containers/dinocular-wm-p0-20260714.sif
 MODEL_REVISION=a1d87e9086706fb9974f3be5a3e3a0ca5401c5aa
+CODE_ROOT=${RG_CODE_ROOT:-$REPAIR_ROOT/code}
 ENVIRONMENT=${RG_ENVIRONMENT:?RG_ENVIRONMENT is required}
 STAGE=${RG_STAGE:-build}
 OUTPUT_DIR=${RG_OUTPUT_DIR:?RG_OUTPUT_DIR is required}
@@ -27,6 +28,7 @@ VALIDATION_JSON=${RG_VALIDATION_JSON:-$OUTPUT_DIR/$ENVIRONMENT/validation.json}
 
 case "$ENVIRONMENT" in rope|granular) ;; *) exit 2 ;; esac
 case "$OUTPUT_DIR" in "$REPAIR_ROOT"/*) ;; *) exit 2 ;; esac
+case "$CODE_ROOT" in "$REPAIR_ROOT"/code|"$REPAIR_ROOT"/code-*) ;; *) exit 2 ;; esac
 mkdir -p "$REPAIR_ROOT/logs" "$OUTPUT_DIR"
 
 export TRITON_CACHE_DIR=$PROJECT/cache/mapanything-triton/$SLURM_JOB_ID
@@ -45,9 +47,9 @@ APPTAINER_ARGS=(
     --env XDG_CACHE_HOME="/workspace/cache/mapanything-xdg/$SLURM_JOB_ID"
     --env HF_HOME="/workspace/cache/mapanything-hf/$SLURM_JOB_ID"
     --env TORCH_HOME=/workspace/env/torch
-    --env PYTHONPATH=/workspace/env/da3-runtime-site:/workspace/env/mapanything-site:/workspace/code/map-anything:/workspace/outputs/rg-depth-repair/rg-depth-repair-20260730a/code
+    --env PYTHONPATH=/workspace/env/da3-runtime-site:/workspace/env/mapanything-site:/workspace/code/map-anything:${CODE_ROOT/$PROJECT/\/workspace}
 )
-TOOL=/workspace/outputs/rg-depth-repair/rg-depth-repair-20260730a/code/tools/precompute_depth_mapanything.py
+TOOL=${CODE_ROOT/$PROJECT/\/workspace}/tools/precompute_depth_mapanything.py
 ROOT=/workspace/data/raw
 OUT=${OUTPUT_DIR/$PROJECT/\/workspace}
 MODEL=/workspace/models/map-anything/$MODEL_REVISION
