@@ -76,6 +76,7 @@ export PYTHONNOUSERSITE=1
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export WANDB_MODE=disabled
+export STRICT_P2_COMPONENT_TIMING=${STRICT_P2_COMPONENT_TIMING:-0}
 export STRICT_P2_ENV=$P2_ENV
 export STRICT_P2_ARM=$P2_ARM
 export STRICT_P2_CONTAINER=$SIF
@@ -115,6 +116,7 @@ setsid /usr/bin/apptainer exec --nv --writable-tmpfs \
     --env HF_HUB_OFFLINE=1 \
     --env TRANSFORMERS_OFFLINE=1 \
     --env WANDB_MODE=disabled \
+    --env STRICT_P2_COMPONENT_TIMING="$STRICT_P2_COMPONENT_TIMING" \
     --env STRICT_P2_ENV="$STRICT_P2_ENV" \
     --env STRICT_P2_ARM="$STRICT_P2_ARM" \
     --env STRICT_P2_CONTAINER="$STRICT_P2_CONTAINER" \

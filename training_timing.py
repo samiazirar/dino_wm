@@ -245,6 +245,29 @@ class StrictTimingWindow:
         self.artifacts = self._artifacts(trainer)
         self.monitor = NvidiaSmiMonitor()
         self.monitor.start()
+        self.component_timing_enabled = (
+            os.environ.get("STRICT_P2_COMPONENT_TIMING", "0") == "1"
+        )
+        self._component_active = False
+        self._batch_cpu_started: float | None = None
+        self._train_cpu_started: float | None = None
+        self._batch_cpu_seconds = 0.0
+        self._train_cpu_seconds = 0.0
+        self._batch_cuda_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        self._train_cuda_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        self._encoder_cuda_events: list[
+            tuple[torch.cuda.Event, torch.cuda.Event]
+        ] = []
+        self._encoder_started: torch.cuda.Event | None = None
+        self._encoder_pre_hook = None
+        self._encoder_post_hook = None
+        if self.component_timing_enabled:
+            self._encoder_pre_hook = trainer.model.encoder.register_forward_pre_hook(
+                self._before_encoder
+            )
+            self._encoder_post_hook = trainer.model.encoder.register_forward_hook(
+                self._after_encoder
+            )
         self._card = self._initial_card(trainer)
         _atomic_write_yaml(self.run_card_path, self._card)
 
@@ -437,11 +460,89 @@ class StrictTimingWindow:
                 "checkpointing_in_measured_window": False,
                 "evaluation_in_measured_window": False,
                 "profiler_in_measured_window": False,
+                "component_timing_enabled": self.component_timing_enabled,
             },
             "artifacts": self.artifacts,
             "resolved_config": self.config,
             "result_path": str(self.output_path),
         }
+
+    @staticmethod
+    def _cuda_event() -> torch.cuda.Event:
+        return torch.cuda.Event(enable_timing=True)
+
+    def before_batch(self, *, completed_step: int) -> None:
+        if (
+            not self.component_timing_enabled
+            or completed_step < self.warmup_steps
+            or completed_step >= self.required_steps
+        ):
+            return
+        self._batch_cpu_started = time.perf_counter()
+        started = self._cuda_event()
+        finished = self._cuda_event()
+        started.record()
+        self._batch_cuda_events.append((started, finished))
+
+    def after_batch(self, *, completed_step: int) -> None:
+        if self._batch_cpu_started is None:
+            return
+        self._batch_cuda_events[-1][1].record()
+        self._batch_cpu_seconds += time.perf_counter() - self._batch_cpu_started
+        self._batch_cpu_started = None
+
+    def before_train_step(self, *, completed_step: int) -> None:
+        if (
+            not self.component_timing_enabled
+            or completed_step < self.warmup_steps
+            or completed_step >= self.required_steps
+        ):
+            return
+        self._train_cpu_started = time.perf_counter()
+        self._component_active = True
+        started = self._cuda_event()
+        finished = self._cuda_event()
+        started.record()
+        self._train_cuda_events.append((started, finished))
+
+    def after_train_step(self) -> None:
+        if self._train_cpu_started is None:
+            return
+        self._train_cuda_events[-1][1].record()
+        self._component_active = False
+        self._train_cpu_seconds += time.perf_counter() - self._train_cpu_started
+        self._train_cpu_started = None
+
+    def _before_encoder(self, _module: Any, _inputs: Any) -> None:
+        if not self._component_active:
+            return
+        if self._encoder_started is not None:
+            raise RuntimeError("nested encoder forward is unsupported in strict timing")
+        self._encoder_started = self._cuda_event()
+        self._encoder_started.record()
+
+    def _after_encoder(self, _module: Any, _inputs: Any, _output: Any) -> None:
+        if not self._component_active:
+            return
+        if self._encoder_started is None:
+            raise RuntimeError("encoder timing ended without a matching start")
+        finished = self._cuda_event()
+        finished.record()
+        self._encoder_cuda_events.append((self._encoder_started, finished))
+        self._encoder_started = None
+
+    def _remove_component_hooks(self) -> None:
+        for hook in (self._encoder_pre_hook, self._encoder_post_hook):
+            if hook is not None:
+                hook.remove()
+        self._encoder_pre_hook = None
+        self._encoder_post_hook = None
+
+    @staticmethod
+    def _elapsed_seconds(
+        events: list[tuple[torch.cuda.Event, torch.cuda.Event]],
+    ) -> float:
+        return sum(start.elapsed_time(end) for start, end in events) / 1000.0
 
     def after_step(self, *, completed_step: int, batch_samples: int) -> None:
         if completed_step == self.warmup_steps:
@@ -465,12 +566,14 @@ class StrictTimingWindow:
 
     def abort(self, error: BaseException) -> None:
         self.monitor.stop()
+        self._remove_component_hooks()
         self._card["status"] = "FAILED"
         self._card["failure"] = f"{type(error).__name__}: {error}"
         _atomic_write_yaml(self.run_card_path, self._card)
 
     def finalize(self, trainer: Any, *, sampler: Any, status: str) -> None:
         self.monitor.stop()
+        self._remove_component_hooks()
         if status != "TARGET_REACHED":
             raise RuntimeError(f"timing target was not reached: {status}")
         if self.measured_start is None or self.measured_end is None:
@@ -489,6 +592,30 @@ class StrictTimingWindow:
         steps_per_second = self.measured_steps / measured_seconds
         samples_per_second = self.measured_samples / measured_seconds
         projection_seconds = self.projection_target_steps / steps_per_second
+        component_timings = None
+        if self.component_timing_enabled:
+            if (
+                len(self._batch_cuda_events) != self.measured_steps
+                or len(self._train_cuda_events) != self.measured_steps
+                or len(self._encoder_cuda_events) != self.measured_steps
+            ):
+                raise RuntimeError(
+                    "component timing event counts differ from measured steps"
+                )
+            batch_cuda_seconds = self._elapsed_seconds(self._batch_cuda_events)
+            train_cuda_seconds = self._elapsed_seconds(self._train_cuda_events)
+            encoder_cuda_seconds = self._elapsed_seconds(self._encoder_cuda_events)
+            component_timings = {
+                "method": "non-synchronizing CUDA events plus CPU perf_counter",
+                "measured_steps": self.measured_steps,
+                "batch_cpu_seconds": self._batch_cpu_seconds,
+                "batch_cuda_interval_seconds": batch_cuda_seconds,
+                "train_cpu_seconds": self._train_cpu_seconds,
+                "train_cuda_seconds": train_cuda_seconds,
+                "encoder_cuda_seconds": encoder_cuda_seconds,
+                "downstream_cuda_seconds": train_cuda_seconds
+                - encoder_cuda_seconds,
+            }
         result = {
             "schema": TIMING_SCHEMA,
             "status": "MEASURED_PASS",
@@ -539,7 +666,11 @@ class StrictTimingWindow:
             "peak_torch_reserved_mib": self.peak_reserved_mib,
             "peak_nvidia_smi_process_mib": self.monitor.peak_mib,
             "nvidia_smi_samples": self.monitor.samples,
+            "component_timings": component_timings,
             "final_loss": float(trainer.last_step_loss),
+            "final_parameter_sha256": trainer._last_checkpoint_state_hashes.get(
+                "parameter_sha256"
+            ),
             "checkpoint_after_measured_window": str(trainer._last_checkpoint_path),
             "checkpoint_after_measured_window_sha256": (
                 trainer._last_checkpoint_sha256

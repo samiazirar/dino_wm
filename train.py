@@ -1307,16 +1307,35 @@ class Trainer:
             segment_stop=segment_stop,
             checkpoint_every=checkpoint_every,
         )
+
+        def timed_iterator():
+            while True:
+                if timing is not None:
+                    timing.before_batch(completed_step=self.global_step)
+                try:
+                    data = next(iterator)
+                except StopIteration:
+                    return
+                if timing is not None:
+                    timing.after_batch(completed_step=self.global_step)
+                yield data
+
         try:
             for data in tqdm(
-                iterator,
+                timed_iterator(),
                 total=len(sampler),
                 desc=f"Steps {segment_start + 1}-{segment_stop}",
             ):
                 if self._stop_requested:
                     break
                 batch_samples = int(data[1].shape[0])
-                self.last_step_loss = self._train_one_step(data)
+                if timing is not None:
+                    timing.before_train_step(completed_step=self.global_step)
+                try:
+                    self.last_step_loss = self._train_one_step(data)
+                finally:
+                    if timing is not None:
+                        timing.after_train_step()
                 self.global_step += 1
                 self.epoch = self.global_step // sampler.steps_per_epoch
                 if timing is not None:
