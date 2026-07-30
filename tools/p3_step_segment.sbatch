@@ -90,6 +90,18 @@ build_dinocular_container_env "$P2_ARM"
 nvidia-smi
 sha256sum "$SIF"
 
+PROGRESS_STATUS=$(python3 - "$RUN_DIR/progress.json" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+print(json.load(open(path, encoding="utf-8"))["status"] if os.path.isfile(path) else "MISSING")
+PY
+)
+if [ "$RUN_KIND" = p3-training ] && [ "$PROGRESS_STATUS" = TARGET_REACHED ]; then
+    printf 'TARGET_REACHED: skipping optimizer/data training process\n'
+else
 setsid /usr/bin/apptainer exec --nv --writable-tmpfs \
     --bind "$PROJECT:$PROJECT" \
     --env TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
@@ -140,6 +152,7 @@ set -e
 if [ "$TRAIN_STATUS" -ne 0 ]; then
     printf 'Training process failed with status %s\n' "$TRAIN_STATUS" >&2
     exit "$TRAIN_STATUS"
+fi
 fi
 
 PROGRESS_STATUS=$(python3 - "$RUN_DIR/progress.json" <<'PY'

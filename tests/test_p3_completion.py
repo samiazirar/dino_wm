@@ -1725,6 +1725,11 @@ def test_fresh_process_wrapper_and_heldout_materializer_are_zero_submit(tmp_path
     wrapper = (root / "tools/p3_step_segment.sbatch").read_text(encoding="utf-8")
     assert "P3_FINAL_ACCEPTANCE_PROCESS=1" in wrapper
     assert '"training.final_acceptance=true"' in wrapper
+    target_reached = wrapper.index(
+        'if [ "$RUN_KIND" = p3-training ] && [ "$PROGRESS_STATUS" = TARGET_REACHED ]'
+    )
+    assert target_reached < wrapper.index("setsid /usr/bin/apptainer exec")
+    assert "TARGET_REACHED: skipping optimizer/data training process" in wrapper
     completed = subprocess.run(
         [
             "python3",
