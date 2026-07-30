@@ -231,6 +231,10 @@ def _missing(path: Path, input_name: str) -> Mapping[str, Any]:
     return {"input": input_name, "expected_path": str(path), "reason": "ABSENT"}
 
 
+def _planner_override(environment: str) -> str:
+    return "+planner=mpc_cem" if environment == "wall" else "planner=mpc_cem"
+
+
 def _wrapper(card_path: Path, card: Mapping[str, Any], card_file_sha256: str) -> str:
     resolver = textwrap.dedent(
         r"""
@@ -471,6 +475,7 @@ export TRANSFORMERS_OFFLINE=1
 export WANDB_MODE=disabled
 export DINOV2_REPO="$PROJECT/code/dinov2"
 export DINOV2_VITS14_WEIGHTS="$PROJECT/models/dinov2_vits14_pretrain.pth"
+export DINOCULAR_STUDENT_WEIGHTS="$PROJECT/checkpoints/dinov2_depthembed_dropout_fullpr.pth"
 mkdir -p "$LOGS_DIR" "$OUTPUT_DIR" "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$HF_HOME"
 source "$CODE_ROOT/tools/dinocular_container_env.sh"
 build_dinocular_container_env "$ARM"
@@ -665,7 +670,7 @@ def materialize(args: argparse.Namespace) -> Mapping[str, Any]:
                         if environment in ("pusht", "wall")
                         else "plan.yaml",
                         f"hydra.run.dir={output_path.parent}",
-                        "planner=mpc_cem",
+                        _planner_override(environment),
                         "goal_source=file",
                         f"+goal_file_path={target_path}",
                         f"n_evals={len(target_ids)}",
