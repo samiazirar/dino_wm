@@ -223,13 +223,29 @@ the method rather than a pass-or-fail condition. Our full data is in fact
 steadier than the earlier accepted trial. This is a real limitation of per-frame
 depth and belongs in the paper.
 
-The depth has been packaged for use, but it cannot yet be formally admitted.
-The admission step is designed to prove the new depth is better than the old
-faulty depth by comparing them on the same frames, and the old faulty depth was
-permanently deleted on 30 July with no copy kept. The comparison it requires is
-therefore impossible as written. This needs a decision and is described under
-current decisions below. Neither task has an admissible DINOcular planning
-outcome.
+The depth has been packaged for use, but it is not yet formally admitted. The
+admission step proves the new depth is better than the old faulty depth by
+comparing the two on the same frames, and the old faulty depth had been
+permanently deleted on 30 July with no copy kept. Rather than give up that
+comparison, we rebuilt the old faulty depth from scratch on 1 August, using the
+same fixed depth producer, the same model files and the same settings as the
+original. Both rebuilds ran cleanly in about eighty minutes each and passed
+every quality check on their own.
+
+The rebuild came out the same as the original where it matters, and different
+where it does not. The depth values themselves are exactly identical: on the
+frames the admission comparison actually uses, every rebuilt depth map matches
+the original bit for bit, with a difference of exactly zero. The brightness and
+range settings derived from the data came out identical to the last decimal
+place too. What does not match is a checksum of the database file that stores
+the depth. That file records the same numbers in a slightly different internal
+arrangement, so its checksum differs even though its contents do not.
+
+This leaves one question for us: whether identical depth values on the frames
+the comparison uses are enough to stand in for a matching file checksum. That
+is described under current decisions below. Nothing was weakened or worked
+around to get here, and the admission comparison has not been run. Neither task
+has an admissible DINOcular planning outcome.
 
 The confirmed Weights & Biases dashboard is
 <https://wandb.ai/rlp_uni_bonn/dinocular-wm-campaign>. The lineage currently
@@ -264,7 +280,7 @@ event that would change it.
 
 | Item | Why it matters | Observed now | Next observable action |
 |---|---|---|---|
-| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth inputs for the four tasks. | PushT, Wall, and DINOv2 inputs remain fixed. Historical Rope and Granular real-depth DINOcular inputs are excluded and zero-depth reuse remains unproven. The replacement Rope and Granular depth was regenerated one frame at a time on 31 July 2026 and now passes the fixed quality check for both tasks, at the full size of 1,000 trajectories and 20,000 frames each. | Decide how to admit the depth now that the old faulty depth it was meant to be compared against no longer exists. |
+| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth inputs for the four tasks. | PushT, Wall, and DINOv2 inputs remain fixed. Historical Rope and Granular real-depth DINOcular inputs are excluded and zero-depth reuse remains unproven. The replacement Rope and Granular depth was regenerated one frame at a time on 31 July 2026 and now passes the fixed quality check for both tasks, at the full size of 1,000 trajectories and 20,000 frames each. The old faulty depth it is compared against was rebuilt on 1 August 2026 and its depth values match the original exactly on the frames the comparison uses. | Decide whether identical depth values stand in for the differing checksum of the file that stores them, then run the comparison. |
 | **Training campaign** | Produces the 36 trained world models needed for matched comparisons. | Granular and Rope DINOv2 seed one are fully accepted; PushT, Wall, and DINOv2 continue unchanged. | Complete the first accepted DINOv2–DINOcular task pair. |
 | **Held-out prediction** | Measures how well each trained model predicts unseen trajectory segments. | Granular and Rope DINOv2 seed one each have a complete 100-episode prediction evaluation. | Evaluate the next completed lineage under the same fixed procedure. |
 | **Fixed planning** | Tests whether prediction improvements help action selection on the declared targets. | Neither Rope nor Granular has an admissible DINOcular planning outcome. | The depth now passes its quality check and is packaged; settle admission, then take the zero-depth reuse decision and start corrected real-depth training from step zero. |
@@ -314,15 +330,23 @@ figures, and empirical paper results.
   model.
 - Each lineage proceeds automatically from training to held-out prediction and
   then fixed planning.
-- **A decision is needed on how to admit the Rope and Granular depth.** The
-  admission step was designed to prove the new depth improves on the old faulty
-  depth by comparing the two on the same frames. The old faulty depth was
-  permanently deleted on 30 July 2026 with no copy kept, so that comparison
-  cannot be made. The regenerated depth has already passed the independent
-  quality check on its own terms. The realistic choices are to admit it on that
-  check alone and record why the comparison is absent, or to regenerate the old
-  faulty depth purely to serve as a comparison. Nothing was weakened or worked
-  around while this is open.
+- **Rebuilding the old faulty depth was chosen and is done.** Faced with a
+  comparison that could not be made because the old faulty depth had been
+  deleted, we chose to rebuild it rather than skip the comparison. It cost about
+  three hours of one graphics card across the two tasks and finished on 1 August
+  2026.
+- **One question remains before the comparison can be run.** The rebuilt depth
+  values are exactly identical to the original on the frames the comparison
+  uses, and the settings derived from the data are identical as well, but the
+  checksum of the file that stores them differs because the same numbers are
+  arranged differently inside it. The question is whether identical depth values
+  are enough to stand in for a matching file checksum. Our reading is that they
+  are, because the file checksum was never a measure of the depth itself and no
+  checksum of the depth values was ever recorded, so it cannot be reproduced by
+  any rerun. The alternative is to treat the file checksum as binding and admit
+  the new depth on its own quality check instead, recording why the comparison
+  is absent. Nothing was weakened or worked around while this is open, and the
+  comparison has not been run.
 - No scientific claim is made before the fixed evaluations are complete.
 
 ## Work meter

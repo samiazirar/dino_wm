@@ -18,6 +18,40 @@
   (granular) plus calibration `lo=0.9579539752006531`/`hi=2.320253071784973`/keys `2d9088fd...14a8`
   and `lo=0.8734745681285858`/`hi=2.3549521017074584`/keys `b2b12734...12bd22`. Any mismatch stops
   the chain and is reported; it does not proceed to admission.
+- **Regeneration COMPLETED clean; calibration matches exactly; `data.mdb` SHA-256 does NOT match;
+  frame content is bit-identical.** `26782461` (rope) COMPLETED `0:0` in `01:19:33` and `26782462`
+  (granular) COMPLETED `0:0` in `01:18:40`, both on `sgpu026`, against originals `01:22:09` and
+  `01:21:30`. Both caches carry 1,000 trajectories / 20,000 frames, tool
+  `5712422e...b1b79b`, producer `effective_config_sha256 547bb79d...`, and both in-job validation
+  receipts are `state: PASS`.
+  - Calibration reproduced exactly: rope `lo=0.9579539752006531`, `hi=2.320253071784973`, keys
+    `2d9088fd...14a8`; granular `lo=0.8734745681285858`, `hi=2.3549521017074584`, keys
+    `b2b12734...12bd22`. All six identical to `diagnosis/defect_localization.json`.
+  - `data.mdb` SHA-256 differs for both. Rope observed
+    `82759012911b4fd7465ca287e911f73fd6dac9d0c5916679b9be03467365426d` against recorded
+    `64cab2bea1b51a053d27bdcd68d3e32d5b65fac15f40e46d62460d6c55af680d`; granular observed
+    `86e7bc012a73aa65f3a783812a44e1de8018355b69df156aa60fa4dbe6d8a2e6` against recorded
+    `4b6b32385295a2ccd05666730f05f17649e4e70ebce37863d474550558c23349`.
+  - Every recorded content gate reproduced digit-for-digit: rope q10 `0.0352783203125`, q90
+    `0.765625`, saturation `0.03405688246902155`; granular q10 `0.0667724609375`, q90
+    `0.76220703125`, saturation `0.027264079269097775`; recomputation max and temporal median
+    `0.000244140625` for both, low-std `0.0`, zero temporal failures.
+  - **Read-only 32-frame-per-task content comparison, run unmodified with deployed
+    `tools/diagnose_rg_depth.py` (`1b80f124...`) into
+    `diagnosis/regenerated_baseline_localization.json` (sha `c0d6980f...367b`): over all 64 fixed
+    frames (episodes 0,1,3,4 x frames 0,2,5,8,10,13,16,19 — exactly the admission selection) the
+    regenerated cache is BIT-IDENTICAL to the deleted cache.** Zero mismatches in
+    `serialized_payload_sha256`, `decoded_wire.sha256` and `final_affine_depth.sha256`; 256 scalar
+    array statistics and 224 pairwise `cache_final_depth` statistics all differ by exactly `0.0`,
+    i.e. at zero, below the fp16 wire quantization floor `0.000244140625`.
+  - Interpretation: the depth content reproduced exactly; only the LMDB container image differs
+    (page allocation and meta-page state). `data_mdb_sha256` hashes a database file, not the depth
+    payloads, and no content-level hash of the payloads was ever pinned. Directory sizes differ from
+    the deletion receipt by 300 bytes (rope) and 134 bytes (granular), far below LMDB's 4 KiB page
+    granularity, consistent with the fresh manifest UUID and timestamp alone.
+  - **ADMISSION NOT RUN.** Whether bit-identical content on the admission frames substitutes for the
+    byte-level `data.mdb` hash is an open owner decision. Nothing was weakened and no gate or tool
+    was modified.
 - **PENDING FOLLOW-UP, after admission consumes the comparison and not before:** move the
   regenerated defective caches off the canonical accepted-depth path into an explicit quarantine
   location with a short receipt stating what they are and why they exist, so a later reader cannot
