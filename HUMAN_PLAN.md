@@ -37,10 +37,14 @@ The four tasks are PushT, Wall, Rope, and Granular. **PushT is primary because
 it was chosen before results, is the established DINO-WM planning benchmark,
 has the largest dataset, and has a fixed 50-target success evaluation.** This
 prevents choosing whichever task later looks best. PushT is not the task with
-the strongest real depth variation. Wall is a flatter-scene control, while
-Rope and Granular provide the stronger perspective-depth settings. Those two
-remain exploratory because each has only 10 planning targets and no currently
-accepted common binary success definition.
+the strongest real depth variation. Wall is a flatter-scene control. Historical
+real-depth DINOcular results for Rope and Granular are excluded, and their
+zero-depth histories remain pending exact functional reuse proof. Corrected
+canaries for replacement per-frame MapAnything depth passed, and full
+replacement depth production finished on the evening of 30 July 2026. PushT,
+Wall, and DINOv2 continue
+unchanged. Rope and Granular remain exploratory because each has only 10
+planning targets and no currently accepted common binary success definition.
 
 ## The 36 training runs
 
@@ -87,9 +91,9 @@ same selected depth record and then replaces its values with zeros immediately
 before the encoder uses it.
 
 PushT and Wall are visually flat tasks, so they test whether the complete
-representation helps even when scene depth is weak. Rope and Granular use
-perspective views with real variation in distance, making them the more direct,
-but exploratory, tests of useful depth.
+representation helps even when scene depth is weak. Rope and Granular retain
+their exploratory perspective-depth role only after their corrected DINOcular
+full replacement depth caches pass frozen validation.
 
 ## How one run is trained
 
@@ -172,20 +176,56 @@ exactly 20 high-level actions: four replanning rounds of five actions each,
 with no early stop based on the outcome. Their terminal Chamfer distance is
 measured after action 20.
 
-Training is progressing through resumable segments. All six seed-two initial
-segments for the DINOcular and zero-depth DINOcular systems on Wall, Rope, and
-Granular have completed. Both corresponding Rope seed-three initial segments
-have also completed. Wall and Granular seed-three continuations are submitted
-or pending as applicable. Once all three initial seed segments in one chain
-have completed, the controller automatically returns to the older lineages and
-continues them toward their full training targets.
+Granular DINOv2 seed one is the first controller-accepted fully trained
+lineage. It reached 53,500 steps, and its fixed held-out prediction evaluation
+completed with 100 episode records.
 
-No training lineage is complete. Consequently, no held-out evaluation is
-complete and no scientific result exists yet.
+Rope DINOv2 seed one has now also been accepted at its exact 53,500-step target
+without retraining. Its fixed held-out prediction evaluation is complete with
+100 episode records.
+
+Historical real-depth DINOcular results for Rope and Granular are excluded.
+Their zero-depth histories are not accepted unless exact functional reuse is
+shown. Corrected canaries for replacement per-frame MapAnything depth passed.
+About 7.36 GB of obsolete real-depth-derived artifacts were permanently removed
+without touching zero-depth, DINOv2, PushT, Wall, raw sources, or healthy runs.
+Full replacement depth production ran in four isolated literal-singleton
+MapAnything shards per task and finished on the evening of 30 July 2026. All
+four shards for each task are complete, together covering the full released
+data: 1,000 trajectories and 20,000 frames for Rope and the same for Granular.
+The merge and validation steps first prepared for those shards were left
+waiting on an earlier failed production attempt and could never have run; they
+were cancelled on 31 July and resubmitted against the shards that actually
+completed. The merged caches must still pass frozen full-cache validation
+before their admission, any zero-depth reuse decision, or corrected real-depth
+training from step zero. Neither task has an admissible DINOcular planning
+outcome.
+
+The confirmed Weights & Biases dashboard is
+<https://wandb.ai/rlp_uni_bonn/dinocular-wm-campaign>. The lineage currently
+visible there was imported from existing records. Imported history and live
+telemetry are kept distinct, so an imported run is not presented as live
+training telemetry.
+
+PushT, Wall, and DINOv2 lineages continue unchanged. No duplicate execution or
+later-seed advance is reported.
+
+No accepted matched DINOv2-versus-DINOcular task pair is complete, and
+therefore no scientific comparison or winner can yet be reported.
 
 The empirical paper now contains the current framing, Methods, a vector
-overview figure, and Limitations. It contains no result values and is not
-published.
+overview figure, Limitations, and a fail-closed path that will ingest the real
+prediction and planning tables and figures only from the complete 36-lineage
+evaluation bundle. It also applies the predeclared comparison and convergence
+rules to generate machine-readable and manuscript-ready decision summaries,
+including null or negative outcomes. The active controller now supplies the
+fixed convergence record and will invoke this complete path after all
+evaluations exist. Missing or incomplete results create no paper result
+artifacts. The paper shows partial controller-accepted seed-one Results in
+Progress values, including valid DINOv2 prediction and planning rows, but no
+aggregate decision, winner, or conclusion exists; excluded or provisional Rope
+and Granular depth rows cannot support claims. It is not published. The
+obsolete PaperPilot diff is retired.
 
 ## Data and evidence map
 
@@ -194,19 +234,31 @@ event that would change it.
 
 | Item | Why it matters | Observed now | Next observable action |
 |---|---|---|---|
-| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth evidence for the four tasks. | The accepted inputs and splits are fixed for all systems and seeds. | Keep them unchanged while every lineage completes. |
-| **Training campaign** | Produces the 36 trained world models needed for matched comparisons. | All 36 lineages are submitted under the bounded automatic controller; several later-seed initial segments have completed, but no full lineage has. | Complete one lineage at its exact target and pass it automatically to evaluation. |
-| **Held-out prediction** | Measures how well each trained model predicts unseen trajectory segments. | Fixed evaluations are prepared for every lineage, but none has completed. | Complete the first held-out evaluation after its training lineage finishes. |
-| **Fixed planning** | Tests whether prediction improvements help action selection on the declared targets. | All planning specifications and wrappers are ready for 1,080 outcomes, including the fixed 20-action Rope and Granular procedure. | Run planning automatically after each held-out prediction evaluation. |
-| **Empirical paper** | Records the design and will eventually report the evidence. | Framing, Methods, the overview figure, and Limitations exist; result values do not. | Add results only after the fixed evaluations produce them. |
+| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth inputs for the four tasks. | PushT, Wall, and DINOv2 inputs remain fixed. Historical Rope and Granular real-depth DINOcular inputs are excluded, zero-depth reuse remains unproven, corrected canaries passed, and full replacement depth production finished on 30 July 2026 with all shards complete. Merge and frozen full-cache validation are now running. | Pass frozen full-cache validation, then admit the caches before a zero-depth reuse decision or corrected real-depth training from step zero. |
+| **Training campaign** | Produces the 36 trained world models needed for matched comparisons. | Granular and Rope DINOv2 seed one are fully accepted; PushT, Wall, and DINOv2 continue unchanged. | Complete the first accepted DINOv2–DINOcular task pair. |
+| **Held-out prediction** | Measures how well each trained model predicts unseen trajectory segments. | Granular and Rope DINOv2 seed one each have a complete 100-episode prediction evaluation. | Evaluate the next completed lineage under the same fixed procedure. |
+| **Fixed planning** | Tests whether prediction improvements help action selection on the declared targets. | Neither Rope nor Granular has an admissible DINOcular planning outcome. | Replacement depth production is finished; merge and frozen-validate the full caches before admission, a zero-depth reuse decision, or corrected real-depth training from step zero. |
+| **Weights & Biases dashboard** | Makes campaign records visible without controlling training. | The dashboard is confirmed, and its currently visible lineage is imported history rather than live telemetry. | Keep imported records distinct from live telemetry as new runs report. |
+| **Empirical paper** | Records the design and will eventually report the evidence. | Framing, Methods, the overview figure, Limitations, strict result ingestion, and predeclared decision reporting exist. Partial controller-accepted seed-one Results in Progress values include valid DINOv2 prediction and planning rows, but no aggregate decision, winner, or conclusion exists; excluded or provisional Rope and Granular depth rows cannot support claims. | Generate the tables, figures, and supported conclusion only after the complete fixed evaluation bundle exists. |
 
 ## Current milestone
 
-The active milestone is to complete, evaluate, and plan with the first full
-training lineage, while the controller keeps all 36 lineages moving through
-their fixed resumable sequence. The next observable scientific evidence is a
-completed held-out prediction and planning evaluation from a fully trained
-lineage. Until then, execution progress does not answer the research question.
+The immediate priority is one complete matched seed across all four tasks,
+with DINOv2 versus DINOcular as the main comparison. The existing seed-one
+lineages are used because they already contain the most progress; the numeric
+seed label has no special scientific status. PushT, Wall, and DINOv2 continue
+unchanged. Rope and Granular zero-depth histories remain pending exact
+functional reuse proof. Their corrected canaries passed, and full replacement
+depth production finished on 30 July 2026 with every shard complete; cache
+merge and frozen full-cache validation are now running and must pass before
+admission, a zero-depth reuse decision, or corrected real-depth training from
+step zero. Seeds two and three
+remain preserved until this first all-task comparison is complete.
+
+The next meaningful evidence is a fully trained and evaluated DINOv2–DINOcular
+pair on the same task. Completing all four such pairs gives the first
+cross-task answer for one matched seed. Until evaluation and planning finish,
+training progress alone does not answer the research question.
 
 The later milestone is the complete 36-lineage matrix: all three systems on all
 four tasks with all three seeds, followed by the predeclared comparisons,
@@ -215,9 +267,21 @@ figures, and empirical paper results.
 ## Current decisions
 
 - CLAIX/Aachen is reserved for other work and is not available to this project.
-  Scientific jobs may use Marvin or lmgpu only.
+  Scientific jobs may use Marvin, lmgpu, or lmdort when the accepted
+  environment and inputs can be preserved. lmdort was proven compatible and
+  used; Marvin remains the main campaign cluster. lmgpu is used only for
+  lineages whose complete accepted environment can be reproduced there.
 - All 36 lineages remain controller-managed, with at most one computing job in
   each task-and-system chain and at most 12 project GPUs in use.
+- First complete the DINOv2 and DINOcular seed-one pair on every task, using
+  parallel capacity across tasks. PushT, Wall, and DINOv2 continue unchanged.
+  Rope and Granular corrected canaries passed and their full replacement depth
+  production finished on 30 July 2026; cache merge and frozen full-cache
+  validation are now running and come before admission, a zero-depth reuse
+  decision, or corrected real-depth training from step zero. Their zero-depth
+  histories
+  await exact functional reuse proof. Seeds two and three remain preserved
+  until the first all-task comparison is complete.
 - All nine runs for one task stay on one GPU model; resumed runs retain that
   model.
 - Each lineage proceeds automatically from training to held-out prediction and

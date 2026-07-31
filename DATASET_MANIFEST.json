@@ -1,0 +1,58 @@
+{
+  "schema": "dinocular-dataset-manifest-v1",
+  "generated_at": "2026-07-14T19:35:00+02:00",
+  "pusht": {
+    "artifact": {
+      "url": "https://osf.io/download/k2d8w/",
+      "filename": "pusht_noise.zip",
+      "bytes": 2785304515,
+      "sha256": "442f5dee246edf670964ed7bdecd248683cd6d00580fa0e4d458abb53f92da08",
+      "zip_integrity": "pass",
+      "extracted_du_bytes": 7370447305
+    },
+    "contract_basis": "enumerated released archive; paper Appendix A.9 values are not an exact artifact manifest",
+    "splits": {
+      "train": {
+        "trajectories": 18685,
+        "frames": 2336736,
+        "minimum_length": 49,
+        "maximum_length": 246,
+        "length_below_100": 4747,
+        "length_above_300": 0,
+        "seq_lengths_sha256": "60b98f3e84b05717f088948b895a8c37debc93a0f46f16887bd749fbb87681a1"
+      },
+      "val": {
+        "trajectories": 21,
+        "frames": 2514,
+        "minimum_length": 76,
+        "maximum_length": 167,
+        "length_below_100": 6,
+        "length_above_300": 0,
+        "seq_lengths_sha256": "ed0218e14c639d254f318419e314799cc063499e6984cd4c080555a004fba40f"
+      }
+    },
+    "selected_trajectories": 18706,
+    "selected_frames": 2339250,
+    "selection_rule": "all archive-provided train and validation trajectories, unfiltered and in original order",
+    "evidence_report": "reports/07_pusht_contract.md"
+  },
+  "wall": {
+    "artifact": {
+      "url": "https://osf.io/download/49rnx/",
+      "filename": "wall_single.zip",
+      "bytes": 1668205895,
+      "sha256": "2b4ae4ed0ad03b337efac637f17752e7e7e27f864fec39dc25b51fef490c980d",
+      "zip_integrity": "pass",
+      "marvin_extracted_du_bytes": 58964103970
+    },
+    "trajectories": 1920,
+    "actions_shape": [1920, 50, 2],
+    "observation_frames_per_pth": 51,
+    "selected_frames_per_trajectory": 50,
+    "selected_frames": 96000,
+    "selection_rule": "indices 0..49 selected by official WallDataset action-aligned length; trailing post-action observation is not a model frame",
+    "source_rgb": "finite continuous float32 [0,255] TCHW",
+    "da3_png_quantization": "round half up to uint8 exactly once",
+    "evidence_report": "reports/09_depth_input_contract.md"
+  }
+}
