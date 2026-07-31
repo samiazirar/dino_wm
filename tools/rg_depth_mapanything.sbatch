@@ -23,10 +23,24 @@ SHARD_INDEX=${RG_SHARD_INDEX:-}
 CALIBRATION_JSON=${RG_CALIBRATION_JSON:-}
 MAX_TRAJECTORIES=${RG_MAX_TRAJECTORIES:-}
 SPOT_FRAMES=${RG_SPOT_FRAMES:-32}
-BATCH_SIZE=${RG_BATCH_SIZE:-8}
+# Production builds are pinned to the literal-singleton producer (batch size 1).
+# `validate` instantiates the live producer at batch size 1 and requires the
+# cached manifest to carry that exact identity, so a cache built at any other
+# batch size records `candidate_independent_singleton_scenes_on_batch_axis` and
+# can never be admitted.  Default `build` to 1 and refuse anything else; the
+# batch knob remains meaningful only for the validator's independent-batch
+# equivalence probe, which defaults to 8 as the canaries used.
+case "$STAGE" in
+    build) BATCH_SIZE=${RG_BATCH_SIZE:-1} ;;
+    *) BATCH_SIZE=${RG_BATCH_SIZE:-8} ;;
+esac
 VALIDATION_JSON=${RG_VALIDATION_JSON:-$OUTPUT_DIR/$ENVIRONMENT/validation.json}
 
 case "$ENVIRONMENT" in rope|granular) ;; *) exit 2 ;; esac
+if [ "$STAGE" = build ] && [ "$BATCH_SIZE" != 1 ]; then
+    echo "REFUSING build at batch size $BATCH_SIZE: the pinned producer contract is literal-singleton (1)" >&2
+    exit 2
+fi
 case "$OUTPUT_DIR" in "$REPAIR_ROOT"/*) ;; *) exit 2 ;; esac
 case "$CODE_ROOT" in "$REPAIR_ROOT"/code|"$REPAIR_ROOT"/code-*) ;; *) exit 2 ;; esac
 mkdir -p "$REPAIR_ROOT/logs" "$OUTPUT_DIR"
