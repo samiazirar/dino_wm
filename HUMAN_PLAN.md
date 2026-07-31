@@ -39,10 +39,10 @@ has the largest dataset, and has a fixed 50-target success evaluation.** This
 prevents choosing whichever task later looks best. PushT is not the task with
 the strongest real depth variation. Wall is a flatter-scene control. Historical
 real-depth DINOcular results for Rope and Granular are excluded, and their
-zero-depth histories remain pending exact functional reuse proof. Corrected
-canaries for replacement per-frame MapAnything depth passed, and full
-replacement depth production finished on the evening of 30 July 2026. PushT,
-Wall, and DINOv2 continue
+zero-depth histories remain pending exact functional reuse proof. Their
+replacement per-frame depth was regenerated on 31 July 2026 and now passes the
+fixed quality check at full size, though it is not yet formally admitted.
+PushT, Wall, and DINOv2 continue
 unchanged. Rope and Granular remain exploratory because each has only 10
 planning targets and no currently accepted common binary success definition.
 
@@ -91,9 +91,9 @@ same selected depth record and then replaces its values with zeros immediately
 before the encoder uses it.
 
 PushT and Wall are visually flat tasks, so they test whether the complete
-representation helps even when scene depth is weak. Rope and Granular retain
-their exploratory perspective-depth role only after their corrected DINOcular
-full replacement depth caches pass frozen validation.
+representation helps even when scene depth is weak. Rope and Granular keep their
+exploratory perspective-depth role: their replacement depth has now passed the
+fixed quality check, and admission remains to be settled.
 
 ## How one run is trained
 
@@ -196,9 +196,39 @@ data: 1,000 trajectories and 20,000 frames for Rope and the same for Granular.
 The merge and validation steps first prepared for those shards were left
 waiting on an earlier failed production attempt and could never have run; they
 were cancelled on 31 July and resubmitted against the shards that actually
-completed. The merged caches must still pass frozen full-cache validation
-before their admission, any zero-depth reuse decision, or corrected real-depth
-training from step zero. Neither task has an admissible DINOcular planning
+completed.
+
+Those first checks failed, and the reason was a setup mistake rather than bad
+depth. The depth producer can process frames either strictly one at a time or in
+groups; the fixed recipe for this study requires one at a time, and the quality
+check refuses anything else. The production runs accidentally used the grouped
+setting because it was the default, so the check correctly rejected them. The
+recipe was corrected so the grouped setting can no longer be selected by
+accident, and all the depth was regenerated one frame at a time on the evening
+of 31 July. Regeneration cost nothing extra: the depth model was always
+processing one frame at a time internally, so the speed was identical.
+
+**The regenerated Rope and Granular depth now passes the fixed quality check for
+both tasks.** The check reproduced 32 frames spread across each dataset from
+scratch and got exactly the same values, confirmed the full expected size of
+1,000 trajectories and 20,000 frames per task, and confirmed the depth maps
+carry real detail rather than flat or empty output.
+
+One measurement in that check is reported as a failure but does not count
+against the result, and it was already the case for the smaller trial runs that
+were accepted earlier. Because each frame's depth is estimated independently,
+the depth of a motionless part of the scene wobbles slightly from frame to
+frame. The check measures this and flags it, but treats it as a description of
+the method rather than a pass-or-fail condition. Our full data is in fact
+steadier than the earlier accepted trial. This is a real limitation of per-frame
+depth and belongs in the paper.
+
+The depth has been packaged for use, but it cannot yet be formally admitted.
+The admission step is designed to prove the new depth is better than the old
+faulty depth by comparing them on the same frames, and the old faulty depth was
+permanently deleted on 30 July with no copy kept. The comparison it requires is
+therefore impossible as written. This needs a decision and is described under
+current decisions below. Neither task has an admissible DINOcular planning
 outcome.
 
 The confirmed Weights & Biases dashboard is
@@ -234,10 +264,10 @@ event that would change it.
 
 | Item | Why it matters | Observed now | Next observable action |
 |---|---|---|---|
-| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth inputs for the four tasks. | PushT, Wall, and DINOv2 inputs remain fixed. Historical Rope and Granular real-depth DINOcular inputs are excluded, zero-depth reuse remains unproven, corrected canaries passed, and full replacement depth production finished on 30 July 2026 with all shards complete. Merge and frozen full-cache validation are now running. | Pass frozen full-cache validation, then admit the caches before a zero-depth reuse decision or corrected real-depth training from step zero. |
+| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth inputs for the four tasks. | PushT, Wall, and DINOv2 inputs remain fixed. Historical Rope and Granular real-depth DINOcular inputs are excluded and zero-depth reuse remains unproven. The replacement Rope and Granular depth was regenerated one frame at a time on 31 July 2026 and now passes the fixed quality check for both tasks, at the full size of 1,000 trajectories and 20,000 frames each. | Decide how to admit the depth now that the old faulty depth it was meant to be compared against no longer exists. |
 | **Training campaign** | Produces the 36 trained world models needed for matched comparisons. | Granular and Rope DINOv2 seed one are fully accepted; PushT, Wall, and DINOv2 continue unchanged. | Complete the first accepted DINOv2–DINOcular task pair. |
 | **Held-out prediction** | Measures how well each trained model predicts unseen trajectory segments. | Granular and Rope DINOv2 seed one each have a complete 100-episode prediction evaluation. | Evaluate the next completed lineage under the same fixed procedure. |
-| **Fixed planning** | Tests whether prediction improvements help action selection on the declared targets. | Neither Rope nor Granular has an admissible DINOcular planning outcome. | Replacement depth production is finished; merge and frozen-validate the full caches before admission, a zero-depth reuse decision, or corrected real-depth training from step zero. |
+| **Fixed planning** | Tests whether prediction improvements help action selection on the declared targets. | Neither Rope nor Granular has an admissible DINOcular planning outcome. | The depth now passes its quality check and is packaged; settle admission, then take the zero-depth reuse decision and start corrected real-depth training from step zero. |
 | **Weights & Biases dashboard** | Makes campaign records visible without controlling training. | The dashboard is confirmed, and its currently visible lineage is imported history rather than live telemetry. | Keep imported records distinct from live telemetry as new runs report. |
 | **Empirical paper** | Records the design and will eventually report the evidence. | Framing, Methods, the overview figure, Limitations, strict result ingestion, and predeclared decision reporting exist. Partial controller-accepted seed-one Results in Progress values include valid DINOv2 prediction and planning rows, but no aggregate decision, winner, or conclusion exists; excluded or provisional Rope and Granular depth rows cannot support claims. | Generate the tables, figures, and supported conclusion only after the complete fixed evaluation bundle exists. |
 
@@ -248,10 +278,11 @@ with DINOv2 versus DINOcular as the main comparison. The existing seed-one
 lineages are used because they already contain the most progress; the numeric
 seed label has no special scientific status. PushT, Wall, and DINOv2 continue
 unchanged. Rope and Granular zero-depth histories remain pending exact
-functional reuse proof. Their corrected canaries passed, and full replacement
-depth production finished on 30 July 2026 with every shard complete; cache
-merge and frozen full-cache validation are now running and must pass before
-admission, a zero-depth reuse decision, or corrected real-depth training from
+functional reuse proof. Their replacement depth was regenerated one frame at a
+time on 31 July 2026 and now passes the fixed quality check at full size for
+both tasks. It is packaged for use but not yet formally admitted, because the
+old faulty depth the admission step compares against was deleted. Settling that
+comes before a zero-depth reuse decision or corrected real-depth training from
 step zero. Seeds two and three
 remain preserved until this first all-task comparison is complete.
 
@@ -275,17 +306,23 @@ figures, and empirical paper results.
   each task-and-system chain and at most 12 project GPUs in use.
 - First complete the DINOv2 and DINOcular seed-one pair on every task, using
   parallel capacity across tasks. PushT, Wall, and DINOv2 continue unchanged.
-  Rope and Granular corrected canaries passed and their full replacement depth
-  production finished on 30 July 2026; cache merge and frozen full-cache
-  validation are now running and come before admission, a zero-depth reuse
-  decision, or corrected real-depth training from step zero. Their zero-depth
-  histories
-  await exact functional reuse proof. Seeds two and three remain preserved
+  Rope and Granular replacement depth now passes its quality check at full size
+  and is packaged for use. Their zero-depth
+  histories await exact functional reuse proof. Seeds two and three remain preserved
   until the first all-task comparison is complete.
 - All nine runs for one task stay on one GPU model; resumed runs retain that
   model.
 - Each lineage proceeds automatically from training to held-out prediction and
   then fixed planning.
+- **A decision is needed on how to admit the Rope and Granular depth.** The
+  admission step was designed to prove the new depth improves on the old faulty
+  depth by comparing the two on the same frames. The old faulty depth was
+  permanently deleted on 30 July 2026 with no copy kept, so that comparison
+  cannot be made. The regenerated depth has already passed the independent
+  quality check on its own terms. The realistic choices are to admit it on that
+  check alone and record why the comparison is absent, or to regenerate the old
+  faulty depth purely to serve as a comparison. Nothing was weakened or worked
+  around while this is open.
 - No scientific claim is made before the fixed evaluations are complete.
 
 ## Work meter

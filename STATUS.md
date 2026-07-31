@@ -1,6 +1,59 @@
 # ORCHESTRATOR
 
-- Updated: 2026-07-31
+- Updated: 2026-07-31 evening
+- **Rope and Granular replacement depth now PASSES frozen full-cache validation.** The
+  2026-07-31 afternoon validates (`26780569`, `26780571`) failed exit 2 at the first gate with
+  `MAPANYTHING CACHE CONTRACT FAILURE: live MapAnything provenance differs from manifest`. Cause:
+  the four-shard production submissions never set `RG_BATCH_SIZE`, so every shard inherited the
+  wrapper default of 8 and recorded `batch_size 8` /
+  `candidate_independent_singleton_scenes_on_batch_axis`. The frozen validator instantiates the
+  live producer at batch size 1 and compares the whole producer identity, so those caches could
+  never be admitted. The merge itself was sound; the defect was at production submission.
+- **Fix and re-production.** `tools/rg_depth_mapanything.sbatch` now defaults the `build` stage to
+  batch size 1 and hard-refuses any other value, leaving the default of 8 only for the validator's
+  independent-batch equivalence probe (commit `bc40478` on `task/rope-granular-depth-repair`,
+  pushed). All eight shards were rebuilt with explicit `RG_BATCH_SIZE=1` (`26781372`-`26781379`,
+  all COMPLETED 0:0, 21-23 min each) into
+  `outputs/rg-depth-repair/rg-depth-repair-20260730a/replacement-mapanything-3fd16c1-singleton`,
+  producer code still pinned to `code-3fd16c1...` (tool sha `d55779e7...`). Every shard manifest was
+  verified to report `batch_size 1` / `literal_singleton_only`, 250 trajectories and 5,000 frames,
+  before any merge. Throughput was unchanged at ~4.08 fps because `model_batch_size` was always 1
+  and the batch knob only chunked host-side.
+- **Frozen validation PASSED for both tasks, unmodified.** Canonical shared-root chain: merges
+  `26781600` (rope) and `26781602` (granular), validates `26781601` and `26781603`, all COMPLETED
+  0:0. Both `validation.json` files record `state: PASS` with producer identity matched, independent
+  batch equivalence max abs 0.0, spot recomputation after wire decode max abs 0.0 over 32
+  dataset-wide train+valid frames, manifest counts exactly 1,000 trajectories / 20,000 frames, and
+  `low_std_map_fraction` 0.0 against a hard < 0.01 threshold. An earlier split-root chain
+  (`26781588`/`26781589`, `26781590`/`26781591`) also passed identically; the shared root exists
+  because `tools/prepare_rg_depth_release.py` requires both tasks under one cache root, and
+  symlinking into an admission path was refused as aliasing.
+- **`temporal_gate` reports `state: FAIL` under `acceptance: CHARACTERIZATION_ONLY_FRAMEWISE` and
+  does not affect the PASS.** The validator runs it with `enforce=False` by design. It measures
+  frame-to-frame depth jitter on static content, which a per-frame producer inherently has: rope
+  median static delta 0.021 and q95 0.064, granular 0.018 and 0.059, against thresholds 0.01 and
+  0.03. This is pre-existing and already accepted, not a new defect: the passing canaries showed the
+  same FAIL, and the full caches are better than the rope canary (0.021 vs 0.029). Record it as a
+  known limitation of framewise depth in the paper.
+- **Release prepared; admission is BLOCKED on deleted evidence.**
+  `tools/prepare_rg_depth_release.py` ran clean against checkpoint
+  `checkpoints/dinov2_depthembed_dropout_fullpr.pth` (sha `decc7c73...`), writing
+  `.../replacement-mapanything-3fd16c1-singleton/release/` with
+  `state: READY_FOR_END_TO_END_VALIDATION`, producer sha
+  `e6140642fcdd326f8dcabcb08ca159621b7f64f63bb886debe2b4d384958a9fd`, rope data.mdb sha
+  `1f371541c89551a33f11b8b54ea148b012ae41dd9fb74e079acc489341b0d52f`, granular data.mdb sha
+  `2f498c187b994b18a6d66965f2a7ed82f93f1c7527f4751380044f53df191b28`. **However
+  `tools/validate_rg_depth_admission.py` requires `--defective-cache-dir`: its core evidence is a
+  paired comparison against the immutable defective DA3 cache on identical frame pairs, requiring
+  the replacement to reduce temporal attenuation. Those bytes were permanently deleted on
+  2026-07-30 (`receipts/bad-depth-deletion-20260730.json`, `state: PERMANENTLY_DELETED`,
+  `archive_created: false`, `retained_bad_depth_bytes: false`), and
+  `diagnosis/defect_localization.json` preserves calibration keys but not the defective
+  moving-delta statistics.** Admission therefore cannot run as designed. This needs an owner
+  decision; it was not worked around and the admission tool was not weakened.
+- **What the PASS unblocks once admission is resolved:** the zero-depth reuse decision for Rope and
+  Granular (exact functional reuse proof, `tools/prove_rg_zero_depth_reuse.py`) and corrected
+  real-depth DINOcular training from step zero for both tasks. Neither may start before admission.
 - **Segment exit code `249:0` is normal, not a failure.** PushT DINOcular and zero-depth segments run to about 07:49 of their 07:55 limit, receive `USR1`, write a deterministic step checkpoint, and exit 249. `sacct` labels these `FAILED`; the logs end `STEP_PROGRESS status=SIGNAL_CHECKPOINTED` and the next segment resumes from that exact step. Do not treat a 249 segment as a defect or a reason to resubmit.
 - **PushT/Wall seed-1 progress at 2026-07-31 afternoon:** PushT `dino_pinned` at step 110,000 of 123,858 (segment `26774866` COMPLETED 0:0 in 07:29:14, successor `26780691` queued); PushT `dinocular` at step 42,741 of 123,858 (`26779125` running); PushT `dinocular_zerodepth` running (`26779126`); Wall `dino` running (`26780083`, 29 completed segments); Wall `zerodepth` 30 completed segments with `26780482` queued. Run root is `outputs/campaign-seed1/pusht-seed1-countable-20260728a`.
 - **Project documents are now versioned.** `HUMAN_PLAN.md`, `STATUS.md`, `RESTART_HANDOFF.md`, `OLD_HISTORY.md`, `BUDGET.md`, `MASTER_PLAN.md`, `STATUS_GTDEPTH.md`, and `DATASET_MANIFEST.json` live on `dino_wm` branch `task/human-plan-current-update` (pushed; commits `818c0eb` import, `3f117b0` cleanup), checked out at `/home/user/azirar/dinocular-wm-worktrees/project-docs`, with relative symlinks at the project root so existing paths and `frogmouth HUMAN_PLAN.md` still work. **Edits made through the root symlinks are only saved once committed in that worktree.** `HANDOFF.md`, `OPERATIONS_RESTART_HANDOFF.md`, `STATUS_PAPER.md`, and `PAPERPILOT.md` were superseded or duplicated and were removed in `3f117b0`; they remain recoverable from `818c0eb`. Root `CLAUDE.md` and `AGENTS.md` stay unversioned harness files. The `dino_wm` campaign checkout is untouched at HEAD `158c747` with its dirty candidate preserved.
