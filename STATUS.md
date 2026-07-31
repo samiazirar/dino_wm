@@ -1,6 +1,28 @@
 # ORCHESTRATOR
 
 - Updated: 2026-07-31 evening
+- **Defective DA3 comparison baseline is being regenerated (owner decision, 2026-07-31).** The
+  admission blocker below was resolved by choosing to rebuild the deleted defective DA3 cache
+  rather than admit on the frozen validation alone. Jobs `26782461` (rope) and `26782462`
+  (granular) were submitted on `sgpu_medium`, one A100 each, 4 h, via the original unmodified
+  wrapper `slurm/depth_cache.sbatch` (sha `85c0969696fee0326d7ca4e8a84a73e855413ac7f4ce2ba54e82e5a4197a8a61`)
+  with `--export=ALL,DEPTH_ENVIRONMENT={rope,granular}`. Preconditions verified before submission:
+  deployed producer `code/dino_wm/tools/precompute_depth.py` is byte-identical to the recorded pin
+  `5712422eae014e9aeb03fd44b98d33bd2c28f518e9e962d8fb64ac147cb1b79b` at fix commit `27b73d7e`; DA3
+  checkout `e74fd796` clean, SALAD `6aede13a`, all three pinned artifacts hash-match; per-environment
+  calibration regenerates in-job (no `--calibration-manifest`). Output is the canonical
+  `data/depth_cache/{rope,granular}.lmdb` deliberately, for faithful reproduction; this is safe
+  because `DepthCacheReader` requires a pinned `cache_manifest_sha256` and the fresh manifest UUIDs
+  are referenced by no config, so the caches cannot be silently consumed as accepted depth.
+  Acceptance requires `data.mdb` sha256 `64cab2be...af680d` (rope) and `4b6b3238...c23349`
+  (granular) plus calibration `lo=0.9579539752006531`/`hi=2.320253071784973`/keys `2d9088fd...14a8`
+  and `lo=0.8734745681285858`/`hi=2.3549521017074584`/keys `b2b12734...12bd22`. Any mismatch stops
+  the chain and is reported; it does not proceed to admission.
+- **PENDING FOLLOW-UP, after admission consumes the comparison and not before:** move the
+  regenerated defective caches off the canonical accepted-depth path into an explicit quarantine
+  location with a short receipt stating what they are and why they exist, so a later reader cannot
+  mistake them for accepted depth. **Do not delete them** — they are now the only copy of that
+  evidence.
 - **Rope and Granular replacement depth now PASSES frozen full-cache validation.** The
   2026-07-31 afternoon validates (`26780569`, `26780571`) failed exit 2 at the first gate with
   `MAPANYTHING CACHE CONTRACT FAILURE: live MapAnything provenance differs from manifest`. Cause:
