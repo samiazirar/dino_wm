@@ -14,6 +14,9 @@ MAX_POLLS=${RG_DEPTH_WATCH_MAX_POLLS:-0} # Test-only bounded loop; zero means fo
 INITIAL_DELAY_SECONDS=${RG_DEPTH_WATCH_INITIAL_DELAY_SECONDS:-0}
 PID_FILE=${RG_DEPTH_WATCH_PID_FILE:-}
 LOG=${RG_DEPTH_WATCH_LOG:-"${EVENT%.event.json}.watch.log"}
+WATCH_CONTEXT=${RG_DEPTH_WATCH_CONTEXT:-"watched jobs $JOBS"}
+WATCH_TRIGGER_SUMMARY=${RG_DEPTH_WATCH_TRIGGER_SUMMARY:-"all-terminal state, repeated monitor failure, or configured maximum silence"}
+WATCH_RECOVERY=${RG_DEPTH_WATCH_RECOVERY:-"Read $EVENT once, inspect only jobs $JOBS with read-only scheduler/controller checks, and continue the same task; do not model-poll."}
 
 IFS=, read -r -a EXPECTED_JOB_IDS <<< "$JOBS"
 if [ "${#EXPECTED_JOB_IDS[@]}" -eq 0 ]; then
@@ -152,7 +155,7 @@ PY
 notify_operations() {
     local kind=$1
     if herdr-role-message operations \
-        "MATERIAL ROPE/GRANULAR DEPTH WATCH EVENT ($kind). Read $EVENT once and inspect only the four corrected canary jobs and named repair outputs. Continue the same task with the concrete correction or dependent stage; do not model-poll." \
+        "MATERIAL WATCH EVENT ($kind) for $WATCH_CONTEXT. Trigger semantics: $WATCH_TRIGGER_SUMMARY. Recovery: $WATCH_RECOVERY" \
         >> "$LOG" 2>&1; then
         log "DELIVERY_OK kind=$kind"
     else
