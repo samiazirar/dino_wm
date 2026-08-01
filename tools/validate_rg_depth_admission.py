@@ -341,6 +341,7 @@ def main() -> None:
     producer_validation = json.loads(args.producer_validation.read_text())
     if producer_validation.get("state") != "PASS":
         raise RuntimeError("producer validation did not pass")
+    repeated_rate, repeated, payloads = payload_hash_rate(args.cache_dir)
     reader = DepthCacheReader(
         environment=args.environment,
         source_root=args.source_root,
@@ -470,7 +471,6 @@ def main() -> None:
         .mean()
         .cpu()
     )
-    repeated_rate, repeated, payloads = payload_hash_rate(args.cache_dir)
     observed_minimum = float(depth.min())
     observed_maximum = float(depth.max())
     exact_alignment = all(
