@@ -2,6 +2,44 @@
 
 Date: 2026-07-23
 
+## Current legacy inspection and live-state correction — 2026-08-01
+
+This section supersedes older execution, pane-topology, scheduler, and watcher
+assertions below. Research remains paused; this inspection did not resume
+coding, testing, experiments, evaluation, paper work, or campaign control.
+
+- The fixed question is unchanged: whether useful depth input improves
+  world-model prediction and robot planning across the locked DinocularWorldModel
+  comparison.
+- Every pane in legacy Herdr workspaces `w2T` (`Claude RC`) and `w2V`
+  (`Command`) was read. The full disposition table and cross-project pointers
+  are in `OLD_HISTORY.md`; the only substantive claims were unrelated
+  DFormerv2/JUPITER scaling and Kimi decode-speed claims. Neither changes
+  Dinocular evidence or the paused scientific state.
+- Superseded Human session
+  `019f8f33-ec04-7962-82bd-3a1a80c90a75` and superseded Operations session
+  `019fb1c0-ad48-7a93-a965-2d95c0c42b47` are archived in `OLD_HISTORY.md`.
+  Neither appears in the current Herdr pane inventory. The observed current
+  Dinocular leadership was Human `w3:p8K`, Operations `w3:p8M`, and Selene
+  `w3:p8N`.
+- Read-only Marvin snapshot at `2026-08-01T15:50:29+02:00` found exactly two
+  continuing seed-one PushT jobs: `26792098`
+  (`countable-pusht-dinocular-s1`, `sgpu021`) and `26792308`
+  (`countable-pusht-dinocular_zerodepth-s1`, `sgpu023`). Their exact sbatch,
+  stdout, and stderr paths are recorded in `OLD_HISTORY.md`. They remain
+  untouched.
+- The detached controller remains PID `874135` with child `874137`, running
+  `/tmp/dinocular_resume_controller.py` from the deleted
+  `rope-granular-admission-hold` worktree. Its state file was updated at
+  `2026-08-01T13:56:44Z` and identifies the two PushT arms as active seed-one
+  resumes. It remains untouched.
+- Two older watcher loops are still present in the local process table (PIDs
+  `5358` and `1182620`) but target absent panes and stale/empty inputs. Their
+  ownership is unresolved and no watcher action was taken.
+
+No live job, controller, watcher, repository, result, or other project state
+was changed by this recovery inspection.
+
 ## Current execution update — 2026-07-29
 
 This section supersedes the July 23 stop-state and execution-state assertions
