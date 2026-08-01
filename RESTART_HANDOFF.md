@@ -2,6 +2,62 @@
 
 Date: 2026-07-23
 
+## Final accepted recovery state — 2026-08-01
+
+Status: CAN RESTART. Research is paused: do not resume coding, testing,
+experiments, evaluation, paper work, scheduler work, or campaign control until
+the user explicitly says to continue. This section is the current restart
+record and supersedes every older contradictory scheduler, topology, and
+watcher statement below.
+
+- The fixed question is unchanged: does useful depth input improve
+  world-model prediction and robot planning in the DinocularWorldModel
+  comparison? No scientific result or live project state was changed here.
+- Canonical accepted legacy state is `c31361e`. Watcher repair `8475e38`
+  (`Repair watcher notification routing`) is integrated and pushed as
+  `8eaa53c` on `task/rope-granular-depth-repair` / `origin/task/rope-granular-depth-repair`.
+  Rejected commit `780697d` (`Record exact PushT watcher recovery state`) is
+  explicitly not accepted and must never be integrated; it is not an ancestor
+  of `c31361e`.
+- Final project topology is seven fixed tabs in workspace `w3`: `w3:t3J`
+  `00 Human Plan`, `w3:t3K` `01 Orchestrators`, `w3:t3M` `02 Strategic
+  Council`, `w3:t3N` `03 Suborchestrators`, `w3:t6Q` `04 Workers`, `w3:t6R`
+  `05 Progress Checks`, and `w3:t6S` `99 Old History`. The two project
+  Frogmouth viewers are PID `2163361` on `dinocular-wm/HUMAN_PLAN.md` and PID
+  `1023840` on `dinocular-wm/OLD_HISTORY.md`.
+- Superseded Human session `019f8f33-ec04-7962-82bd-3a1a80c90a75` and
+  superseded Operations session `019fb1c0-ad48-7a93-a965-2d95c0c42b47` are
+  archived in `OLD_HISTORY.md`. Current leadership is Human `w3:p8K`,
+  Operations `w3:p8M`, and Selene `w3:p8N`.
+- The two intentionally continuing Marvin jobs remain unchanged and running:
+  `26792098` `countable-pusht-dinocular-s1` on `sgpu021`, and `26792308`
+  `countable-pusht-dinocular_zerodepth-s1` on `sgpu023`. The detached local
+  controller remains PID `874135` (`flock`) with child `874137`
+  (`python3 /tmp/dinocular_resume_controller.py`) from the deleted
+  `rope-granular-admission-hold` worktree.
+- Stale cleanup is complete: `campaign-guardian.service` is inactive/dead,
+  no Dinocular watcher timer is active, and stale watcher PIDs `5358` and
+  `1182620` are absent. No stale guardian or watcher was restarted.
+- The corrected watcher is the active transient service
+  `dinocular-pusht-pair-rhea-20260801.service`, `active/running`, main PID
+  `1096108`, running
+  `selene-watcher-route-repair/tools/rg_depth_event_watch.sh` for exactly
+  `26792098,26792308`. Its log is
+  `/tmp/dinocular_pusht_pair_rhea_20260801.watch.log`, its receipt path is
+  `/tmp/dinocular_pusht_pair_rhea_20260801.event`, and its configured interval
+  is 600 seconds with retry limit 3, four bounded polls, and zero initial
+  delay. The log's current observation is `POLL_OK kind=NONTERMINAL`.
+- The service's clean, preserved worktree is
+  `task/selene-watcher-route-repair` at `8475e38`; keep that worktree until
+  the service terminates or it is safely relocated after code integration.
+  The watcher triggers on all-terminal state, repeated monitor failure, or
+  30-minute maximum silence.
+- Operations' exact terminal/silence action is: read the receipt once; inspect
+  only PushT jobs `26792098` and `26792308` plus controller PIDs `874135/874137`
+  using read-only checks; continue the same PushT exact-pair task; do not
+  model-poll, submit, cancel, requeue, signal, attach to, or modify either
+  job or controller.
+
 ## Current legacy inspection and live-state correction — 2026-08-01
 
 This section supersedes older execution, pane-topology, scheduler, and watcher
