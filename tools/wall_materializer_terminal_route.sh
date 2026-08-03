@@ -8,13 +8,13 @@ JOB_ID=${WALL_MATERIALIZER_JOB_ID:-26814624}
 BUNDLE_PATH=${WALL_MATERIALIZER_BUNDLE_PATH:-/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm/outputs/campaign-evaluation/eval36-20260728a/inputs/wall-terminal}
 RECEIPT_PATH=${WALL_MATERIALIZER_RECEIPT_PATH:-$BUNDLE_PATH/terminal_input_receipt.json}
 TRUSTED_WATCHER=${WALL_TERMINAL_TRUSTED_WATCHER:-/home/user/azirar/dinocular-wm-worktrees/selene-watcher-route-repair/tools/rg_depth_event_watch.sh}
-EVENT_PATH=${WALL_TERMINAL_EVENT_PATH:-/tmp/dinocular-wall-materializer-26814624.event.json}
-RAW_EVENT_PATH=${WALL_TERMINAL_RAW_EVENT_PATH:-/tmp/dinocular-wall-materializer-26814624.trusted.event.json}
-LOG_PATH=${WALL_TERMINAL_LOG_PATH:-/tmp/dinocular-wall-materializer-26814624.watch.log}
-RAW_LOG_PATH=${WALL_TERMINAL_RAW_LOG_PATH:-/tmp/dinocular-wall-materializer-26814624.trusted.watch.log}
-PID_PATH=${WALL_TERMINAL_PID_PATH:-/tmp/dinocular-wall-materializer-26814624.trusted.pid}
-STATE_PATH=${WALL_TERMINAL_STATE_PATH:-/tmp/dinocular-wall-materializer-26814624.state}
-LOCK_PATH=${WALL_TERMINAL_LOCK_PATH:-/tmp/dinocular-wall-materializer-26814624.lock}
+EVENT_PATH=${WALL_TERMINAL_EVENT_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.event.json}
+RAW_EVENT_PATH=${WALL_TERMINAL_RAW_EVENT_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.trusted.event.json}
+LOG_PATH=${WALL_TERMINAL_LOG_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.watch.log}
+RAW_LOG_PATH=${WALL_TERMINAL_RAW_LOG_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.trusted.watch.log}
+PID_PATH=${WALL_TERMINAL_PID_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.trusted.pid}
+STATE_PATH=${WALL_TERMINAL_STATE_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.state}
+LOCK_PATH=${WALL_TERMINAL_LOCK_PATH:-/tmp/dinocular-wall-materializer-${JOB_ID}.lock}
 MAX_SILENCE_SECONDS=${WALL_TERMINAL_MAX_SILENCE_SECONDS:-10800}
 POLL_SECONDS=${WALL_TERMINAL_POLL_SECONDS:-600}
 RETRY_LIMIT=${WALL_TERMINAL_RETRY_LIMIT:-3}
@@ -294,7 +294,7 @@ finalize_event() {
     send_to_ada "$event" "$reason" "$output_state" "$output_reason" || true
 }
 
-[[ "$JOB_ID" =~ ^26814624$ ]] || { printf 'job scope is fixed to 26814624\n' >&2; exit 2; }
+[[ "$JOB_ID" =~ ^[0-9]+$ ]] || { printf 'job scope must be a numeric Slurm job id\n' >&2; exit 2; }
 [[ "$MAX_SILENCE_SECONDS" =~ ^[1-9][0-9]*$ && "$POLL_SECONDS" =~ ^[0-9]+$ && "$RETRY_LIMIT" =~ ^[1-9][0-9]*$ ]] || {
     printf 'invalid route interval configuration\n' >&2
     exit 2
@@ -322,7 +322,7 @@ DEADLINE_EPOCH=$((STARTED_EPOCH + MAX_SILENCE_SECONDS))
 write_state ACTIVE || true
 log "START route_id=wall-materializer-$JOB_ID job=$JOB_ID trusted_watcher=$TRUSTED_WATCHER trusted_commit=8475e3865159324ef1ce5a7c3903bc685cb53a2c owner=$ADA_TARGET maximum_silence_seconds=$MAX_SILENCE_SECONDS poll_seconds=$POLL_SECONDS"
 
-CAPTURE_DIR=$(mktemp -d /tmp/dinocular-wall-materializer-26814624.capture.XXXXXX) || exit 2
+CAPTURE_DIR=$(mktemp -d "/tmp/dinocular-wall-materializer-${JOB_ID}.capture.XXXXXX") || exit 2
 BASH_ENV_FILE="$CAPTURE_DIR/bash-env"
 CAPTURE_FILE="$CAPTURE_DIR/messages.log"
 printf '%s\n' \
@@ -359,7 +359,7 @@ while :; do
 
     raw_kind=$(raw_field kind)
     if [[ "$raw_kind" == TERMINAL ]]; then
-        probe_file=$(mktemp /tmp/dinocular-wall-materializer-26814624.probe.XXXXXX) || exit 2
+        probe_file=$(mktemp "/tmp/dinocular-wall-materializer-${JOB_ID}.probe.XXXXXX") || exit 2
         OUTPUT_STATE=QUERY_ERROR
         OUTPUT_REASON='bounded output probe did not run'
         OUTPUT_ROUTE_COUNT=
