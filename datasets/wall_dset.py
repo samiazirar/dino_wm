@@ -84,15 +84,11 @@ class WallDataset(TrajDataset):
     def get_frames(self, idx, frames):
         obs_dir = self.data_path / "obses"
         image = torch.load(obs_dir / f"episode_{idx:03d}.pth")
-        # Wall stores one terminal observation after its 50 action-aligned
-        # rows.  Preserve that observation index while keeping auxiliary
-        # action/state metadata inside the 50-row contract.
-        aux_frames = [min(int(frame), self.traj_len - 1) for frame in frames]
-        act = self.actions[idx, aux_frames]
-        state = self.states[idx, aux_frames]
-        proprio = self.proprios[idx, aux_frames]
-        door_location = self.door_locations[idx, aux_frames]
-        wall_location = self.wall_locations[idx, aux_frames]
+        act = self.actions[idx, frames]
+        state = self.states[idx, frames]
+        proprio = self.proprios[idx, frames]
+        door_location = self.door_locations[idx, frames]
+        wall_location = self.wall_locations[idx, frames]
 
         image = image[frames] / 255 
         if self.transform:
