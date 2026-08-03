@@ -41,10 +41,11 @@ the strongest real depth variation. Wall is a flatter-scene control. Historical
 real-depth DINOcular results for Rope and Granular are excluded, and their
 zero-depth histories remain pending exact functional reuse proof. Their
 replacement per-frame depth was regenerated on 31 July 2026 and now passes the
-fixed quality check at full size, though it is not yet formally admitted.
-PushT, Wall, and DINOv2 continue
-unchanged. Rope and Granular remain exploratory because each has only 10
-planning targets and no currently accepted common binary success definition.
+fixed quality check at full size. However, the direct corrected-versus-old
+comparison failed its fixed moving-versus-static separation requirement, so
+the corrected Rope and Granular depth remains unusable. Rope and Granular
+remain exploratory because each has only 10 planning targets and no currently
+accepted common binary success definition.
 
 ## The 36 training runs
 
@@ -92,8 +93,9 @@ before the encoder uses it.
 
 PushT and Wall are visually flat tasks, so they test whether the complete
 representation helps even when scene depth is weak. Rope and Granular keep their
-exploratory perspective-depth role: their replacement depth has now passed the
-fixed quality check, and admission remains to be settled.
+exploratory perspective-depth role. Their replacement depth passes its general
+quality checks but failed the fixed moving-versus-static separation requirement
+and therefore cannot yet be used.
 
 ## How one run is trained
 
@@ -163,194 +165,101 @@ Every PushT result involving DINOcular must state that its fixed recovered
 depth proxy is not physical distance and does not reconstruct the original
 depth-producing system.
 
-## Current evidence
+## What we know now
 
-All 36 training lineages have been submitted. Their controller allows at most
-one computing job at a time in each task-and-system chain and at most 12
-project GPUs overall. A lineage that completes training automatically proceeds
-to its fixed held-out prediction evaluation and then to fixed planning.
+All 36 planning specifications are fixed. Together they define 1,080 expected
+model-target planning results. Rope and Granular use exactly 20 high-level
+actions: four replanning rounds of five actions each, with no early stop based
+on the outcome. Their terminal Chamfer distance is measured after action 20.
 
-All 36 planning specifications and launch wrappers are ready. Together they
-define 1,080 expected model-target planning outcomes. Rope and Granular use
-exactly 20 high-level actions: four replanning rounds of five actions each,
-with no early stop based on the outcome. Their terminal Chamfer distance is
-measured after action 20.
+Wall DINOcular seed one and Wall zero-depth DINOcular seed one are fully
+trained at the exact target of 143,910 steps. Both are ready for the fixed
+held-out prediction and planning evaluations.
 
-Granular DINOv2 seed one is the first controller-accepted fully trained
-lineage. It reached 53,500 steps, and its fixed held-out prediction evaluation
-completed with 100 episode records.
+PushT DINOcular seed one and PushT zero-depth DINOcular seed one are healthy at
+about 64% of training. Their latest measured steps are 78,724 and 78,927,
+respectively, and each has exactly one unique continuation so that the same
+lineage is completed rather than duplicated.
 
-Rope DINOv2 seed one has now also been accepted at its exact 53,500-step target
-without retraining. Its fixed held-out prediction evaluation is complete with
-100 episode records.
+Rope DINOv2 seed one and Granular DINOv2 seed one remain fully trained at
+53,500 steps. Each has completed 100 held-out prediction episodes.
 
-Historical real-depth DINOcular results for Rope and Granular are excluded.
-Their zero-depth histories are not accepted unless exact functional reuse is
-shown. Corrected canaries for replacement per-frame MapAnything depth passed.
-About 7.36 GB of obsolete real-depth-derived artifacts were permanently removed
-without touching zero-depth, DINOv2, PushT, Wall, raw sources, or healthy runs.
-Full replacement depth production ran in four isolated literal-singleton
-MapAnything shards per task and finished on the evening of 30 July 2026. All
-four shards for each task are complete, together covering the full released
-data: 1,000 trajectories and 20,000 frames for Rope and the same for Granular.
-The merge and validation steps first prepared for those shards were left
-waiting on an earlier failed production attempt and could never have run; they
-were cancelled on 31 July and resubmitted against the shards that actually
-completed.
+The direct corrected-versus-old depth comparison has now run for Rope and
+Granular. The corrected values changed and improved, but the fixed admission
+requirement still failed on moving-versus-static separation: 1.402 for Rope
+and 1.646 for Granular. Corrected Rope and Granular depth therefore remains
+unusable until this low separation is causally resolved or its source-video
+cause is measured directly.
 
-Those first checks failed, and the reason was a setup mistake rather than bad
-depth. The depth producer can process frames either strictly one at a time or in
-groups; the fixed recipe for this study requires one at a time, and the quality
-check refuses anything else. The production runs accidentally used the grouped
-setting because it was the default, so the check correctly rejected them. The
-recipe was corrected so the grouped setting can no longer be selected by
-accident, and all the depth was regenerated one frame at a time on the evening
-of 31 July. Regeneration cost nothing extra: the depth model was always
-processing one frame at a time internally, so the speed was identical.
+There are 997 repeated-depth occurrences in Rope and 999 in Granular. Every
+one corresponds to exactly repeated aligned color images. This shows that the
+depth estimator is not repeating while the visible image changes; the
+duplication comes from duplicated source-video frames. It does not yet explain
+the separate low moving-versus-static separation result, because RGB motion
+has not been measured directly for that issue.
 
-**The regenerated Rope and Granular depth now passes the fixed quality check for
-both tasks.** The check reproduced 32 frames spread across each dataset from
-scratch and got exactly the same values, confirmed the full expected size of
-1,000 trajectories and 20,000 frames per task, and confirmed the depth maps
-carry real detail rather than flat or empty output.
+Historical real-depth DINOcular results for Rope and Granular remain excluded.
+Their zero-depth histories remain unusable unless exact functional reuse is
+shown. No matched scientific comparison, aggregate decision, or winner exists
+yet.
 
-One measurement in that check is reported as a failure but does not count
-against the result, and it was already the case for the smaller trial runs that
-were accepted earlier. Because each frame's depth is estimated independently,
-the depth of a motionless part of the scene wobbles slightly from frame to
-frame. The check measures this and flags it, but treats it as a description of
-the method rather than a pass-or-fail condition. Our full data is in fact
-steadier than the earlier accepted trial. This is a real limitation of per-frame
-depth and belongs in the paper.
+The empirical paper retains the current framing, methods, limitations, and
+strict result-ingestion path. Missing or incomplete results produce no paper
+conclusion. Rope and Granular depth results cannot support claims while their
+corrected depth remains unusable, and every PushT result involving DINOcular
+must retain the recovered-depth-proxy qualification stated above.
 
-The depth has been packaged for use, but it is not yet formally admitted. The
-admission step proves the new depth is better than the old faulty depth by
-comparing the two on the same frames, and the old faulty depth had been
-permanently deleted on 30 July with no copy kept. Rather than give up that
-comparison, we rebuilt the old faulty depth from scratch on 1 August, using the
-same fixed depth producer, the same model files and the same settings as the
-original. Both rebuilds ran cleanly in about eighty minutes each and passed
-every quality check on their own.
+## What we know and use
 
-The rebuild came out the same as the original where it matters, and different
-where it does not. The depth values themselves are exactly identical: on the
-frames the admission comparison actually uses, every rebuilt depth map matches
-the original bit for bit, with a difference of exactly zero. The brightness and
-range settings derived from the data came out identical to the last decimal
-place too. What does not match is a checksum of the database file that stores
-the depth. That file records the same numbers in a slightly different internal
-arrangement, so its checksum differs even though its contents do not.
-
-This leaves one question for us: whether identical depth values on the frames
-the comparison uses are enough to stand in for a matching file checksum. That
-is described under current decisions below. Nothing was weakened or worked
-around to get here, and the admission comparison has not been run. Neither task
-has an admissible DINOcular planning outcome.
-
-The confirmed Weights & Biases dashboard is
-<https://wandb.ai/rlp_uni_bonn/dinocular-wm-campaign>. The lineage currently
-visible there was imported from existing records. Imported history and live
-telemetry are kept distinct, so an imported run is not presented as live
-training telemetry.
-
-PushT, Wall, and DINOv2 lineages continue unchanged. No duplicate execution or
-later-seed advance is reported.
-
-No accepted matched DINOv2-versus-DINOcular task pair is complete, and
-therefore no scientific comparison or winner can yet be reported.
-
-The empirical paper now contains the current framing, Methods, a vector
-overview figure, Limitations, and a fail-closed path that will ingest the real
-prediction and planning tables and figures only from the complete 36-lineage
-evaluation bundle. It also applies the predeclared comparison and convergence
-rules to generate machine-readable and manuscript-ready decision summaries,
-including null or negative outcomes. The active controller now supplies the
-fixed convergence record and will invoke this complete path after all
-evaluations exist. Missing or incomplete results create no paper result
-artifacts. The paper shows partial controller-accepted seed-one Results in
-Progress values, including valid DINOv2 prediction and planning rows, but no
-aggregate decision, winner, or conclusion exists; excluded or provisional Rope
-and Granular depth rows cannot support claims. It is not published. The
-obsolete PaperPilot diff is retired.
-
-## Data and evidence map
-
-**Observed now** means a checked fact; **next observable action** means the
-event that would change it.
-
-| Item | Why it matters | Observed now | Next observable action |
+| Item | Why it matters | What we know | Next useful result |
 |---|---|---|---|
-| **Fixed datasets and depth inputs** | Supply the color, action, state, and depth inputs for the four tasks. | PushT, Wall, and DINOv2 inputs remain fixed. Historical Rope and Granular real-depth DINOcular inputs are excluded and zero-depth reuse remains unproven. The replacement Rope and Granular depth was regenerated one frame at a time on 31 July 2026 and now passes the fixed quality check for both tasks, at the full size of 1,000 trajectories and 20,000 frames each. The old faulty depth it is compared against was rebuilt on 1 August 2026 and its depth values match the original exactly on the frames the comparison uses. | Decide whether identical depth values stand in for the differing checksum of the file that stores them, then run the comparison. |
-| **Training campaign** | Produces the 36 trained world models needed for matched comparisons. | Granular and Rope DINOv2 seed one are fully accepted; PushT, Wall, and DINOv2 continue unchanged. | Complete the first accepted DINOv2–DINOcular task pair. |
-| **Held-out prediction** | Measures how well each trained model predicts unseen trajectory segments. | Granular and Rope DINOv2 seed one each have a complete 100-episode prediction evaluation. | Evaluate the next completed lineage under the same fixed procedure. |
-| **Fixed planning** | Tests whether prediction improvements help action selection on the declared targets. | Neither Rope nor Granular has an admissible DINOcular planning outcome. | The depth now passes its quality check and is packaged; settle admission, then take the zero-depth reuse decision and start corrected real-depth training from step zero. |
-| **Weights & Biases dashboard** | Makes campaign records visible without controlling training. | The dashboard is confirmed, and its currently visible lineage is imported history rather than live telemetry. | Keep imported records distinct from live telemetry as new runs report. |
-| **Empirical paper** | Records the design and will eventually report the evidence. | Framing, Methods, the overview figure, Limitations, strict result ingestion, and predeclared decision reporting exist. Partial controller-accepted seed-one Results in Progress values include valid DINOv2 prediction and planning rows, but no aggregate decision, winner, or conclusion exists; excluded or provisional Rope and Granular depth rows cannot support claims. | Generate the tables, figures, and supported conclusion only after the complete fixed evaluation bundle exists. |
+| **Wall seed one** | Gives the flatter-scene control for both the complete-system and informative-depth questions. | DINOcular and zero-depth DINOcular are fully trained at 143,910 steps. | Run their fixed prediction and planning evaluations. |
+| **PushT seed one** | Supplies the primary planning comparison and the main informative-depth result. | DINOcular is at 78,724 steps and zero-depth DINOcular is at 78,927 steps; both are healthy at about 64%, with one unique continuation each. | Complete both lineages, then run their fixed prediction and planning evaluations. |
+| **Rope and Granular DINOv2 seed one** | Supplies the color-image baseline for the exploratory deformable tasks. | Both are fully trained, and each has 100 held-out prediction episodes completed. | Preserve these results for later matched comparisons. |
+| **Rope and Granular corrected depth** | Determines whether the exploratory DINOcular comparisons can use informative depth. | Corrected depth improved over old depth but failed moving-versus-static separation at 1.402 for Rope and 1.646 for Granular. All 997 Rope and 999 Granular repeated-depth occurrences align with exactly repeated RGB source frames, but RGB motion has not yet been measured for the low-separation issue. | Directly analyze RGB motion to measure the source-video cause of the remaining separation failure. |
+| **Empirical paper** | Will report the fixed design and only the conclusions supported by the complete results. | No matched scientific comparison, aggregate decision, winner, or conclusion exists yet. | Generate supported tables, figures, and conclusions only after the required fixed evaluations exist. |
 
 ## Current milestone
 
-The immediate priority is one complete matched seed across all four tasks,
-with DINOv2 versus DINOcular as the main comparison. The existing seed-one
-lineages are used because they already contain the most progress; the numeric
-seed label has no special scientific status. PushT, Wall, and DINOv2 continue
-unchanged. Rope and Granular zero-depth histories remain pending exact
-functional reuse proof. Their replacement depth was regenerated one frame at a
-time on 31 July 2026 and now passes the fixed quality check at full size for
-both tasks. It is packaged for use but not yet formally admitted, because the
-old faulty depth the admission step compares against was deleted. Settling that
-comes before a zero-depth reuse decision or corrected real-depth training from
-step zero. Seeds two and three
-remain preserved until this first all-task comparison is complete.
+The immediate priority remains one complete matched seed across all four tasks,
+with DINOv2 versus DINOcular as the main comparison. The numeric seed label has
+no special scientific status. Wall now has two newly completed DINOcular
+lineages ready for evaluation, while the two PushT DINOcular lineages are the
+next training completions. Rope and Granular corrected depth cannot be used
+unless the low moving-versus-static separation is causally resolved or its
+source-video cause is measured directly.
 
-The next meaningful evidence is a fully trained and evaluated DINOv2–DINOcular
-pair on the same task. Completing all four such pairs gives the first
-cross-task answer for one matched seed. Until evaluation and planning finish,
-training progress alone does not answer the research question.
+The three next useful actions are:
+
+1. Run the fixed Wall prediction and planning evaluations.
+2. Complete and evaluate the two PushT seed-one lineages.
+3. Directly analyze RGB motion for the remaining Rope and Granular separation
+   issue.
 
 The later milestone is the complete 36-lineage matrix: all three systems on all
 four tasks with all three seeds, followed by the predeclared comparisons,
-figures, and empirical paper results.
+figures, and empirical paper results. Training progress alone does not answer
+the research question.
 
 ## Current decisions
 
-- CLAIX/Aachen is reserved for other work and is not available to this project.
-  Scientific jobs may use Marvin, lmgpu, or lmdort when the accepted
-  environment and inputs can be preserved. lmdort was proven compatible and
-  used; Marvin remains the main campaign cluster. lmgpu is used only for
-  lineages whose complete accepted environment can be reproduced there.
-- All 36 lineages remain controller-managed, with at most one computing job in
-  each task-and-system chain and at most 12 project GPUs in use.
-- First complete the DINOv2 and DINOcular seed-one pair on every task, using
-  parallel capacity across tasks. PushT, Wall, and DINOv2 continue unchanged.
-  Rope and Granular replacement depth now passes its quality check at full size
-  and is packaged for use. Their zero-depth
-  histories await exact functional reuse proof. Seeds two and three remain preserved
-  until the first all-task comparison is complete.
+- All 36 lineages remain limited to one computing job in each task-and-system
+  chain and at most 12 project GPUs in use.
 - All nine runs for one task stay on one GPU model; resumed runs retain that
   model.
-- Each lineage proceeds automatically from training to held-out prediction and
-  then fixed planning.
-- **Rebuilding the old faulty depth was chosen and is done.** Faced with a
-  comparison that could not be made because the old faulty depth had been
-  deleted, we chose to rebuild it rather than skip the comparison. It cost about
-  three hours of one graphics card across the two tasks and finished on 1 August
-  2026.
-- **One question remains before the comparison can be run.** The rebuilt depth
-  values are exactly identical to the original on the frames the comparison
-  uses, and the settings derived from the data are identical as well, but the
-  checksum of the file that stores them differs because the same numbers are
-  arranged differently inside it. The question is whether identical depth values
-  are enough to stand in for a matching file checksum. Our reading is that they
-  are, because the file checksum was never a measure of the depth itself and no
-  checksum of the depth values was ever recorded, so it cannot be reproduced by
-  any rerun. The alternative is to treat the file checksum as binding and admit
-  the new depth on its own quality check instead, recording why the comparison
-  is absent. Nothing was weakened or worked around while this is open, and the
-  comparison has not been run.
-- No scientific claim is made before the fixed evaluations are complete.
+- Each completed lineage proceeds to the same fixed held-out prediction and
+  planning evaluations.
+- The corrected Rope and Granular depth is not usable merely because it
+  improved over the old depth or because exact-RGB duplication has been found.
+  The separate low moving-versus-static separation must be causally resolved or
+  its source-video cause measured directly first.
+- Seeds two and three remain part of the fixed design; all 36 checked runs are
+  required for the complete-matrix paper claim.
+- No scientific claim is made before the fixed evaluations and predeclared
+  comparisons support it.
 
 ## Work meter
 
-Direct effort is the ongoing 36-lineage training campaign and its prepared
-automatic prediction and planning evaluations. Support work remains bounded.
-No exact productive-work percentage is claimed without measured accounting.
+Direct effort is the ongoing 36-lineage training campaign and its fixed
+prediction and planning evaluations. Support work remains bounded. No exact
+productive-work percentage is claimed without measured accounting.
