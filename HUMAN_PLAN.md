@@ -41,15 +41,19 @@ the strongest real depth variation. It has no authentic simulator depth in any
 of its 2,339,250 observations, so its DINOcular condition continues to use the
 complete MapAnything-derived proxy under the recovered-contract qualification;
 it must not be described as a ground-truth-depth result. Wall is a flatter-scene
-control. For Wall, Rope, and Granular, an informative-depth lineage may proceed
-only after authentic simulator depth covers every observation and the same
-depth source is used consistently in training and evaluation. Historical
-real-depth DINOcular results for Rope and Granular are excluded, while valid
-color-image and functionally proven zero-depth results remain reusable. Their
-replacement proxy depth failed the fixed moving-versus-static separation
-requirement at 1.402 for Rope and 1.646 for Granular and remains unusable. Rope
-and Granular remain exploratory because each has only 10 planning targets and
-no currently accepted common binary success definition.
+control, but no authentic simulator depth has been released for any of its
+training or validation observations. Its three ground-truth-depth DINOcular
+runs are therefore unavailable unless a real release is obtained; Wall depth
+must not be fabricated or inferred. Rope and Granular each have authentic
+simulator depth for all 18,000 training observations, all 2,000 validation
+observations, every observation used by the fixed prediction protocol, and all
+10 planning initial observations. Their three existing DA3-proxy
+depth-conditioned seeds per task cannot be relabeled, so all six
+depth-conditioned seeds require retraining with authentic depth. The corrected
+proxy depth failed the fixed moving-versus-static separation requirement at
+1.402 for Rope and 1.646 for Granular and remains unusable. Rope and Granular
+remain exploratory because each has only 10 planning targets and no currently
+accepted common binary success definition.
 
 ## The 36 training runs
 
@@ -96,13 +100,19 @@ same selected depth record and then replaces its values with zeros immediately
 before the encoder uses it. PushT has zero authentic simulator-depth coverage:
 0 of 2,339,250 observations. Its fixed DINOcular input is therefore the
 MapAnything-derived proxy, not physical distance or simulator ground truth.
-For Wall, Rope, and Granular, full authentic simulator-depth coverage and one
-consistent source across training and evaluation are required before an
-informative-depth result is accepted. Coverage and the provenance of current
-depth lineages are still being measured. A depth model trained with a different
-source must be retrained; it cannot be relabeled as a ground-truth-depth model.
-These provenance rules do not invalidate otherwise valid DINOv2 results or
-functionally matched zero-depth results.
+Rope and Granular each have authentic simulator depth for all 18,000 training
+observations, all 2,000 validation observations, the complete fixed prediction
+protocol, and all 10 planning initial observations. The same authentic source
+must be used consistently in training and evaluation. The three existing
+DA3-proxy depth-conditioned seeds for each task cannot be relabeled; all six
+Rope and Granular depth-conditioned seeds require authentic-depth retraining.
+Wall has no released authentic simulator depth across its training and
+validation observations. Its three ground-truth-depth DINOcular runs remain
+unavailable unless a real release is obtained, and missing Wall depth must not
+be fabricated or inferred. The nine DINOv2 runs for Wall, Rope, and Granular
+remain reusable. Reuse of their nine zero-depth DINOcular runs awaits exact
+confirmation that they are functionally equivalent to the fixed zero-depth
+condition.
 
 PushT and Wall are visually flat tasks, so they test whether the complete
 representation helps even when scene depth is weak. Rope and Granular keep their
@@ -187,11 +197,12 @@ on the outcome. Their terminal Chamfer distance is measured after action 20.
 
 Wall DINOcular seed one and Wall zero-depth DINOcular seed one are fully
 trained at the exact target of 143,910 steps, but neither has an accepted
-prediction or planning result. Their depth provenance and authentic
-simulator-depth coverage are being measured before the next accepted use. If
-the DINOcular lineage used a source that does not match the accepted evaluation
-source, it must be retrained rather than relabeled. The zero-depth lineage
-remains reusable only if its exact functional input contract is confirmed.
+prediction or planning result. No authentic simulator depth is released for
+Wall's training or validation observations. The three Wall ground-truth-depth
+DINOcular runs are unavailable unless a real release is obtained, and missing
+depth must not be fabricated or inferred. The existing depth-conditioned
+lineage cannot be relabeled as ground truth. The zero-depth lineage remains
+reusable only if its exact functional input contract is confirmed.
 
 PushT DINOcular seed one and PushT zero-depth DINOcular seed one are healthy at
 accepted steps 83,793 and 83,828, respectively, and each has exactly one unique
@@ -207,10 +218,12 @@ Rope DINOv2 seed one and Granular DINOv2 seed one remain fully trained at
 The direct corrected-versus-old proxy-depth comparison has run for Rope and
 Granular. The corrected values changed and improved, but the fixed admission
 requirement failed on moving-versus-static separation: 1.402 for Rope and
-1.646 for Granular. That proxy depth remains unusable. The active path is to
-measure complete authentic simulator-depth coverage and current lineage
-provenance, then train and evaluate any informative-depth arm with the same
-source throughout.
+1.646 for Granular. That proxy depth remains unusable. Each task has authentic
+simulator depth for all 18,000 training observations, all 2,000 validation
+observations, the fixed prediction protocol, and all 10 planning initial
+observations. The three existing DA3-proxy depth-conditioned seeds per task
+cannot be relabeled; all six must be retrained with authentic depth and then
+evaluated with that same source.
 
 There are 997 repeated-depth occurrences in Rope and 999 in Granular. Every
 one corresponds to exactly repeated aligned color images. This shows that the
@@ -219,10 +232,11 @@ duplication comes from duplicated source-video frames. RGB motion is strongly
 separable, so the low proxy-depth separation is a depth failure rather than a
 basis for admitting that proxy.
 
-Historical real-depth DINOcular results for Rope and Granular remain excluded.
-Their zero-depth histories remain unusable unless exact functional reuse is
-shown. No matched scientific comparison, aggregate decision, or winner exists
-yet.
+Historical DA3-proxy DINOcular results for Rope and Granular remain excluded.
+Across Wall, Rope, and Granular, all nine DINOv2 runs remain reusable, while
+reuse of the nine zero-depth histories awaits exact functional-equivalence
+confirmation. No matched scientific comparison, aggregate decision, or winner
+exists yet.
 
 The exact accepted matrix state is:
 
@@ -231,9 +245,10 @@ The exact accepted matrix state is:
   at 53,500 steps.
 - **Training:** PushT DINOcular seed one at step 83,793 and PushT zero-depth
   DINOcular seed one at step 83,828, each with one continuing lineage.
-- **Queued next:** provenance and coverage decisions for Wall, Rope, and
-  Granular depth arms; accepted Wall evaluation only after that decision; then
-  completion and fixed evaluation of the two running PushT lineages.
+- **Queued next:** authentic-depth retraining of all six Rope and Granular
+  depth-conditioned seeds; Wall ground-truth-depth training only if authentic
+  simulator depth is released; then completion and fixed evaluation of the two
+  running PushT lineages.
 - **Not yet established as complete:** every other task, system, and seed cell
   in the 36-lineage table. No completion is inferred for an unlisted cell.
 - **Accepted results:** Rope DINOv2 seed one and Granular DINOv2 seed one each
@@ -251,33 +266,35 @@ must retain the recovered-depth-proxy qualification stated above.
 
 | Item | Why it matters | What we know | Next useful result |
 |---|---|---|---|
-| **Wall seed one** | Gives the flatter-scene control for both the complete-system and informative-depth questions. | DINOcular and zero-depth DINOcular are fully trained at 143,910 steps but have zero accepted prediction or planning results; depth provenance and authentic coverage are being measured. | Decide provenance and coverage, retrain any mismatched depth lineage, then run the fixed evaluations on consistent inputs. |
+| **Wall seed one** | Gives the flatter-scene control for both the complete-system and informative-depth questions. | DINOcular and zero-depth DINOcular are fully trained at 143,910 steps but have zero accepted prediction or planning results. No authentic simulator depth is released for Wall's training or validation observations, so the existing depth-conditioned model cannot be called ground truth. | Keep the ground-truth-depth run unavailable unless a real depth release is obtained; confirm exact functional equivalence before reusing zero-depth. |
 | **PushT seed one** | Supplies the primary planning comparison and the main informative-depth result. | Proxy-depth DINOcular is at 83,793 steps and zero-depth DINOcular is at 83,828 steps, each with one continuing lineage. PushT has no authentic simulator depth. | Complete both lineages, then run their fixed prediction and planning evaluations without a ground-truth-depth claim. |
 | **Rope and Granular DINOv2 seed one** | Supplies the color-image baseline for the exploratory deformable tasks. | Both are fully trained, and each has 100 held-out prediction episodes completed. | Preserve these results for later matched comparisons. |
-| **Wall, Rope, and Granular authentic depth** | Determines whether informative-depth arms use one valid source throughout. | Full coverage and current lineage provenance are being measured. The Rope and Granular proxy failed at 1.402 and 1.646 despite strongly separable RGB motion. | Establish full authentic coverage and matching provenance; retrain rather than relabel any mismatched depth arm. |
+| **Wall, Rope, and Granular authentic depth** | Determines whether informative-depth arms use one valid source throughout. | Rope and Granular each have authentic depth for all 18,000 training and 2,000 validation observations, the fixed prediction protocol, and 10 planning initial observations. Their six existing DA3-proxy depth-conditioned seeds cannot be relabeled. Wall has no released authentic depth for its training or validation observations. | Retrain all six Rope and Granular depth-conditioned seeds with authentic depth. Leave all three Wall ground-truth-depth runs unavailable unless a real release is obtained. |
 | **Empirical paper** | Will report the fixed design and only the conclusions supported by the complete results. | No matched scientific comparison, aggregate decision, winner, or conclusion exists yet. | Generate supported tables, figures, and conclusions only after the required fixed evaluations exist. |
 
 ## Current milestone
 
 The immediate priority remains one complete matched seed across all four tasks,
 with DINOv2 versus DINOcular as the main comparison. The numeric seed label has
-no special scientific status. The next measurable outputs are complete
-authentic simulator-depth coverage counts and lineage-provenance decisions for
-Wall, Rope, and Granular; accepted prediction and planning results for the
-consistent Wall arms; completed PushT seed-one proxy-depth and zero-depth
-lineages followed by their fixed evaluations; and preserved Rope and Granular
-DINOv2 prediction results for later matched comparisons. The failed Rope and
-Granular proxy is not a fallback depth source.
+no special scientific status. Rope and Granular now have complete authentic
+simulator-depth coverage for training, validation, the fixed prediction
+protocol, and planning initial observations; their six depth-conditioned seeds
+must be retrained rather than relabeled. Wall's three ground-truth-depth runs
+remain unavailable without a real authentic-depth release. The next measurable
+outputs are authentic-depth Rope and Granular runs; completed PushT seed-one
+proxy-depth and zero-depth lineages followed by their fixed evaluations; exact
+functional-equivalence decisions for zero-depth reuse; and preserved reusable
+DINOv2 results. The failed Rope and Granular proxy is not a fallback depth
+source.
 
 The three next useful actions are:
 
-1. Finish the Wall, Rope, and Granular authentic-depth coverage and provenance
-   measurement, and require retraining for any mismatched informative-depth
-   lineage.
-2. Evaluate the consistent Wall seed-one arms and complete and evaluate the two
-   continuing PushT seed-one lineages.
-3. Fill the remaining matrix cells without admitting the failed Rope or
-   Granular proxy depth.
+1. Retrain all six Rope and Granular depth-conditioned seeds with authentic
+   simulator depth, using the same source throughout training and evaluation.
+2. Complete and evaluate the two continuing PushT seed-one lineages, and
+   confirm exact functional equivalence before reusing any zero-depth history.
+3. Fill the remaining available matrix cells without inventing Wall depth or
+   admitting the failed Rope or Granular proxy depth.
 
 The later milestone is the complete 36-lineage matrix: all three systems on all
 four tasks with all three seeds, followed by the predeclared comparisons,
@@ -295,10 +312,13 @@ the research question.
 - PushT continues its fixed DINOv2, MapAnything-proxy DINOcular, and zero-depth
   conditions. It has no authentic simulator depth, and no PushT result may be
   described as a ground-truth-depth result.
-- Wall, Rope, and Granular informative-depth arms require full authentic
-  simulator-depth coverage and the same source in training and evaluation. A
-  mismatched model is retrained, never relabeled. Valid DINOv2 and proven
-  zero-depth results remain reusable.
+- Rope and Granular informative-depth arms use their complete authentic
+  simulator-depth coverage and the same source in training and evaluation. All
+  six existing DA3-proxy depth-conditioned seeds are retrained, never relabeled.
+  Wall's three ground-truth-depth runs are unavailable without a real released
+  source; missing depth is never fabricated or inferred. All nine DINOv2 runs
+  remain reusable, while reuse of the nine zero-depth runs awaits exact
+  functional-equivalence confirmation.
 - The corrected Rope and Granular proxy depth remains unusable because it
   failed moving-versus-static separation at 1.402 and 1.646 despite strongly
   separable RGB motion.
