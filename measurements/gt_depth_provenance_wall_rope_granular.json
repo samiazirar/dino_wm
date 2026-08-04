@@ -1,0 +1,265 @@
+{
+  "schema": "dino-wm.gt-depth-provenance-measurement.v1",
+  "created_utc": "2026-08-04T09:03:42.030950+00:00",
+  "measurement_script": {
+    "path": "tools/measure_gt_depth_provenance.py",
+    "sha256": "7c6f07688ac7115aa9e409e47bd292b9097d4811a442aa75969765ffa6b4e451",
+    "execution": "Marvin Apptainer, full selected-source scan, --compact"
+  },
+  "project_question": "Does useful depth input improve world-model prediction/planning?",
+  "selected_camera": "cam_1",
+  "checks": {
+    "frozen_rgb_manifests_reconcile": true,
+    "deformable_ground_truth_is_complete_and_aligned": true,
+    "open_loop_manifests_are_causal_and_bound": true,
+    "planning_initial_observations_have_declared_source_binding": true,
+    "training_lineage_matrix_is_complete": true,
+    "current_informative_depth_is_not_simulator_gt": true,
+    "no_depth_source_mixing_in_current_cards": true
+  },
+  "coverage": {
+    "wall": {
+      "rgb_manifest": {
+        "path": "outputs/campaign-seed1/native-seed1-20260728c/code/dino_wm/releases/rgb_dataset_manifests/dataset_manifest_wall.json",
+        "sha256": "130f28f3e354da64ef36b2bf64d3516722f2aa02d78edd3620cf660c435f3066",
+        "episodes": 1920,
+        "split_episodes": {"train": 1728, "valid": 192},
+        "train_model_observations": 86400,
+        "valid_model_observations": 9600,
+        "train_windows": 70848,
+        "valid_windows": 7872,
+        "model_frames_per_episode": 50,
+        "raw_frames_per_episode": 51,
+        "frameskip": 5
+      },
+      "simulator_gt": {
+        "availability": "not_found",
+        "model_observations_aligned": 0,
+        "reason": "selected Wall raw source has no released simulator HDF5 depth records"
+      },
+      "fixed_prediction": {
+        "manifest_sha256": "1dd31bcddadc95ebf526e7f085811be237a7f2594df228425dd1d742a42ef5d3",
+        "rows": 192,
+        "prediction_pairs": 576,
+        "observation_references": 768,
+        "model_frame_target_references": 384,
+        "terminal_target_references": 192,
+        "gt_aligned_target_references": 0,
+        "unique_observation_keys": 768,
+        "future_leakage": 0,
+        "causal_alignment": "pass"
+      },
+      "fixed_planning": {
+        "manifest_sha256": "794f079992eadfde4af8ca23968c1f7a68c138cae8b29f6c8c00c01d2faf7661",
+        "targets": 50,
+        "initial_gt_aligned": 0,
+        "goal_depth_references": 0,
+        "initial_visual_provenance": "state_derived_or_rendered_from_declared_source_state",
+        "goal_source": "random_state",
+        "goal_horizon": 5
+      },
+      "current_proxy_cache": {
+        "manifest_sha256": "b6db2c8b495ed2a3a142973cdc3622ab193a5a38d51147515d2f38678214819d",
+        "data_mdb_sha256": "e4107dc52f50dc206df6bc5c5e8b1655c3b699fa58d6d3196d5329d63c0dc467",
+        "frames": 96000,
+        "frames_per_episode": 50,
+        "producer": "DA3NESTED-GIANT-LARGE-1.1/DA3-Streaming",
+        "validation_state": "PASS",
+        "validation_sha256": "b2404b80ba54f7b9b9cd857c4032bf515a91d1a3295f62167c7c9c65f122fab4",
+        "terminal_policy": "drop_post_action_frame_not_selected_by_WallDataset"
+      }
+    },
+    "rope": {
+      "rgb_manifest": {
+        "path": "outputs/campaign-seed1/native-seed1-20260728c/code/dino_wm/releases/rgb_dataset_manifests/dataset_manifest_rope.json",
+        "sha256": "f7e51a2a87b9c197a7c4b5416a765f7a5b73ffb67b8dde1d7614e772cfab194f",
+        "episodes": 1000,
+        "split_episodes": {"train": 900, "valid": 100},
+        "train_model_observations": 18000,
+        "valid_model_observations": 2000,
+        "train_windows": 17100,
+        "valid_windows": 1900,
+        "model_frames_per_episode": 20,
+        "raw_frames_per_episode": 20,
+        "frameskip": 1
+      },
+      "simulator_gt": {
+        "availability": "complete",
+        "source": "released simulator HDF5 frame records",
+        "episodes_scanned": 1000,
+        "h5_frames_seen": 21000,
+        "model_observations_aligned": 20000,
+        "rgb_exact_frame_count": 20000,
+        "depth_valid_frame_count": 20000,
+        "depth_dtype": "uint16",
+        "depth_shape": [224, 224],
+        "action_exact_frame_count": 20000,
+        "frame0_zero_action_count": 1000,
+        "post_action_frame": 20,
+        "post_action_frame_exact_count": 1000,
+        "alignment_rule": "HDF5 frame f>=1 carries raw action f-1; model transition i->i+1 uses raw action i",
+        "split_model_observations": {"train": 18000, "valid": 2000}
+      },
+      "fixed_prediction": {
+        "manifest_sha256": "7839b79f3c437308741af329009e8dc3299fffcd62286a9989e19953dcc2a4d9",
+        "rows": 1000,
+        "prediction_pairs": 3000,
+        "observation_references": 4000,
+        "model_frame_target_references": 3000,
+        "terminal_target_references": 0,
+        "gt_aligned_target_references": 3000,
+        "gt_aligned_unique_target_keys": 1690,
+        "unique_observation_keys": 1837,
+        "future_leakage": 0,
+        "causal_alignment": "pass"
+      },
+      "fixed_planning": {
+        "manifest_sha256": "9c6874d1fe7108f266c071a7120544eda2acacae17c2a3d448347ff77e4c7a00",
+        "targets": 10,
+        "initial_gt_aligned": 10,
+        "goal_depth_references": 0,
+        "initial_visual_provenance": "exact_source_rgb",
+        "goal_source": "random_state",
+        "goal_observation": "deterministic_source-view_affine_of_goal_state_transform",
+        "goal_horizon": 5
+      },
+      "current_proxy_cache": {
+        "manifest_sha256": "e3bd127013032e914ed76d671364db3180ba2827db810e30eee351631b576abb",
+        "data_mdb_sha256": "82759012911b4fd7465ca287e911f73fd6dac9d0c5916679b9be03467365426d",
+        "frames": 20000,
+        "frames_per_episode": 20,
+        "producer": "DA3NESTED-GIANT-LARGE-1.1/DA3-Streaming",
+        "validation_state": "PASS",
+        "validation_sha256": "d9aa1dd061e75da153d5dc5d6de0b91fc0cf3874476aa47670aebd4f429c0348"
+      }
+    },
+    "granular": {
+      "rgb_manifest": {
+        "path": "outputs/campaign-seed1/native-seed1-20260728c/code/dino_wm/releases/rgb_dataset_manifests/dataset_manifest_granular.json",
+        "sha256": "8433070978de0eab5199dd112f0caf5552b8bf160c50464a305391926e65dc24",
+        "episodes": 1000,
+        "split_episodes": {"train": 900, "valid": 100},
+        "train_model_observations": 18000,
+        "valid_model_observations": 2000,
+        "train_windows": 17100,
+        "valid_windows": 1900,
+        "model_frames_per_episode": 20,
+        "raw_frames_per_episode": 20,
+        "frameskip": 1
+      },
+      "simulator_gt": {
+        "availability": "complete",
+        "source": "released simulator HDF5 frame records",
+        "episodes_scanned": 1000,
+        "h5_frames_seen": 21000,
+        "model_observations_aligned": 20000,
+        "rgb_exact_frame_count": 20000,
+        "depth_valid_frame_count": 20000,
+        "depth_dtype": "uint16",
+        "depth_shape": [224, 224],
+        "action_exact_frame_count": 20000,
+        "frame0_zero_action_count": 1000,
+        "post_action_frame": 20,
+        "post_action_frame_exact_count": 1000,
+        "alignment_rule": "HDF5 frame f>=1 carries raw action f-1; model transition i->i+1 uses raw action i",
+        "split_model_observations": {"train": 18000, "valid": 2000}
+      },
+      "fixed_prediction": {
+        "manifest_sha256": "21347ae204baaebd061da75f04b751d3117e3066b0d43e3e25ae3b62c1c618ae",
+        "rows": 1000,
+        "prediction_pairs": 3000,
+        "observation_references": 4000,
+        "model_frame_target_references": 3000,
+        "terminal_target_references": 0,
+        "gt_aligned_target_references": 3000,
+        "gt_aligned_unique_target_keys": 1687,
+        "unique_observation_keys": 1835,
+        "future_leakage": 0,
+        "causal_alignment": "pass"
+      },
+      "fixed_planning": {
+        "manifest_sha256": "f91c976ab6b64e85a7939df8279108de6fac8b188a779b4686399efca7258683",
+        "targets": 10,
+        "initial_gt_aligned": 10,
+        "goal_depth_references": 0,
+        "initial_visual_provenance": "exact_source_rgb",
+        "goal_source": "random_state",
+        "goal_observation": "deterministic_source-view_affine_of_goal_state_transform",
+        "goal_horizon": 5
+      },
+      "current_proxy_cache": {
+        "manifest_sha256": "48c15f3e14a0dbba68d302cddb2bb7fb987d3733c6df3e6b08c5b7e13eb11821",
+        "data_mdb_sha256": "86e7bc012a73aa65f3a783812a44e1de8018355b69df156aa60fa4dbe6d8a2e6",
+        "frames": 20000,
+        "frames_per_episode": 20,
+        "producer": "DA3NESTED-GIANT-LARGE-1.1/DA3-Streaming",
+        "validation_state": "PASS",
+        "validation_sha256": "3f5e584aad639871be4d0b541f58d0d900ed6db63376da880bf68feba23cb960"
+      }
+    }
+  },
+  "training_lineage_provenance": {
+    "expected_lineages": 27,
+    "observed_lineages": 27,
+    "dino_pinned": {
+      "seeds_per_task": [1, 2, 3],
+      "count": 9,
+      "decision": "REUSABLE_RGB_ONLY"
+    },
+    "dinocular": {
+      "decision": "RETRAIN_ON_SIMULATOR_GT",
+      "wall": {
+        "seeds": [1, 2, 3],
+        "producer": "da3_giant_video",
+        "producer_sha256": "4d15ed3f04ea318d72599d1d84653d57ae93ec81deb638272d7b823c7fdf5f54",
+        "trained_cache_manifest_sha256": "b6db2c8b495ed2a3a142973cdc3622ab193a5a38d51147515d2f38678214819d",
+        "trained_validation_sha256": "b2404b80ba54f7b9b9cd857c4032bf515a91d1a3295f62167c7c9c65f122fab4"
+      },
+      "rope": {
+        "seeds": [1, 2, 3],
+        "producer": "da3_giant_video",
+        "producer_sha256": "c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc",
+        "trained_cache_manifest_sha256": "5eb0818c6d38d6f6c5d210075e1be0ff008d5b04252926986979ddbb6c8f2dba",
+        "trained_validation_sha256": "3df12b04aa0ce2a68484dc023773d3eb7b3bd158ea4a9212c660caeeb5478a86"
+      },
+      "granular": {
+        "seeds": [1, 2, 3],
+        "producer": "da3_giant_video",
+        "producer_sha256": "c7973c37e7f0c859644627a09f57a02aa64582c84b1a3b59cca2836b02206ecc",
+        "trained_cache_manifest_sha256": "8ba955aa806fc4c1ef8a8ed8a6c282bf1e9d010e99f77ebd4e65d44360e99997",
+        "trained_validation_sha256": "db67a785b67bedaf3c617b6da74250e0730adbf0f956f1cafd76207451caaec8"
+      }
+    },
+    "dinocular_zerodepth": {
+      "candidate_count": 9,
+      "accepted_reuse_count": 0,
+      "decision": "PENDING_EXACT_FUNCTIONAL_REUSE_PROOF",
+      "encoder_boundary": "manifest_neutral_depth_and_mask"
+    }
+  },
+  "decisions": {
+    "immediate_informative_depth_retraining": [
+      "rope/dinocular/seed1",
+      "rope/dinocular/seed2",
+      "rope/dinocular/seed3",
+      "granular/dinocular/seed1",
+      "granular/dinocular/seed2",
+      "granular/dinocular/seed3"
+    ],
+    "wall_informative_depth_retraining_after_gt_asset": [
+      "wall/dinocular/seed1",
+      "wall/dinocular/seed2",
+      "wall/dinocular/seed3"
+    ],
+    "wall_terminal_depth_recovery": {
+      "retire_learned_terminal_recovery": false,
+      "reason": "Wall has no simulator GT depth; fixed horizon-10 targets raw frame 50 while the current 50-frame proxy cache explicitly drops that post-action frame"
+    },
+    "smallest_next_run_package": [
+      "Bind Rope and Granular camera-1 HDF5 frames 0..19 into one immutable GT depth release without DA3, then retrain the six deformable informative-depth cells.",
+      "Produce Wall simulator-GT depth for all 1920 episodes and raw frames 0..50, then retrain the three Wall informative-depth cells.",
+      "Reuse the nine RGB-only cells; do not reuse zero-depth cells until exact functional proof is recorded."
+    ]
+  },
+  "done": true
+}
