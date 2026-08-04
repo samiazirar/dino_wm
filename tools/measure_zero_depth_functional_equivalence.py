@@ -331,7 +331,11 @@ def load_payload_pair(card: Mapping[str, Any], dataset_dir: Path, torch: Any) ->
 
 
 def measure_cell(
-    card: Mapping[str, Any], implementation_root: Path, dataset_dir: Path, torch: Any
+    card: Mapping[str, Any],
+    implementation_root: Path,
+    dataset_dir: Path,
+    torch: Any,
+    device: str,
 ) -> Mapping[str, Any]:
     for key, value in card.get("environment_variables", {}).items():
         os.environ[str(key)] = str(value)
@@ -341,7 +345,7 @@ def measure_cell(
 
     payload = load_payload_pair(card, dataset_dir, torch)
     config = OmegaConf.load(str(implementation_root / "conf/encoder/dinocular_zerodepth.yaml"))
-    encoder = instantiate(config).to("cuda")
+    encoder = instantiate(config).to(device)
     encoder.eval()
     boundary: list[tuple[Any, Any]] = []
 
@@ -352,14 +356,14 @@ def measure_cell(
     try:
         with torch.inference_mode():
             output_a = encoder(
-                payload["rgb"].to("cuda"),
-                payload["depth_a"].to("cuda"),
-                payload["mask_a"].to("cuda"),
+                payload["rgb"].to(device),
+                payload["depth_a"].to(device),
+                payload["mask_a"].to(device),
             ).detach().cpu()
             output_b = encoder(
-                payload["rgb"].to("cuda"),
-                payload["depth_b"].to("cuda"),
-                payload["mask_b"].to("cuda"),
+                payload["rgb"].to(device),
+                payload["depth_b"].to(device),
+                payload["mask_b"].to(device),
             ).detach().cpu()
     finally:
         remove()
@@ -384,7 +388,7 @@ def measure_cell(
     )
     return {
         "status": "PASS" if passed else "FAIL",
-        "device": "cuda",
+        "device": device,
         "rgb_sha256": sha256_tensor(payload["rgb"]),
         "raw_payloads": {
             "trajectory_key": payload["trajectory_key"],
@@ -459,6 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--implementation-root", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     return parser
 
 
@@ -500,7 +505,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         measurement_error: str | None = None
         if state.get("trained_to_target") and implementation is not None and artifacts is not None:
             try:
-                measurement = measure_cell(card, args.implementation_root, args.dataset_dir, torch)
+                measurement = measure_cell(
+                    card, args.implementation_root, args.dataset_dir, torch, args.device
+                )
             except (MeasurementError, OSError, RuntimeError, ValueError) as exc:
                 measurement_error = str(exc)
         classification, reason = classify_cell(
