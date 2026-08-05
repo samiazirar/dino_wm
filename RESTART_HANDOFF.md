@@ -1,6 +1,29 @@
 # DinocularWorldModel restart handoff
 
-Date: 2026-07-23
+Status: CAN RESTART
+Close state: PAUSED; no research resume authorized
+
+## Goal
+
+Determine whether useful depth improves world-model prediction and robot planning in the locked DinocularWorldModel comparison.
+
+## Current state
+
+Research is paused as of 2026-08-04 after the account reached its weekly limit. The fixed question, 36-run comparison, and scientific interpretation are unchanged: no matched comparison, aggregate decision, winner, or paper conclusion exists. Wall DINOcular and zero-depth DINOcular seed one are trained at 143,910 steps without accepted evaluation; the recorded PushT DINOcular and zero-depth seed-one continuations are at steps 83,793 and 83,828; and Rope and Granular DINOv2 seed one each have 100 held-out prediction episodes. Rope and Granular informative-depth runs still require authentic-depth retraining, the corrected proxy remains unusable, and Wall ground-truth-depth runs remain unavailable without a real release. This handoff repair adds no scientific result.
+
+## Recorded continuing external work
+
+- The recorded Marvin jobs remain preserved and must not be cancelled or modified: `26792098` (`countable-pusht-dinocular-s1`, `sgpu021`) and `26792308` (`countable-pusht-dinocular_zerodepth-s1`, `sgpu023`). Their remote state was not queried in this local-only repair.
+- Local read-only checks still find controller PID `874135` (`flock`) with child PID `874137` running `/tmp/dinocular_resume_controller.py`; neither was signalled, attached to, or modified.
+- The recorded stale watcher PIDs `5358` and `1182620`, and recorded watcher main PID `1096108`, are absent from the local process table. User-systemd reports `campaign-guardian.service` inactive/dead and cannot find `dinocular-pusht-pair-rhea-20260801.service`; no watcher or guardian was restarted.
+
+## Git and saved work
+
+This directory is not a Git checkout: both `git status` and `git rev-parse --show-toplevel` fail with “not a git repository”. No commit or branch update is possible here. Historical commits, worktrees, and rejected work recorded below are preserved.
+
+## Next action (requires Human authorization)
+
+After the Human explicitly authorizes resumption, reconcile the two preserved PushT jobs and controller with read-only checks before continuing that same exact-pair task.
 
 ## Final accepted recovery state — 2026-08-01
 
