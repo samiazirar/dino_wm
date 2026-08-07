@@ -382,6 +382,26 @@ The first three items on this list are now done, and the fourth is running.
    against real depth, between a third and three quarters of the way through.
    The four cube runs are queued behind them.
 
+Getting from a trained model to an actual planning score turned out to need
+several repairs, each of which would have produced nothing or nonsense:
+
+- The planning code could not read the files training saves. It expected the
+  models packaged one way; training writes them another. No trained model could
+  have been loaded at all. It now reads both, checked by comparing all 950
+  stored weights against the file.
+- Planning also could not start, because loading it dragged in a retired task
+  whose physics library is not installed. That task is not part of the study and
+  has been dropped from the list of environments.
+- The rope and granular simulator crashes while building its fourth copy in one
+  process, and planning was building one per goal — a hundred of them. It now
+  uses a single simulator, which is safe because the goals are already handled
+  one after another, each starting from its own reset.
+
+The cube can train but cannot yet be planned with. Its simulator needs two
+software packages that are not in the prepared environment the runs execute in.
+Adding them is straightforward but is a separate piece of work, so the cube is
+not part of the first planning result.
+
 One measure has had to be dropped. Prediction error was only ever supporting
 context, and it is now clear it cannot be produced for these runs at all: the
 machinery that computes it is tied to a record-keeping apparatus these runs were
