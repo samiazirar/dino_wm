@@ -397,10 +397,53 @@ several repairs, each of which would have produced nothing or nonsense:
   uses a single simulator, which is safe because the goals are already handled
   one after another, each starting from its own reset.
 
-The cube can train but cannot yet be planned with. Its simulator needs two
-software packages that are not in the prepared environment the runs execute in.
-Adding them is straightforward but is a separate piece of work, so the cube is
-not part of the first planning result.
+The cube's two missing software packages are now installed alongside the
+prepared environment rather than inside it, and were checked on a graphics card
+to confirm they sit beside the existing simulator and learning libraries without
+displacing any of them. One of them arrived with its own copy of a core
+numerical library, which replaced the container's and broke the learning library
+outright; that copy was removed and the check repeated.
+
+With all of that in place, one complete planning attempt was run end to end for
+the first time, and it produced a real score: a rope goal reached, at a distance
+of 0.48 against the measured cutoff of 1.13. That is the first time anything in
+this project has travelled from a trained model to an actual planning result.
+
+Measuring it also settled the cost question. One goal costs about 80 seconds to
+set up and about 65 seconds to plan and score, so a hundred goals take roughly
+four hours against a job limit of just under eight. It fits with room to spare,
+and no planning setting has to be weakened to make it fit. Usefully, the scores
+are written to disk before the diagrams are drawn, so a run that is cut off
+while drawing still keeps its results.
+
+**One real obstacle remains, and it is the important one.** The depth-aware
+systems cannot yet be planned with at all. Depth in this study comes from
+recorded files that accompany each saved run. Planning does not replay recorded
+runs — it steers the simulator into situations that were never recorded — so
+there is no stored depth to look up, and the code that hands pictures to the
+visual system receives none.
+
+The good news is that it refuses rather than pretends. The depth-aware system
+explicitly rejects a missing or blank depth input instead of quietly filling in
+zeros, so there was never any danger of a plausible-looking result secretly
+produced without depth. This was confirmed by running it, not by reading it: a
+planning attempt on a part-trained granular model stopped with exactly that
+refusal.
+
+The repair is well defined. The simulator already computes depth every time it
+draws a picture — the drawing routine returns five channels and the existing
+code keeps three and discards the depth. The recorded depth these systems were
+trained on came from that very channel. So the fix is to stop discarding it and
+convert it to the same form the recorded files use, for which the project holds
+an exact, fixed conversion per task. It is a contained change, but it has to be
+right: depth that is scaled or aligned even slightly wrong would look entirely
+normal and quietly corrupt the study's central comparison — the same failure
+that estimated depth already caused once. So it gets its own careful piece of
+work rather than being rushed in alongside everything else.
+
+Until that lands, the colour-only runs can be planned and the depth-aware ones
+cannot, so no comparison can be completed yet. The colour-only planning for the
+first seed of rope and granular is running now.
 
 One measure has had to be dropped. Prediction error was only ever supporting
 context, and it is now clear it cannot be produced for these runs at all: the
