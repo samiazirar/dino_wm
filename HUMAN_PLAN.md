@@ -296,8 +296,18 @@ and the preparation finished successfully in nine and a half minutes.
 The success measure for Rope and Granular was broken: it asked whether a
 distance was less than zero, which no distance ever is, so every planning
 attempt was recorded as a failure whatever actually happened. This is now fixed.
-The threshold it compares against is a placeholder and must be measured from
-real data before any planning number is reported.
+The cutoffs it compares against are no longer placeholders: rope and granular
+both carry their measured order-keeping values, and the scoring code has been
+confirmed to use the order-keeping distance rather than the order-ignoring one.
+
+A second and larger fault in the planning setup was found on 2026-08-07 and
+fixed. The planner had no limit on how long it would keep trying. It was set to
+stop only once *every* goal had succeeded — which, with a hundred goals, never
+happens. A planning run would have carried on until the cluster cut it off at
+its time limit, and because results are saved only once planning finishes, it
+would have saved nothing at all. Every planning job would have come back empty.
+The planner now takes exactly one pass of five steps: the same horizon the goal
+itself is built from, so no system is handed more time than the goal allows.
 
 Their planning evaluation used ten goals, too few to support a claim. It is now
 one hundred. Fifty was the original replacement, but a check of how precisely
@@ -353,21 +363,33 @@ belongs in the write-up.
 ## Current milestone
 
 One complete matched seed on Rope and Granular using real depth, followed by
-their fixed prediction and planning evaluations. These two tasks can deliver the
-project's first genuine depth result without anything new being built.
+their planning evaluation. These two tasks can deliver the project's first
+genuine depth result without anything new being built.
 
-The next useful actions, in order:
+The first three items on this list are now done, and the fourth is running.
 
-1. Settle the success rule. The reviewer's version is too demanding to be usable
-   and the simulation says so; it needs a lower bar or a way of combining seeds
-   and goals that does not rest on three numbers. Nothing downstream should be
-   launched before this is fixed, because it decides what the runs are for.
-2. Switch rope and granular to the order-keeping distance and set their cutoffs
-   from the measured values. The cutoff currently in the configuration files is a
-   placeholder and would record every attempt as a failure.
-3. Point the cube task's configuration at the regenerated data, replacing the
-   retired flat push-T entry that still sits in the third slot of the run list.
-4. Retrain the six rope and granular depth-aware runs against real depth.
+1. **Settled.** The success rule is fixed: pool the individual goal outcomes
+   from every seed into one collection, then resample that collection to get a
+   95 per cent range for the difference between two systems. This avoids the
+   trap the earlier candidate fell into, where a verdict had to be squeezed out
+   of only three numbers and so almost always came back "undecided".
+2. **Done.** Rope and granular score with the order-keeping distance and their
+   measured cutoffs, both confirmed in the code rather than assumed.
+3. **Done.** The cube task points at its regenerated data. Its depth is wired
+   through the same checked path as rope and granular, confirmed by a short test
+   run in which the depth genuinely reached the visual system.
+4. **Running.** The six rope and granular depth-aware runs are retraining
+   against real depth, between a third and three quarters of the way through.
+   The four cube runs are queued behind them.
+
+One measure has had to be dropped. Prediction error was only ever supporting
+context, and it is now clear it cannot be produced for these runs at all: the
+machinery that computes it is tied to a record-keeping apparatus these runs were
+deliberately launched without, and it refuses to run without it. This costs the
+study little. The two visual systems predict in different internal spaces, so
+their prediction errors were never comparable to each other in the first place,
+and no conclusion was ever going to rest on them. Planning success now stands
+alone as the measure, which is what the study said it would be judged on.
 
 The later milestone is the full matrix, then the comparisons, figures and paper.
 Training progress alone does not answer the research question.
@@ -385,8 +407,11 @@ Training progress alone does not answer the research question.
 - OGBench-Cube is adopted only if its depth is verified the same way Rope and
   Granular were — by measurement, not assumption.
 - Depth-aware runs are retrained against real depth, never relabelled.
-- The success threshold must be measured from data and fixed before any planning
-  evaluation. The current value is a placeholder with no scientific weight.
+- The success cutoffs are measured from data and now fixed in the configuration
+  for both rope and granular. No placeholder remains.
+- Each planning attempt gets exactly one pass of five steps, the same horizon
+  the goal is built from. Letting the planner keep retrying would both hand it
+  more time than the goal allows and, as written, never stop at all.
 - Rope and granular are scored with the order-keeping distance, not the
   order-ignoring one, because it separates measurably better on both tasks.
 - All four systems stay. A fourth seed in their place would buy at most a few
@@ -396,9 +421,14 @@ Training progress alone does not answer the research question.
 - The substituted depth keeps coming from the same episode. It was measured to
   disturb the moving parts of the scene more than a substitute from another
   episode would, while leaving the still parts alone.
-- The success rules are withdrawn pending a replacement with a detectability
-  calculation and a stated negative result. The first candidate replacement was
-  simulated and rejected as too demanding to be usable.
+- The success rule is settled and closed. Every goal outcome from every seed
+  goes into one pooled collection, which is resampled to give a 95 per cent
+  range for the difference between two systems. The earlier candidate, which
+  built its range from three per-seed numbers, was simulated and rejected: it
+  returned "undecided" most of the time even when a real effect was present.
+- Prediction error is not reported. It was supporting context only, it is not
+  comparable between the two visual systems, and it cannot be produced for these
+  runs without record-keeping they were not launched with.
 - Outside work is only cited if it has released code and more than one author.
 - No claim is made before the fixed evaluations and the rewritten rules support
   it.
