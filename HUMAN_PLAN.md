@@ -451,6 +451,21 @@ depth from the wrong moment have both produced planning results on rope, and
 real depth has produced one on granular too. Nothing is being taken on trust
 from the code.
 
+**A risk that came with that repair, now checked and cleared.** Once planning
+takes depth live from the simulator, an obvious worry appears: the two control
+systems are defined by the depth they are *denied*, and the live simulator hands
+out real depth to everybody. If the denial only happened while reading recorded
+files, both controls would quietly become the real-depth system the moment
+planning started, and the study's central comparison would be empty while
+looking perfectly healthy.
+
+It does not happen. The denial is built into the visual system itself, not into
+the file reading: the zero-depth system blanks the depth as it enters the
+encoder, and the wrong-moment system substitutes it there. Every observation
+passes through that same door — recorded or live, goal or rollout. So the two
+controls stay controls while planning, and this was established by reading where
+the branch actually sits, not by assuming the arrangement carried over.
+
 **What went wrong on 8 August, and what it cost.** All eight full evaluation
 runs — the ones that take a trained model and try a hundred goals — were
 launched and all eight died at the eight-hour limit. That alone would have been
