@@ -531,6 +531,26 @@ might is a second, much emptier group of machines on the same cluster, whose
 graphics cards are a different and slightly older model. Whether the runs work
 there at all is being tested now with a short probe.
 
+**The repair that unblocked the depth systems quietly broke the colour-only
+one.** This was found today by testing rather than reading, and it matters more
+than the cube gap below.
+
+To give the depth systems live depth, the simulator wrapper was changed to always
+hand out its depth channel. But the colour-only system is defined by never
+receiving depth, so it is given no instructions for how to interpret depth. The
+planning code, correctly, refuses to interpret depth it has no instructions for —
+and so it now refuses the colour-only system outright.
+
+The effect: the study's main comparison point cannot be evaluated at all, and two
+of the eight queued runs would have died three minutes in. Both the failure and
+its cause were reproduced on the cluster before any change was proposed.
+
+The fix is small and is being made now: depth that a system never looks at should
+be discarded, not treated as an error. The refusal itself is correct and stays in
+place for the systems that do use depth — that guard is what prevents depth from
+being silently misinterpreted, which is the failure that already cost this study
+once.
+
 **OGBench-Cube is trained but has never been planned with, and now we know why.**
 Its four first-seed models are finished, but a cheap two-goal probe failed in
 twelve seconds: the cube has no planning settings file at all. Rope and granular
@@ -560,9 +580,11 @@ Training progress alone does not answer the research question.
 2. **Give the cube its planning settings.** A one-file gap, being filled and
    re-tested now. If it works, four cube evaluations join the queue and the study
    gains its strongest-depth task.
-3. **Find out whether the second group of machines can be used.** The eight runs
-   currently wait until 15 August on the congested machines. A probe on the
-   less-busy ones is running. If it passes, the same work starts days earlier.
+3. **Settled: the less-busy machines work.** A probe finished a real depth-aware
+   rope evaluation on them in five minutes, scored two goals, and saved them as
+   it went. Two goals took under two minutes to score, so a hundred goals fit
+   comfortably. The eight runs move there once items 1 and 2 are done, which
+   replaces a four-day wait with a wait of hours.
 4. **The second and third seeds start training.** Twenty-four runs. They are
    worth queueing only once the first seed's evaluation is known to produce
    numbers that can separate the systems. Starting them sooner risks training
