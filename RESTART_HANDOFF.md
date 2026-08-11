@@ -1,7 +1,7 @@
 # DinocularWorldModel restart handoff
 
 Status: CAN RESTART
-Last updated: 2026-08-11
+Last updated: 2026-08-11 (late)
 
 ## Goal
 
@@ -12,104 +12,121 @@ tasks (rope, granular, ogbench_cube), three seeds — 36 runs.
 
 ## Where the real work lives
 
-Everything current is on Marvin, not in the local checkout.
-
 - Cluster project root:
   `/lustre/mlnvme/data/sazirar_hpc-marvin-ssd/projects/dinocular-wm`
-- Cluster code (authoritative): `<root>/code/dino_wm`, HEAD `338a0b4`
-- Local `~/dinocular-wm/dino_wm` is **stale and divergent** (uncommitted edits on
-  top of `ce55391`, 2026-08-06). Do not treat it as the source of truth; pull
-  from the cluster checkout before touching code.
+- Cluster code (authoritative): `<root>/code/dino_wm`, HEAD `4f865ff`
+- Local `~/dinocular-wm/dino_wm` is **stale and divergent**. Do not treat it as
+  the source of truth.
 - Docs repo: `~/dinocular-wm-worktrees/project-docs`, branch
-  `task/human-plan-current-update`, pushed.
+  `task/human-plan-current-update`.
 
-## Current state — measured
+## Training — unchanged, first seed complete
 
-**Training: first seed complete, all twelve runs at step 53,500 / 100 epochs.**
+All twelve first-seed runs at step 53,500 / 100 epochs.
 
 - rope + granular, dinocular / zerodepth / shuffleddepth:
-  `<root>/outputs/seed1-matched-20260806/{rope,granular}-<arm>-s1` (2026-08-07)
+  `<root>/outputs/seed1-matched-20260806/{rope,granular}-<arm>-s1`
 - rope + granular, dino_pinned:
   `<root>/outputs/campaign-seed1/rgb-dino-seed1-20260728a/{rope,granular}/run`
 - ogbench_cube, all four arms:
-  `<root>/outputs/matched-seeds-20260807/ogbench_cube-<arm>-s1` (2026-08-10)
+  `<root>/outputs/matched-seeds-20260807/ogbench_cube-<arm>-s1`
 
-Seeds 2 and 3 (24 runs) not started.
+Seeds 2 and 3 (24 runs) not started. Hold them until the first seed's
+evaluation is shown to separate systems.
 
-**Depth at planning time: implemented and verified.** Commits `4b5dbed` (keep the
-renderer's 5th channel as `obs["depth"]`, `env/deformable_env/FlexEnvWrapper.py`
-prepare/step_multiple), `d20ddb5` (`plan.py` `depth_lo_hi_from_contract`,
-`raw_metrics_to_wire_depth`, `PlanDepthPreprocessor.transform_obs`,
-`PlanWorkspace._prepare_depth`), `d57bb42` (same-episode substitution for the
-shuffled arm). Wire conversion `clip((d - lo)/(hi - lo), 0, 1)` at `plan.py:108`
-is identical to the training producer `tools/precompute_depth.py:691-697`; lo/hi
-come from the same native depth contract binding. Rope live render spans
-9.51–24.06 m against contract 9.901+14.163 = 24.064.
+## The goal-difficulty repair — works, and changes the cost model
 
-**Planning outputs that exist** (`per_goal_outcomes.json`, tiny n, all success
-1.0; thresholds rope 1.132036, granular 1.770630, ordered metric):
+Rejecting already-solved goals at sampling time (uncommitted in `plan.py`,
+being committed by the sharding work) removes every free pass:
 
-| run | n | ordered distances |
-|---|---|---|
-| `seed1-matched-20260806/plan-rope-dinocular-s1` | 2 | 0.485, 0.693 |
-| `seed1-matched-20260806/plan-rope-dinocular_shuffleddepth-s1` | 1 | 0.487 |
-| `seed1-matched-20260806/plan-granular-dinocular-s1` | 1 | 1.083 |
-| `campaign-seed1/rgb-dino-seed1-20260728a/rope/plan-rope-dino_pinned-s1` | 1 | 0.480 |
+- rope 39/100 → **0/100** below the 1.132036 cutoff (min distance 1.1599)
+- granular 82/100 → **0/100** below 1.770630 (min 1.7713)
 
-Ceiling risk: everything passes on these goals. Check the pass rate on the first
-full 100-goal run before drawing any comparison.
+**The hardened goals discriminate.** A real rope/dinocular run scored one goal
+solved at ordered distance 0.484 and one failed at 2.057, success rate 0.5.
+Before the repair every goal passed.
 
-**2026-08-08 failure and repair.** All eight full evaluations hit the 8 h limit
-and saved nothing, because scores were written only after all 100 goals.
-`338a0b4` scores goals in chunks of 10 and persists after each chunk, with a
-per-chunk timing line. Proved by a deliberately time-limited run
-(`plan-chunk-smoke` 26948623) whose finished goals survived on disk. Why >8 h was
-needed is still unexplained; the new chunk timings will show it.
+**Two earlier jobs that "hung" were never hanging.** They were simply too slow
+for their walltime. Instrumentation showed goal sampling costs milliseconds
+(15 ms per dataset load, 5–10 ms per triviality check). The cost is in the
+simulator: a trivial goal is one where the rope barely moved, so its replayed
+pushes were ~60 sim substeps; a real goal has real pushes of 1200–1560
+substeps. The old 84-second figure for two goals was itself an artefact of
+scoring goals where nothing happened.
 
-## What is running
+**Measured real cost: roughly 10–15 minutes per goal** (41 rollout calls for
+2 goals in 18 minutes). 100 goals is about 20 hours per run, so one job per run
+is not viable. Goal sharding (`goal_shard_start`, `goal_shard_count`) was added
+to `plan.py` for this: the full 100-goal list is sampled with the existing
+seeded RNG and then sliced, so shard *k* holds identical goals for all four
+systems, and every per-goal record carries its global index.
 
-Eight full evaluations queued 2026-08-10, `sgpu_medium`, `--time=23:55:00`:
-`26950256`–`26950263` (rope/granular × 4 arms, seed 1).
-Scheduler estimate: **start 2026-08-15**. Shorter walltime does not move them.
+## OGBench-Cube — planning runs, but its scores are meaningless
 
-Two 1-hour probes on `mlgpu_medium` (A40), submitted 2026-08-11, estimated start
-~22:28 the same day:
+Its goals are sound: only 2 of 100 are free passes (median start-to-goal
+distance 0.124 m against a 0.04 m cutoff), far better than rope or granular.
 
-- `26967707` `plan-a40-probe` — rope/dinocular, `n_evals=2`. Tests whether the
-  planning job runs on A40 at all.
-- `26967708` `plan-cube-smoke` — ogbench_cube/dino_pinned, `n_evals=2`. Cube
-  planning has never been run.
+Two defects were found and only the first is fixed:
 
-`mlgpu_devel` and `sgpu_devel` are drained; do not submit probes there.
+1. **Fixed, committed `4f865ff`.** The live wrapper emitted no `proprio`. The
+   four cube models were trained on a constant-zero length-1 proprio
+   placeholder (dataset `proprio_dim=1`, checkpoint `Conv1d in_chans=1`), so
+   the wrapper now emits exactly that. Note for the write-up: **the cube models
+   carry no real proprioceptive input.**
+2. **Open, blocking.** A 2-goal smoke wrote `state_dist [0.0, 0.0]`,
+   `success [1.0, 1.0]`. Exact zeros are not measurements. Cause established by
+   direct experiment (job 26972557, `<root>/scratch/probe_cube_move.py`):
+   `set_state` writes **only** `object_joint_0.qpos[:3]` — the block — and never
+   the arm. Replaying recorded actions leaves the block bit-identical in x and y
+   across all 15 steps; it only falls ~0.10 m in z and stops. Recorded motion is
+   0.357 m; simulated motion 0.098 m; final positions 0.406 m apart. Because the
+   arm never contacts the block, the block's final position is decided purely by
+   settling and is therefore **independent of the actions**, so the goal rollout
+   and the evaluation rollout land bit-identically and every distance is exactly
+   zero.
+
+   Open question being answered now: does the raw dataset store enough to
+   restore the arm exactly (full qpos/qvel), or only the 14-dim end-effector
+   state, which would need inverse kinematics and would not be exact?
+
+The four cube evaluations that were submitted (26972104–07) were **cancelled**
+— they would have burned machine time producing zeros.
+
+## What is queued
+
+- Eight rope/granular evaluations `26950256`–`26950263`, `sgpu_medium`,
+  `--time=23:55:00`, estimated start 15–16 August. Kept as a fallback. They
+  should be replaced by sharded jobs on the free `mlgpu_*` (A40) partitions
+  once sharding is committed.
+- `mlgpu_*` is free and fast; `sgpu_*` is congested. `mlgpu_devel` accepts
+  short probes.
 
 ## Exact next action
 
-1. Read both probe logs when they finish:
-   `<root>/logs/plan_plan-a40-probe.26967707.{out,err}` and
-   `<root>/logs/plan_plan-cube-smoke.26967708.{out,err}`.
-2. If the A40 probe succeeds, resubmit the eight evaluations on `mlgpu_medium`
-   with `--time=12:00:00` and cancel the `sgpu_medium` duplicates — that moves
-   first results from 15 August to the next day.
-3. If the cube smoke succeeds, queue four cube evaluations the same way.
-4. When the first full evaluation returns, check the pass rate before anything
-   else. Near-total success means the goals are too easy and must be hardened
-   before the comparison means anything.
+1. Confirm the sharding commit and its two probe jobs (different goals, global
+   indices 0 and 1).
+2. Submit the eight rope/granular evaluations as shards on `mlgpu_*`, sized
+   from the measured per-goal minutes, with all four arms receiving identical
+   goals per shard.
+3. Settle cube arm restorability. If the arm is exactly restorable from disk,
+   extend `set_state` and re-run the cube smoke; the models need no retraining
+   because state is used only for env restore and scoring. If it is not, the
+   cube contributes training only and that must be stated plainly.
+4. Merge shard outcome files by global goal index and compute the pooled
+   bootstrap comparison.
 5. Queue seeds 2 and 3 only after step 4 shows the measure separates systems.
 
 ## Repository state
 
-- `code/dino_wm` on Marvin at `338a0b4`, with untracked helper scripts
-  (`aggregate_planning.py`, `done_check_cube.py`, `planpath_check_cube.py`,
-  `step_check_cube.py`) not yet committed.
-- `project-docs` at `144f712`, pushed to
-  `origin/task/human-plan-current-update`.
-- Local `dino_wm` working tree has uncommitted edits that predate the cluster
-  commits; reconcile against the cluster before using it.
+- `code/dino_wm` on marvin at `4f865ff`, with `plan.py` carrying the
+  uncommitted goal-rejection plus sharding work (being committed).
+- Untracked helper scripts remain in `code/dino_wm` and `scratch/`.
 
 ## Notes
 
-- The prepaid DeepSeek API balance is negative and the CLAIX self-hosted
-  endpoint is unavailable while RWTH is in system maintenance. Free DeepSeek V4
-  Flash workers run through `opencode --model opencode/deepseek-v4-flash-free`.
-- Prediction error is not reported and will not be; planning success is the
-  single measure.
+- DeepSeek workers run through `claix-deepseek` against the self-hosted
+  endpoint; the prepaid API balance is negative.
+- The cube env runs behind a multiprocess vector env (`env/venv.py`). Printing
+  inside it kills the worker with `EOFError`; diagnose the cube with standalone
+  single-process scripts instead.
+- Prediction error is not reported. Planning success is the single measure.
