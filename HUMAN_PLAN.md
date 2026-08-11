@@ -496,11 +496,31 @@ on granular against a cutoff of 1.77.
 Two things follow. The machinery works end to end for both the colour-only and
 the depth-aware systems, which is the real news. But no comparison can be read
 from these numbers: one or two goals per system is nothing, and the fact that
-everything passed on the easy goals is itself a warning. If a large share of the
-hundred goals turn out to be this easy, all four systems will score near the top
-and the measure will not be able to separate them. That is worth watching when
-the first full run of a hundred goals comes back; if it happens, the goals need
-to be harder, not the rule changed after the fact.
+everything passed was a warning.
+
+**That warning has now been measured, and it is serious.** The hundred goals were
+reconstructed exactly as the evaluation builds them, and the distance from each
+goal's starting position to its target was compared against the same cutoff the
+evaluation uses. The result: on rope, 39 of the 100 goals already sit inside the
+cutoff before the planner does anything at all. On granular, 82 of 100 do.
+
+Those goals are free passes. No system can fail them, and no system can be
+distinguished by them. On granular that leaves 18 goals out of a hundred doing
+any real work, which is far too few to support the comparison the study exists to
+make. Had the eight queued evaluations run as they stand, they would have
+returned four nearly identical scores and answered nothing.
+
+The cause is simple and fixable: a goal is built by taking a recorded moment and
+looking five steps ahead. Five steps is not far enough for the scene to change
+much, so start and target are often already the same thing by the measure's own
+standard. The repair is to build goals further ahead, and a sweep over longer
+look-aheads is running now to find the shortest one that makes the goals
+genuinely hard. Nothing about the metric, the cutoff, or the success rule
+changes — those were measured honestly and stay as they are. Only the goals get
+harder.
+
+This is the right kind of failure to find before spending the machine time, not
+after.
 
 **Where the work is stuck right now: the queue.** All eight full evaluation runs
 are submitted and waiting. The cluster currently estimates they will not begin
@@ -511,11 +531,12 @@ might is a second, much emptier group of machines on the same cluster, whose
 graphics cards are a different and slightly older model. Whether the runs work
 there at all is being tested now with a short probe.
 
-**OGBench-Cube is trained but has never been planned with.** Its four first-seed
-models are finished, but no cube evaluation has ever been run, and none is
-queued. Whether cube planning works at all is unknown and is being tested now
-with a cheap two-goal probe. Until that is answered, the cube contributes
-training only.
+**OGBench-Cube is trained but has never been planned with, and now we know why.**
+Its four first-seed models are finished, but a cheap two-goal probe failed in
+twelve seconds: the cube has no planning settings file at all. Rope and granular
+each have one; the cube was never given one when it joined the study. That is a
+small, contained gap and it is being filled now. Until it is filled the cube
+contributes training only.
 
 One measure has had to be dropped. Prediction error was only ever supporting
 context, and it is now clear it cannot be produced for these runs at all: the
@@ -531,23 +552,24 @@ Training progress alone does not answer the research question.
 
 ## The next useful results, in order
 
-1. **The eight rope and granular evaluations finish.** This is the one that
-   turns twelve trained models into the study's first real answer. It is waiting
-   on machines, not on work. First check when it lands: how many of the hundred
-   goals every system passes — if nearly all of them pass everywhere, the goals
-   are too easy and have to be made harder before any comparison means anything.
-2. **Cube planning is shown to work, or shown to be broken.** A cheap two-goal
-   probe answers this today. If it works, four more evaluations join the queue
-   and the study gains its strongest-depth task. If it does not, the cube stays a
-   trained-only task and nothing else is delayed.
-3. **The second and third seeds start training.** Twenty-four runs, and the
-   cluster is the bottleneck, so they are worth queueing as soon as it is clear
-   the first seed's evaluation actually produces usable numbers. Starting them
-   before that risks training twenty-four models against a measure that cannot
-   separate anything.
+1. **Make the goals hard enough to be worth running.** This now comes first,
+   because the eight queued evaluations would otherwise answer nothing. A sweep
+   over longer look-aheads is running; it names the shortest one that leaves
+   fewer than fifteen free passes in a hundred on both tasks. Then the eight runs
+   are resubmitted against those goals.
+2. **Give the cube its planning settings.** A one-file gap, being filled and
+   re-tested now. If it works, four cube evaluations join the queue and the study
+   gains its strongest-depth task.
+3. **Find out whether the second group of machines can be used.** The eight runs
+   currently wait until 15 August on the congested machines. A probe on the
+   less-busy ones is running. If it passes, the same work starts days earlier.
+4. **The second and third seeds start training.** Twenty-four runs. They are
+   worth queueing only once the first seed's evaluation is known to produce
+   numbers that can separate the systems. Starting them sooner risks training
+   twenty-four models against a measure that cannot tell them apart.
 
-Only the first of these can change what the study is able to say. The other two
-protect it from waiting later.
+The first item is the one that decides whether the study can conclude anything.
+The rest remove waiting.
 
 ## Current decisions
 
