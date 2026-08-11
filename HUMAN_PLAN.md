@@ -510,14 +510,39 @@ any real work, which is far too few to support the comparison the study exists t
 make. Had the eight queued evaluations run as they stand, they would have
 returned four nearly identical scores and answered nothing.
 
-The cause is simple and fixable: a goal is built by taking a recorded moment and
-looking five steps ahead. Five steps is not far enough for the scene to change
-much, so start and target are often already the same thing by the measure's own
-standard. The repair is to build goals further ahead, and a sweep over longer
-look-aheads is running now to find the shortest one that makes the goals
-genuinely hard. Nothing about the metric, the cutoff, or the success rule
-changes — those were measured honestly and stay as they are. Only the goals get
-harder.
+The cause is simple: a goal is built by taking a recorded moment and looking five
+steps ahead. Five steps is not far enough for the scene to change much, so start
+and target are often already the same thing by the measure's own standard.
+
+The obvious repair — look further ahead — was tried and does not go far enough.
+Looking ahead further does help a great deal, especially on granular, but it runs
+into a wall:
+
+| look-ahead | rope free passes | granular free passes |
+|---|---|---|
+| 5 (current) | 39 of 100 | 82 of 100 |
+| 8 | 39 | 56 |
+| 10 | 27 | 30 |
+| 15 | 22 | 30 |
+| 20 or more | impossible | impossible |
+
+Twenty and beyond are impossible because every recorded run is only twenty frames
+long. So fifteen is the furthest the data allows, and even there a fifth of the
+rope goals and nearly a third of the granular goals are still free passes.
+
+The repair that does work is to refuse the trivial goals outright. When a goal is
+drawn, the distance from its start to its target is checked against the very same
+cutoff the scoring uses, and if the goal is already satisfied it is thrown away
+and another is drawn. That leaves a hundred goals that every system must actually
+work for, costs no training and no new data, and is applied before any system is
+consulted, so all four receive exactly the same goals. It is being implemented
+now.
+
+Nothing about the metric, the cutoff, or the success rule changes — those were
+measured honestly and stay as they are. Only the goals get harder. One thing must
+be said plainly in the write-up: refusing trivial goals selects for moments where
+the scene really moves, so the reported success rates describe non-trivial goals
+rather than an unfiltered sample.
 
 This is the right kind of failure to find before spending the machine time, not
 after.
@@ -545,11 +570,13 @@ The effect: the study's main comparison point cannot be evaluated at all, and tw
 of the eight queued runs would have died three minutes in. Both the failure and
 its cause were reproduced on the cluster before any change was proposed.
 
-The fix is small and is being made now: depth that a system never looks at should
-be discarded, not treated as an error. The refusal itself is correct and stays in
-place for the systems that do use depth — that guard is what prevents depth from
-being silently misinterpreted, which is the failure that already cost this study
-once.
+The fix is in and checked both ways. Depth that a system never looks at is now
+discarded instead of treated as an error, and the colour-only rope evaluation
+runs to completion again. The refusal itself is correct and stays in place for
+the systems that do use depth: a real-depth rope evaluation was run immediately
+afterwards and confirmed to still receive genuine depth through the checked
+conversion. That guard is what prevents depth from being silently
+misinterpreted, which is the failure that already cost this study once.
 
 **OGBench-Cube is trained but has never been planned with, and now we know why.**
 Its four first-seed models are finished, but a cheap two-goal probe failed in
