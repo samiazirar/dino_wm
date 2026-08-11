@@ -189,11 +189,20 @@ one per task and seed. Within a set everything is identical except the visual
 system: same data, same ordering, same starting point, same length. Comparisons
 are made inside a set first, then summarised across seeds.
 
-The three tasks are Rope, Granular and OGBench-Cube. One piece of work stands
-between the plan and the run list: OGBench-Cube's environment and its image and
-depth data do not exist yet, so the third slot in the run configuration still
-holds the retired flat push-T entry. It must be replaced before anything is
-launched.
+The three tasks are Rope, Granular and OGBench-Cube. All three now sit in the
+run configuration; the retired flat push-T entry is gone and OGBench-Cube's
+pictures and depth exist on the cluster.
+
+**The first seed is fully trained — all twelve runs.** Rope and Granular
+finished their three depth-aware systems on 7 August, OGBench-Cube finished all
+four of its systems on 10 August, and the two colour-only Rope and Granular runs
+were already finished from earlier. Every one reached the same fixed length of
+53,500 updates and 100 passes over its data, so the matched sets really are
+matched. Twelve of the thirty-six runs are therefore done, and they are exactly
+the twelve that make up one complete comparison.
+
+The remaining twenty-four are the second and third seeds. They have not been
+started.
 
 ## How one run is trained
 
@@ -283,8 +292,8 @@ Rope and Granular have real depth across all training frames, all validation
 frames, the fixed prediction protocol, and every planning start. Their
 colour-only runs for the first seed are fully trained with 100 held-out
 prediction episodes each; those results are preserved and still valid. Their
-depth-aware runs were trained against the rejected estimated depth and must be
-retrained against the real thing.
+depth-aware runs have now been retrained against the real thing and are finished,
+as have all four OGBench-Cube runs — the whole first seed, twelve runs, exists.
 
 The Rope real-depth preparation was blocked by a small bug: a file-path naming
 mismatch between how the depth records were written and how the checking step
@@ -338,7 +347,11 @@ flawless simulator depth. That is unfamiliar input in its own right, which is
 precisely the effect the zero-depth and shuffled-depth comparisons exist to
 separate — and another reason not to drop either of them.
 
-No matched comparison, aggregate result, winner or conclusion exists yet.
+No matched comparison, aggregate result, winner or conclusion exists yet. What
+does exist, for the first time, is a working path from a trained model to a
+planning score for both kinds of system — colour-only and depth-aware alike —
+and one complete first seed of trained models waiting for that path to be run at
+full scale.
 
 ## Where this sits in the field
 
@@ -366,7 +379,8 @@ One complete matched seed on Rope and Granular using real depth, followed by
 their planning evaluation. These two tasks can deliver the project's first
 genuine depth result without anything new being built.
 
-The first three items on this list are now done, and the fourth is running.
+All four items on this list are now done. What remains is running the evaluation
+itself, which is waiting for machines.
 
 1. **Settled.** The success rule is fixed: pool the individual goal outcomes
    from every seed into one collection, then resample that collection to get a
@@ -378,9 +392,9 @@ The first three items on this list are now done, and the fourth is running.
 3. **Done.** The cube task points at its regenerated data. Its depth is wired
    through the same checked path as rope and granular, confirmed by a short test
    run in which the depth genuinely reached the visual system.
-4. **Running.** The six rope and granular depth-aware runs are retraining
-   against real depth, between a third and three quarters of the way through.
-   The four cube runs are queued behind them.
+4. **Done.** The six rope and granular depth-aware runs finished retraining
+   against real depth on 7 August, and the four cube runs finished on 10 August.
+   All twelve first-seed models exist.
 
 Getting from a trained model to an actual planning score turned out to need
 several repairs, each of which would have produced nothing or nonsense:
@@ -409,41 +423,84 @@ the first time, and it produced a real score: a rope goal reached, at a distance
 of 0.48 against the measured cutoff of 1.13. That is the first time anything in
 this project has travelled from a trained model to an actual planning result.
 
-Measuring it also settled the cost question. One goal costs about 80 seconds to
-set up and about 65 seconds to plan and score, so a hundred goals take roughly
-four hours against a job limit of just under eight. It fits with room to spare,
-and no planning setting has to be weakened to make it fit. Usefully, the scores
-are written to disk before the diagrams are drawn, so a run that is cut off
-while drawing still keeps its results.
+Measuring it suggested the cost question was settled. One goal took about 80
+seconds to set up and about 65 seconds to plan and score, so a hundred goals
+should take roughly four hours against a job limit of just under eight. That
+estimate turned out to be wrong in practice, and finding out cost a day.
 
-**One real obstacle remains, and it is the important one.** The depth-aware
-systems cannot yet be planned with at all. Depth in this study comes from
-recorded files that accompany each saved run. Planning does not replay recorded
-runs — it steers the simulator into situations that were never recorded — so
-there is no stored depth to look up, and the code that hands pictures to the
-visual system receives none.
+**The obstacle that blocked the whole comparison is now gone.** Until 7 August
+the depth-aware systems could not be planned with at all. Depth came from
+recorded files that accompany each saved run, and planning does not replay
+recorded runs — it steers the simulator into situations that were never
+recorded — so there was no stored depth to look up.
 
-The good news is that it refuses rather than pretends. The depth-aware system
-explicitly rejects a missing or blank depth input instead of quietly filling in
-zeros, so there was never any danger of a plausible-looking result secretly
-produced without depth. This was confirmed by running it, not by reading it: a
-planning attempt on a part-trained granular model stopped with exactly that
-refusal.
+The repair landed and has been checked three ways. The simulator's drawing
+routine returns five channels, of which the code was keeping three and throwing
+the depth away; it now keeps it. That live depth is then converted into exactly
+the same form the recorded training files use, and the conversion was compared
+line for line against the program that produced the training depth: it is the
+identical formula, reading the same per-task constants from the same stored
+description of the task. On rope, the depth the live simulator produces spans
+9.51 to 24.06 metres against the recorded description's 24.064 — they agree.
+This mattered because depth scaled even slightly wrong would look entirely
+normal while quietly corrupting the study's central comparison.
 
-The repair is well defined. The simulator already computes depth every time it
-draws a picture — the drawing routine returns five channels and the existing
-code keeps three and discards the depth. The recorded depth these systems were
-trained on came from that very channel. So the fix is to stop discarding it and
-convert it to the same form the recorded files use, for which the project holds
-an exact, fixed conversion per task. It is a contained change, but it has to be
-right: depth that is scaled or aligned even slightly wrong would look entirely
-normal and quietly corrupt the study's central comparison — the same failure
-that estimated depth already caused once. So it gets its own careful piece of
-work rather than being rushed in alongside everything else.
+The third check is the one that counts: depth-aware planning has actually run
+and written scores. The system that gets real depth and the system that gets
+depth from the wrong moment have both produced planning results on rope, and
+real depth has produced one on granular too. Nothing is being taken on trust
+from the code.
 
-Until that lands, the colour-only runs can be planned and the depth-aware ones
-cannot, so no comparison can be completed yet. The colour-only planning for the
-first seed of rope and granular is running now.
+**What went wrong on 8 August, and what it cost.** All eight full evaluation
+runs — the ones that take a trained model and try a hundred goals — were
+launched and all eight died at the eight-hour limit. That alone would have been
+survivable, except for how the program saved its work: it wrote every score at
+the very end, after all hundred goals. A run that finished ninety goals wrote
+down nothing. Eight runs, days of machine time, no saved scores. The runs were
+also silent for their last five hours, so there was no way to tell whether they
+were merely slow or stuck.
+
+The repair was to save as the run goes: the goals are now worked through in
+batches of ten, and the scores for each batch are written to disk immediately.
+A run cut off now loses at most nine goals' work instead of all hundred. Each
+batch also prints how long it took, so a stall shows its exact location instead
+of five silent hours. This was proved rather than assumed — a small run was
+deliberately cut short by its time limit, and the goals it had already finished
+were sitting safely on disk with correct scores. The runs also moved to a
+day-long queue instead of the eight-hour one.
+
+Why they needed more than eight hours is still open. The new batch timings will
+answer it on the next attempt.
+
+**What the first scores actually say — very little, so far.** Four systems have
+each produced planning scores on one or two goals: colour-only rope, real-depth
+rope, wrong-moment-depth rope, and real-depth granular. Every attempt succeeded.
+The distances are 0.48, 0.48 and 0.49 on rope against a cutoff of 1.13, and 1.08
+on granular against a cutoff of 1.77.
+
+Two things follow. The machinery works end to end for both the colour-only and
+the depth-aware systems, which is the real news. But no comparison can be read
+from these numbers: one or two goals per system is nothing, and the fact that
+everything passed on the easy goals is itself a warning. If a large share of the
+hundred goals turn out to be this easy, all four systems will score near the top
+and the measure will not be able to separate them. That is worth watching when
+the first full run of a hundred goals comes back; if it happens, the goals need
+to be harder, not the rule changed after the fact.
+
+**Where the work is stuck right now: the queue.** All eight full evaluation runs
+are submitted and waiting. The cluster currently estimates they will not begin
+until 15 August — four days of waiting, on the machines that answer the study's
+question. This is not a fault in the study; it is contention with other users.
+Asking for a shorter time limit does not move them forward. The one lever that
+might is a second, much emptier group of machines on the same cluster, whose
+graphics cards are a different and slightly older model. Whether the runs work
+there at all is being tested now with a short probe.
+
+**OGBench-Cube is trained but has never been planned with.** Its four first-seed
+models are finished, but no cube evaluation has ever been run, and none is
+queued. Whether cube planning works at all is unknown and is being tested now
+with a cheap two-goal probe. Until that is answered, the cube contributes
+training only.
 
 One measure has had to be dropped. Prediction error was only ever supporting
 context, and it is now clear it cannot be produced for these runs at all: the
@@ -457,6 +514,26 @@ alone as the measure, which is what the study said it would be judged on.
 The later milestone is the full matrix, then the comparisons, figures and paper.
 Training progress alone does not answer the research question.
 
+## The next useful results, in order
+
+1. **The eight rope and granular evaluations finish.** This is the one that
+   turns twelve trained models into the study's first real answer. It is waiting
+   on machines, not on work. First check when it lands: how many of the hundred
+   goals every system passes — if nearly all of them pass everywhere, the goals
+   are too easy and have to be made harder before any comparison means anything.
+2. **Cube planning is shown to work, or shown to be broken.** A cheap two-goal
+   probe answers this today. If it works, four more evaluations join the queue
+   and the study gains its strongest-depth task. If it does not, the cube stays a
+   trained-only task and nothing else is delayed.
+3. **The second and third seeds start training.** Twenty-four runs, and the
+   cluster is the bottleneck, so they are worth queueing as soon as it is clear
+   the first seed's evaluation actually produces usable numbers. Starting them
+   before that risks training twenty-four models against a measure that cannot
+   separate anything.
+
+Only the first of these can change what the study is able to say. The other two
+protect it from waiting later.
+
 ## Current decisions
 
 - Every task in the study must supply real simulator depth. No task uses
@@ -468,7 +545,15 @@ Training progress alone does not answer the research question.
   demonstrably tracks what moves.
 - PushT-3D is kept for continuity but does not carry the decisive comparison.
 - OGBench-Cube is adopted only if its depth is verified the same way Rope and
-  Granular were — by measurement, not assumption.
+  Granular were — by measurement, not assumption. Its depth passed that test and
+  its first-seed models are trained, but it only joins the comparison once its
+  planning is shown to run.
+- Planning runs save their scores as they go, in batches of ten goals, so a run
+  cut off by the cluster keeps everything it finished. Saving only at the end
+  once cost eight full runs.
+- Depth used at planning time is converted with the identical formula and the
+  identical per-task constants as the recorded training depth. This was checked
+  against the program that produced the training files, not assumed.
 - Depth-aware runs are retrained against real depth, never relabelled.
 - The success cutoffs are measured from data and now fixed in the configuration
   for both rope and granular. No placeholder remains.
