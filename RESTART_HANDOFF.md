@@ -67,36 +67,27 @@ to `plan.py` for this: the full 100-goal list is sampled with the existing
 seeded RNG and then sliced, so shard *k* holds identical goals for all four
 systems, and every per-goal record carries its global index.
 
-## OGBench-Cube — planning runs, but its scores are meaningless
+## OGBench-Cube — both defects fixed, now fully scored
 
 Its goals are sound: only 2 of 100 are free passes (median start-to-goal
 distance 0.124 m against a 0.04 m cutoff), far better than rope or granular.
+Two defects were found and both are now fixed.
 
-Two defects were found and only the first is fixed:
+1. `4f865ff`. The live wrapper emitted no `proprio`. The four cube models were
+   trained on a constant-zero length-1 proprio placeholder (dataset
+   `proprio_dim=1`, checkpoint `Conv1d in_chans=1`), so the wrapper now emits
+   exactly that. Note for the write-up: **the cube models carry no real
+   proprioceptive input.**
+2. `ef7d8d6`. A 2-goal smoke wrote `state_dist [0.0, 0.0]`, `success
+   [1.0, 1.0]`. Exact zeros are not measurements. `set_state` wrote **only**
+   `object_joint_0.qpos[:3]` — the block — and never the arm, so the arm never
+   contacted the block, the block's final position was decided purely by
+   settling and was therefore independent of the actions, and goal rollout and
+   evaluation rollout landed bit-identically. The full joint state (21-dim
+   qpos, 20-dim qvel) was recovered from `cube-single-play-v0.npz` and is now
+   restored before replay.
 
-1. **Fixed, committed `4f865ff`.** The live wrapper emitted no `proprio`. The
-   four cube models were trained on a constant-zero length-1 proprio
-   placeholder (dataset `proprio_dim=1`, checkpoint `Conv1d in_chans=1`), so
-   the wrapper now emits exactly that. Note for the write-up: **the cube models
-   carry no real proprioceptive input.**
-2. **Open, blocking.** A 2-goal smoke wrote `state_dist [0.0, 0.0]`,
-   `success [1.0, 1.0]`. Exact zeros are not measurements. Cause established by
-   direct experiment (job 26972557, `<root>/scratch/probe_cube_move.py`):
-   `set_state` writes **only** `object_joint_0.qpos[:3]` — the block — and never
-   the arm. Replaying recorded actions leaves the block bit-identical in x and y
-   across all 15 steps; it only falls ~0.10 m in z and stops. Recorded motion is
-   0.357 m; simulated motion 0.098 m; final positions 0.406 m apart. Because the
-   arm never contacts the block, the block's final position is decided purely by
-   settling and is therefore **independent of the actions**, so the goal rollout
-   and the evaluation rollout land bit-identically and every distance is exactly
-   zero.
-
-   Open question being answered now: does the raw dataset store enough to
-   restore the arm exactly (full qpos/qvel), or only the 14-dim end-effector
-   state, which would need inverse kinematics and would not be exact?
-
-The four cube evaluations that were submitted (26972104–07) were **cancelled**
-— they would have burned machine time producing zeros.
+All four cube arms have since scored 100 real goals each.
 
 ## The planner was replaying the simulator 30 times per goal
 
@@ -205,6 +196,18 @@ for all three tasks as `<task>-dinocular-s1-planzero`, alongside a new
 **Always pass `PLAN_TAG` with `CKPT_DIR_OVERRIDE`.** The output directory is
 derived from the *parent* of the checkpoint directory, so without a tag the
 ablation would overwrite the real run's scores.
+
+## Exact next action
+
+1. Read job `27163665` (the 3-goal ablation smoke). Confirm it loads and that
+   its scores differ from the real-depth run's first three goals. Then submit
+   the full 100-goal ablation for all three tasks, with `PLAN_TAG=planzero`.
+2. Let the twelve seed-2 evaluations finish, then run
+   `python3 aggregate_planning.py <root>/outputs` for the pooled paired
+   comparison across both seeds — 200 paired goals per task, which narrows the
+   interval by about a third against seed 1 alone.
+3. If the interval is still too wide for a verdict, add goals rather than
+   seeds: a goal top-up costs evaluation only, no training.
 
 ## Repository state
 
