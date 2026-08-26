@@ -1,7 +1,7 @@
 # DinocularWorldModel restart handoff
 
 Status: CAN RESTART
-Last updated: 2026-08-11 (late)
+Last updated: 2026-08-26
 
 ## Goal
 
@@ -31,8 +31,14 @@ All twelve first-seed runs at step 53,500 / 100 epochs.
 - ogbench_cube, all four arms:
   `<root>/outputs/matched-seeds-20260807/ogbench_cube-<arm>-s1`
 
-Seeds 2 and 3 (24 runs) not started. Hold them until the first seed's
-evaluation is shown to separate systems.
+**Seed 2 is also complete** — all twelve runs at step 53,500, finished
+2026-08-17, in `<root>/outputs/matched-seeds-seed23/<task>-<arm>-s2`. They were
+launched with `tools/matched_run_seed23.sbatch`. 24 of 36 runs trained.
+
+Seed 3 was cancelled deliberately, not lost. The paired bootstrap resamples
+*goals*, so precision is bought far more cheaply by adding goals than by adding
+seeds; a second seed only answers "did one trained model happen to ignore
+depth", and one extra seed answers that as well as two.
 
 ## The goal-difficulty repair — works, and changes the cost model
 
@@ -118,68 +124,87 @@ colour-only baseline with its different encoder — report python RNG state
 `1b09c9baf493` and identical next draws `[413, 389, 204, 613, 183, 235]`.
 So the goal list is identical across arms, and the paired analysis is valid.
 
+## Seed 1 is fully evaluated — and the result is a null
+
+Every arm has 100 scored goals (rope shuffled-depth has 90; a top-up job for
+goals 90-99 is queued). Success rate:
+
+| task | colour-only | real depth | zero depth | wrong-moment depth | no planning |
+|---|---|---|---|---|---|
+| rope | 0.44 | 0.50 | 0.46 | 0.13 | 0.02 |
+| granular | 0.60 | 0.60 | 0.55 | 0.02 | — |
+| cube | 0.99 | 0.97 | 0.98 | 0.13 | 0.00 |
+
+Paired bootstrap, depth minus colour: rope +6.0 pp [-5, +17], granular
++0.0 pp [-10, +10], cube -2.0 pp [-5, 0]. Rope's upper limit sits above the
+study's own 10-point threshold, so seed 1 cannot yet exclude the effect the
+study exists to detect. It is "no evidence of a benefit", not "evidence of no
+benefit".
+
+Three measurements now constrain the interpretation:
+
+1. The frozen encoder responds to depth as strongly as to RGB — relative
+   feature displacement 0.162 vs 0.138 on rope, 0.180 vs 0.184 on granular
+   (`scratch/depth_sensitivity.py`, job 26975609). It is not blind, and
+   re-declaring the affine to a tabletop range moves the response under 10%,
+   so a scale mismatch is not hiding the effect either.
+2. Depth carries geometry RGB does not. A full-resolution 224^2 patchwise ridge
+   predicting the depth residual from RGB scores test R2 of 0.35 to -1.32 on
+   rope and 0.02 to 0.58 on granular. The earlier 32x32 pooled probe's R2 ~0.95
+   was a smoothing artefact and must not be cited.
+3. Deleting depth costs nothing; corrupting it is catastrophic (-33 to -84 pp).
+
+Because each arm is *trained* under its own depth condition, a constant zero is
+ignorable: that model simply learned an RGB-only solution and matched. Wrong-
+moment depth cannot be ignored, because it is scene-plausible but wrong, so it
+poisons the predictor. The finding is that the predictor does not exploit the
+extra geometry even though it is present and the encoder sees it. The measure
+itself is sound: it spans 0.00 to 0.13 to 0.50 to 0.99.
+
+Camera geometry is not the explanation. All four PyFleX rope/granular cameras
+sit at the same 45-degree elevation, differing only in azimuth
+(`env/deformable_env/src/sim/sim_env/cameras.py`), so the original four-camera
+probe was one viewpoint tested four times. OGBench-Cube renders from
+`cube_env.py:539` 'front' at 20 degrees — already near-grazing — and shows the
+identical null. (`scene_env.py`'s 38.8-degree 'front' belongs to the *scene*
+task, not the cube.) A grazing-camera regeneration was proposed and cancelled.
+
 ## What is running
 
-Eight seed-1 evaluations, all started 2026-08-12, `n_evals=100`:
+Fourteen jobs, all submitted 2026-08-26 on `mlgpu_medium` (free, uncontended):
 
-- rope × 4 arms: `26973067`–`26973070`, `mlgpu_short`, `--time=07:55:00`.
-  Setup (100 goal rollouts) takes ~110 min, then ~30 min per 10-goal chunk.
-- granular × 4 arms: `26974609`–`26974612`, `mlgpu_medium`,
-  `--time=23:55:00`. Moved off the 7:55 limit deliberately: granular carries
-  12,774 particles against rope's 1,965 and had not finished goal construction
-  in 2.5 h, so at `mlgpu_short` it would have died having persisted nothing.
+- **Seed-2 evaluation, 12 runs**, `27163640`-`27163651`, `--time=23:55:00`.
+  This needed a one-line launcher repair: `tools/plan_run.sbatch` searched only
+  `matched-seeds-20260807` and `seed1-matched-20260806` for a checkpoint, so
+  every seed-2 job would have exited 4. It now searches
+  `matched-seeds-seed23` as well.
+- **Rope shuffled-depth seed-1 top-up**, `27163655`, `goal_shard_start=90
+  goal_shard_count=10`. Its original job timed out at 7:55 with 90 goals
+  written; `aggregate_planning.py` merges shard files by global goal index.
+- **Plan-time depth-ablation smoke**, `27163665`, 3 goals on rope.
 
-The eight old `sgpu_medium` jobs `26950256`–`26950263` were cancelled; they
-predate every repair above. `mlgpu_*` is free and starts immediately;
-`sgpu_*` is congested.
+Seed-1 timings, for sizing: rope 6:54-7:55 (one TIMEOUT at `mlgpu_short`),
+granular 10:17-16:21. Everything now runs at 23:55 to remove that failure mode.
 
-**First real discriminating scores** (rope, first 10 goals): colour-only
-`[T,F,T,T,T,F,F,F,F,T]` = 5/10, real depth `[T,F,T,T,F,T,F,F,F,T]` = 5/10 —
-agreeing on 8 of 10 goals individually. Distances span 0.275 to 2.271 against
-the 1.132 cutoff. Before the goal repair every goal passed.
+## The plan-time depth ablation
 
-## The analysis would have reported nothing
+The diagnostic that turns the null into a finding, and it needs no retraining.
+Take the trained *real-depth* model and withhold depth at planning time only.
+If it still plans, that model never used depth and the parity is fully
+explained. If it collapses, it did use depth — and zero-depth's equal score then
+means an RGB-only solution is simply as good, which is the stronger claim.
 
-`aggregate_planning.py` parsed run directories as `<task>-<arm>-s<seed>`, but
-plan.py writes `plan-<task>-<arm>-s<seed>`. Every real run was skipped and it
-printed "No run directories matched" — it would have produced nothing at the
-end of the whole evaluation. Fixed in `256cca8`.
+`dinocular_zerodepth.yaml` differs from `dinocular.yaml` by exactly one key,
+`neutralize_depth_at_encoder_input`, and plan.py rebuilds the model from the
+run directory's own `hydra.yaml`. So the ablation is a directory holding a
+symlink to the real run's checkpoints and a copy of its `hydra.yaml` with that
+one flag flipped — nothing retrained, and the real run never written to. Built
+for all three tasks as `<task>-dinocular-s1-planzero`, alongside a new
+`CKPT_DIR_OVERRIDE` in `tools/plan_run.sbatch`.
 
-The same commit makes the bootstrap **paired** over goal indices, which is both
-the literal reading of the settled rule and much tighter now that goal identity
-across arms is verified: on the first ten rope goals the 95% range narrows from
-±40 to ±30 points. It falls back to independent resampling only when two arms
-differ in goal count, which happens only while runs are in flight.
-
-## Exact next action
-
-1. Watch the eight runs. Rope should finish inside its 7:55; if a run is cut
-   off, chunked persistence keeps every completed goal and the remainder can be
-   topped up with `goal_shard_start` / `goal_shard_count`. Note sharding does
-   NOT reduce setup cost — each shard re-rolls all 100 goals — so prefer one
-   long job per run and use shards only to fill gaps.
-2. Run `python3 aggregate_planning.py <root>/outputs` for the pooled paired
-   comparison.
-3. Repair the cube (below). It is the only remaining task-level gap.
-4. Queue seeds 2 and 3 only after step 2 shows the measure separates systems.
-
-## Cube repair — recovered, not yet applied
-
-The missing source `cube-single-play-v0.npz` was re-downloaded and sits at
-`<root>/code/.ogbench_data/cube-single-play-v0.npz`. It holds the full joint
-state (21-dim qpos, 20-dim qvel) the stored episodes lack. Re-running is
-deterministic for physics (only colour rendering differs slightly, which does
-not matter because images are never rewritten) and costs ~0.07 s per episode,
-about two minutes for all 1000.
-
-Remaining work: append per-frame qpos/qvel to each episode h5 using the
-generator's own alignment (`tools/generate_ogbench_dataset_expert.py:140`
-`_best_window`, `OBJECT_QPOS = slice(15, 18)`, frame `t` ↔ npz index
-`start + t`); make `set_state` write the full state and call `mj_forward`;
-prove one episode's replay follows the recorded block path (final distance was
-0.406 m off); then rerun the 2-goal smoke and check the distances are no longer
-exactly zero. Nothing needs retraining — state is used only for env restore and
-scoring. Do NOT rewrite images, depth or actions.
+**Always pass `PLAN_TAG` with `CKPT_DIR_OVERRIDE`.** The output directory is
+derived from the *parent* of the checkpoint directory, so without a tag the
+ablation would overwrite the real run's scores.
 
 ## Repository state
 
