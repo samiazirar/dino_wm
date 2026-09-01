@@ -1,7 +1,7 @@
 # DinocularWorldModel restart handoff
 
 Status: CAN RESTART
-Last updated: 2026-08-26
+Last updated: 2026-09-01
 
 ## Goal
 
@@ -20,7 +20,7 @@ tasks (rope, granular, ogbench_cube), three seeds — 36 runs.
 - Docs repo: `~/dinocular-wm-worktrees/project-docs`, branch
   `task/human-plan-current-update`.
 
-## Training — unchanged, first seed complete
+## Training — seeds 1 and 2 complete, 24 of 36 runs
 
 All twelve first-seed runs at step 53,500 / 100 epochs.
 
@@ -115,67 +115,89 @@ colour-only baseline with its different encoder — report python RNG state
 `1b09c9baf493` and identical next draws `[413, 389, 204, 613, 183, 235]`.
 So the goal list is identical across arms, and the paired analysis is valid.
 
-## Seed 1 is fully evaluated — and the result is a null
+## Both seeds are fully evaluated: 24 runs, 200 paired goals per task
 
-Every arm has 100 scored goals (rope shuffled-depth has 90; a top-up job for
-goals 90-99 is queued). Success rate:
+All twelve seed-2 evaluations completed 2026-08-26, as did the rope
+shuffled-depth top-up. Every arm now has 100 goals per seed.
 
-| task | colour-only | real depth | zero depth | wrong-moment depth | no planning |
+| task | seed | colour-only | real depth | zero depth | wrong-moment depth |
 |---|---|---|---|---|---|
-| rope | 0.44 | 0.50 | 0.46 | 0.13 | 0.02 |
-| granular | 0.60 | 0.60 | 0.55 | 0.02 | — |
-| cube | 0.99 | 0.97 | 0.98 | 0.13 | 0.00 |
+| rope | 1 | 0.44 | 0.50 | 0.46 | 0.15 |
+| rope | 2 | 0.50 | 0.53 | 0.52 | 0.13 |
+| granular | 1 | 0.60 | 0.60 | 0.55 | 0.02 |
+| granular | 2 | 0.64 | 0.68 | 0.52 | 0.07 |
+| cube | 1 | 0.99 | 0.97 | 0.98 | 0.13 |
+| cube | 2 | 0.97 | 1.00 | 0.98 | 0.16 |
 
-Paired bootstrap, depth minus colour: rope +6.0 pp [-5, +17], granular
-+0.0 pp [-10, +10], cube -2.0 pp [-5, 0]. Rope's upper limit sits above the
-study's own 10-point threshold, so seed 1 cannot yet exclude the effect the
-study exists to detect. It is "no evidence of a benefit", not "evidence of no
-benefit".
+Paired bootstrap over shared goals, both seeds pooled, n=200
+(`tools/aggregate_planning_pairs.py`):
 
-Three measurements now constrain the interpretation:
+| comparison | rope | granular | cube |
+|---|---|---|---|
+| depth − colour | +4.5 [−3.5, +12.5] | +2.0 [−4.5, +8.5] | +0.5 [−1.5, +2.5] |
+| **depth − zero depth** | +2.5 [−5.5, +10.5] | **+10.5 [+3.0, +17.5]** | −0.5 [−1.5, +3.0] |
+| wrong-moment − depth | −37.5 [−45.0, −30.0] | −59.5 [−66.5, −52.0] | −84.0 [−89.0, −78.5] |
 
-1. The frozen encoder responds to depth as strongly as to RGB — relative
-   feature displacement 0.162 vs 0.138 on rope, 0.180 vs 0.184 on granular
-   (`scratch/depth_sensitivity.py`, job 26975609). It is not blind, and
-   re-declaring the affine to a tabletop range moves the response under 10%,
-   so a scale mismatch is not hiding the effect either.
-2. Depth carries geometry RGB does not. A full-resolution 224^2 patchwise ridge
-   predicting the depth residual from RGB scores test R2 of 0.35 to -1.32 on
-   rope and 0.02 to 0.58 on granular. The earlier 32x32 pooled probe's R2 ~0.95
-   was a smoothing artefact and must not be cited.
-3. Deleting depth costs nothing; corrupting it is catastrophic (-33 to -84 pp).
+**The broad question comes back negative, and now with a usable bound.**
+A depth-aware system does not beat a colour-only one. Granular and cube exclude
+the study's own 10-point threshold outright; rope's upper limit is +12.5, still
+just above it.
 
-Because each arm is *trained* under its own depth condition, a constant zero is
-ignorable: that model simply learned an RGB-only solution and matched. Wrong-
-moment depth cannot be ignored, because it is scene-plausible but wrong, so it
-poisons the predictor. The finding is that the predictor does not exploit the
-extra geometry even though it is present and the encoder sees it. The measure
-itself is sound: it spans 0.00 to 0.13 to 0.50 to 0.99.
+**The narrow question comes back positive on granular.** Real depth beats
+uninformative zero depth by +10.5 pp, interval clear of zero. This is the
+comparison rope and granular were admitted to carry, and granular carries it.
+
+One honest caveat: the granular per-seed gaps are −5 and −16, so the pooled
+significance leans on seed 2. That is between-seed variance, which more goals
+cannot reduce — only a third seed could. Rope shows nothing (+2.5), and the
+cube is at a 98% ceiling where nothing can be separated.
+
+## The trained real-depth model does use depth
+
+The plan-time ablation smoke settles the interpretation that was open. Take the
+model *trained* on real depth and withhold depth at planning time only, on the
+same three rope goals:
+
+| goal | real depth | depth withheld |
+|---|---|---|
+| 0 | 0.483 (pass) | 3.178 (fail) |
+| 1 | 2.228 (fail) | 2.603 (fail) |
+| 2 | 0.211 (pass) | 1.705 (fail) |
+
+2/3 becomes 0/3 and the distances blow up six- to eightfold. So the model is
+not ignoring depth — it genuinely relies on it once trained with it.
+
+That kills the easy explanation for the parity and leaves the stronger claim:
+the zero-depth arm, trained without depth, learns an RGB-only solution that is
+just as good on rope and the cube. Depth is used when supplied, but on those
+two tasks it buys nothing that RGB does not already provide. Granular is the
+exception where it does.
+
+Full 100-goal ablations for all three tasks are queued as `27232597`-`27232599`.
+
+Together with the three earlier measurements — the encoder responds to depth as
+strongly as to RGB (0.162 vs 0.138 on rope); depth carries geometry RGB cannot
+predict (full-resolution residual R² 0.35 to −1.32 on rope, 0.02 to 0.58 on
+granular); and the 32×32 pooled probe's R² ~0.95 was a smoothing artefact that
+must not be cited — the picture is coherent and is a real finding rather than a
+broken benchmark. The measure separates systems whenever there is something to
+separate: 0.00 → 0.14 → 0.50 → 0.98.
 
 Camera geometry is not the explanation. All four PyFleX rope/granular cameras
 sit at the same 45-degree elevation, differing only in azimuth
 (`env/deformable_env/src/sim/sim_env/cameras.py`), so the original four-camera
 probe was one viewpoint tested four times. OGBench-Cube renders from
 `cube_env.py:539` 'front' at 20 degrees — already near-grazing — and shows the
-identical null. (`scene_env.py`'s 38.8-degree 'front' belongs to the *scene*
-task, not the cube.) A grazing-camera regeneration was proposed and cancelled.
+same parity. (`scene_env.py`'s 38.8-degree 'front' belongs to the *scene* task,
+not the cube.) A grazing-camera regeneration was proposed and cancelled.
 
 ## What is running
 
-Fourteen jobs, all submitted 2026-08-26 on `mlgpu_medium` (free, uncontended):
+Three full 100-goal plan-time depth ablations, `27232597` (rope), `27232598`
+(granular), `27232599` (cube), `mlgpu_medium`, `--time=23:55:00`.
 
-- **Seed-2 evaluation, 12 runs**, `27163640`-`27163651`, `--time=23:55:00`.
-  This needed a one-line launcher repair: `tools/plan_run.sbatch` searched only
-  `matched-seeds-20260807` and `seed1-matched-20260806` for a checkpoint, so
-  every seed-2 job would have exited 4. It now searches
-  `matched-seeds-seed23` as well.
-- **Rope shuffled-depth seed-1 top-up**, `27163655`, `goal_shard_start=90
-  goal_shard_count=10`. Its original job timed out at 7:55 with 90 goals
-  written; `aggregate_planning.py` merges shard files by global goal index.
-- **Plan-time depth-ablation smoke**, `27163665`, 3 goals on rope.
-
-Seed-1 timings, for sizing: rope 6:54-7:55 (one TIMEOUT at `mlgpu_short`),
-granular 10:17-16:21. Everything now runs at 23:55 to remove that failure mode.
+Seed-1 and seed-2 evaluation timings, for sizing: rope 6:51-7:59, granular
+10:10-14:32, cube 1:13-1:32.
 
 ## The plan-time depth ablation
 
@@ -199,15 +221,15 @@ ablation would overwrite the real run's scores.
 
 ## Exact next action
 
-1. Read job `27163665` (the 3-goal ablation smoke). Confirm it loads and that
-   its scores differ from the real-depth run's first three goals. Then submit
-   the full 100-goal ablation for all three tasks, with `PLAN_TAG=planzero`.
-2. Let the twelve seed-2 evaluations finish, then run
-   `python3 aggregate_planning.py <root>/outputs` for the pooled paired
-   comparison across both seeds — 200 paired goals per task, which narrows the
-   interval by about a third against seed 1 alone.
-3. If the interval is still too wide for a verdict, add goals rather than
-   seeds: a goal top-up costs evaluation only, no training.
+1. Read `27232597`-`27232599` when they finish. The full ablation either
+   confirms the 3-goal smoke at scale or overturns it; the whole interpretation
+   above rests on it.
+2. Decide on seed 3 for **granular only**. Its zero-depth effect is the study's
+   one positive result and its per-seed gaps are −5 and −16, so a third seed
+   would settle whether +10.5 pp is real or a seed-2 artefact. Four runs, not
+   twelve. Goals cannot substitute here: this is between-seed variance.
+3. Rope and cube need neither more seeds nor more goals. Cube is at a 98%
+   ceiling; rope's depth−zero interval is centred near zero.
 
 ## Repository state
 
